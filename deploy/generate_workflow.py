@@ -58,6 +58,8 @@ jobs:
           persist-credentials: false
       - name: Test deployment validation and rollback
         run: python3 -m unittest discover -s deploy/tests -v
+      - name: Install Nginx for isolated HTTPS integration tests
+        run: sudo apt-get update -qq && sudo apt-get install -y nginx
       - name: Exercise first deployment and rollback with real containers
         run: python3 deploy/tests/integration_docker.py
       - name: Check generated workflow is current

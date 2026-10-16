@@ -46,4 +46,6 @@ GitHub、文档、通知原先共用 tool_services 包，这里按各自线上�
 
 8 个 MCP 的密钥在 GitHub Actions Secrets 中按服务前缀管理，普通配置在各服务 `deploy/runtime.json`。新增服务通过自身 `deploy/runtime.json` 自动发现并首次部署，无需修改中央名单或工作流。推送 `main` 只测试、构建并部署新增或有改动的服务，注册新服务不会重部署其他 MCP；仅更新密钥时，在 Actions 选择服务并运行部署工作流。
 
-部署保留数据挂载和旧容器，检查失败自动恢复。密钥清单、操作步骤、服务器路径及恢复方法见 [部署说明](deploy/README.md)。
+新增 MCP 只需声明容器内监听端口，首次部署自动分配并保存空闲主机端口，生成 `https://zendesk.smlershou.top/<服务名>/mcp` 的 Nginx 路由，并验证公开 HTTPS 工具发现与鉴权。更新复用原端口，只修改对应 MCP；既有服务路由与别名保持兼容。
+
+部署保留数据挂载和旧容器，服务器检查失败恢复对应容器与路由。新增和修改规范见 [AGENTS.md](AGENTS.md)，密钥清单、操作步骤、服务器路径及恢复方法见 [部署说明](deploy/README.md)。

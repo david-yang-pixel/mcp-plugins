@@ -21,7 +21,9 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200 if healthy else 503, {'ok': healthy, 'version': os.environ.get('VERSION')})
 
     def do_POST(self):
-        if self.headers.get('Authorization') != 'Bearer ' + os.environ['TEST_API_KEY']:
+        if os.environ.get('FAIL_PUBLIC') == 'true' and self.headers.get('X-Forwarded-Proto') == 'https':
+            self.reply(503, {'error': 'synthetic public probe failure'})
+        elif self.headers.get('Authorization') != 'Bearer ' + os.environ['TEST_API_KEY']:
             self.reply(401, {'error': 'unauthorized'})
         else:
             self.reply(200, {'jsonrpc': '2.0', 'id': 1, 'result': {'tools': [{'name': 'fixture', 'inputSchema': {'type': 'object'}}]}})

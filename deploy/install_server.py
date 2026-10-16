@@ -35,8 +35,10 @@ def main():
             public = key.with_suffix(".pub").read_text().strip()
         payload = {"helper": base64.b64encode((ROOT / "deploy/server.py").read_bytes()).decode(),
                    "targets": base64.b64encode((ROOT / "deploy/targets.json").read_bytes()).decode(), "public_key": public}
-        script = '''import base64,json,pathlib,os,shutil,time,hashlib
+        script = '''import base64,json,pathlib,os,shutil,time,hashlib,fcntl
 os.umask(0o077)
+lock=open('/run/lock/mcp-plugins-deploy.lock','w')
+fcntl.flock(lock,fcntl.LOCK_EX)
 data=json.loads(PAYLOAD)
 stamp=str(time.time_ns())
 authorized=pathlib.Path('/root/.ssh/authorized_keys')
@@ -45,6 +47,10 @@ if data['public_key'] and any(line.rstrip().endswith(' mcp-plugins-ci') for line
  raise RuntimeError('CI key already exists; use --update-helper-only')
 for folder in ['/etc/mcp-plugins','/opt/mcp-plugins','/opt/mcp-plugins/releases','/opt/mcp-plugins/state']:
  p=pathlib.Path(folder);p.mkdir(mode=0o700,exist_ok=True);p.chmod(0o700)
+candidate=base64.b64decode(data['helper'])
+namespace={'__name__':'mcp_admin_install','__file__':'/usr/local/sbin/mcp-plugins-deploy'}
+exec(compile(candidate,namespace['__file__'],'exec'),namespace)
+nginx_result=namespace['install_nginx_include']()
 for target,field,mode in [('/usr/local/sbin/mcp-plugins-deploy','helper',0o700),('/etc/mcp-plugins/targets.json','targets',0o600)]:
  p=pathlib.Path(target)
  if p.exists():shutil.copy2(p,str(p)+'.bak-'+stamp)
@@ -57,7 +63,7 @@ if data['public_key']:
  authorized.parent.mkdir(mode=0o700,exist_ok=True)
  line='restrict,command="/usr/local/sbin/mcp-plugins-deploy" '+data['public_key']+'\\n'
  authorized.write_text(existing.rstrip()+'\\n'+line);authorized.chmod(0o600)
-print(json.dumps({'host_key':pathlib.Path('/etc/ssh/ssh_host_ed25519_key.pub').read_text().strip(),'helper_sha256':hashlib.sha256(pathlib.Path('/usr/local/sbin/mcp-plugins-deploy').read_bytes()).hexdigest()}))
+print(json.dumps({'host_key':pathlib.Path('/etc/ssh/ssh_host_ed25519_key.pub').read_text().strip(),'helper_sha256':hashlib.sha256(pathlib.Path('/usr/local/sbin/mcp-plugins-deploy').read_bytes()).hexdigest(),'nginx':nginx_result}))
 '''.replace("PAYLOAD", repr(json.dumps(payload)))
         result = json.loads(run(["ssh", "-o", "BatchMode=yes", args.host, "python3 -"], input=script.encode()).stdout)
         if not args.update_helper_only:
@@ -71,6 +77,7 @@ print(json.dumps({'host_key':pathlib.Path('/etc/ssh/ssh_host_ed25519_key.pub').r
             run(["gh", "variable", "set", "MCP_DEPLOY_KNOWN_HOSTS", "--repo", args.repo, "--body", known.read_text()])
             print("Dedicated CI key stored; verified it cannot run arbitrary SSH commands")
         print("Installed helper SHA-256:", result["helper_sha256"])
+        print("Managed Nginx include:", "installed with graceful reload" if result['nginx']['changed'] else "already installed")
 
 
 if __name__ == "__main__":

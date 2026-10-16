@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Exercise real Docker first deployment, update, rollback and peer isolation in CI."""
+"""Exercise real Docker, automatic ports, TLS Nginx routes and transactional rollback."""
 import hashlib
 import json
 import os
 from pathlib import Path
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import time
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -19,7 +21,7 @@ def docker(*args):
     return subprocess.check_output(['docker', *args], stderr=subprocess.DEVNULL, text=True).strip()
 
 
-def port():
+def free_port():
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0))
         return sock.getsockname()[1]
@@ -28,75 +30,132 @@ def port():
 def main():
     prefix = 'mcp-ci-' + secrets.token_hex(4)
     image = prefix + ':fixture'
+    nginx = shutil.which('nginx')
+    if not nginx:
+        raise RuntimeError('Install nginx to run the isolated proxy integration test')
     docker('build', '-q', '-t', image, str(Path(__file__).parent / 'fixtures/mcp'))
     image_id = json.loads(docker('image', 'inspect', image))[0]['Id']
     key = secrets.token_urlsafe(24)
     revision = 'a' * 40
-    targets = {}
-    for suffix in ('peer', 'new', 'fail'):
-        selected_port = port()
-        while selected_port in {t['port'] for t in targets.values()}:
-            selected_port = port()
-        targets[prefix + '-' + suffix] = server.resolve_target(prefix + '-' + suffix, {
-            'port': selected_port, 'auth_key': 'TEST_API_KEY', 'health_path': '/health',
-            'env_keys': ['TEST_API_KEY', 'PORT', 'FAIL_HEALTH', 'VERSION'], 'secret_file_paths': {}}, {})
-    real_validate = server.validate_request
-    real_wait = server.wait_healthy
+    target = server.resolve_target(prefix + '-new', {
+        'container_port': 8000, 'auth_key': 'TEST_API_KEY', 'health_path': '/health',
+        'env_keys': ['TEST_API_KEY', 'PORT', 'FAIL_HEALTH', 'FAIL_PUBLIC', 'VERSION'], 'secret_file_paths': {}}, {})
+    real_validate, real_wait, real_public = server.validate_request, server.wait_healthy, server.wait_public
 
     def local_image(*args):
         real_validate(*args)
-        return image  # Registry transport is tested by production CI; this fixture is local.
+        return image  # Registry transport uses the existing production CI path.
 
-    def short_wait(service, target, env, ready):
-        return real_wait(service, target, env, ready, timeout=6)
-
-    def payload(target, fail='false', version='1'):
+    def payload(fail='false', version='1', public='false'):
         return {'digest': 'sha256:' + 'b' * 64, 'target': target,
-                'environment': {'TEST_API_KEY': key, 'PORT': str(target['port']), 'FAIL_HEALTH': fail, 'VERSION': version},
+                'environment': {'TEST_API_KEY': key, 'PORT': '8000', 'FAIL_HEALTH': fail, 'FAIL_PUBLIC': public, 'VERSION': version},
                 'files': {}, 'settings': None, 'registry_user': 'fixture', 'registry_token': 'synthetic',
                 'deployer_sha256': hashlib.sha256(Path(server.__file__).read_bytes()).hexdigest()}
 
+    process = None
     try:
-        with tempfile.TemporaryDirectory(prefix=prefix) as directory, \
-             patch.object(server, 'ROOT', Path(directory)), \
-             patch.object(server, 'validate_request', side_effect=local_image), \
-             patch.object(server, 'pull_image', return_value=image_id), \
-             patch.object(server, 'wait_healthy', side_effect=short_wait):
+        with tempfile.TemporaryDirectory(prefix=prefix) as directory:
             root = Path(directory)
-            peer, new, fail = (prefix + '-' + suffix for suffix in ('peer', 'new', 'fail'))
-            server.deploy(peer, revision, payload(targets[peer]), targets[peer])
-            peer_id = server.inspect(peer)['Id']
-            server.deploy(new, revision, payload(targets[new]), targets[new])
-            state = json.loads((root / 'state' / (new + '.json')).read_text())
-            assert state['previous_container'] is None
-            assert (root / 'state' / (new + '.json')).stat().st_mode & 0o777 == 0o600
-            original_id = state['container']
-            try:
-                server.deploy(fail, revision, payload(targets[fail], fail='true'), targets[fail])
-            except server.DeployError:
-                pass
-            else:
-                raise AssertionError('Unhealthy first deployment was accepted')
-            assert server.inspect_optional(fail) is None
-            assert not (root / 'state' / (fail + '.json')).exists()
-            server.deploy(new, 'c' * 40, payload(targets[new], version='2'), targets[new])
-            updated_id = server.inspect(new)['Id']
-            assert updated_id != original_id
-            saved_state = (root / 'state' / (new + '.json')).read_text()
-            try:
-                server.deploy(new, 'd' * 40, payload(targets[new], fail='true', version='bad'), targets[new])
-            except server.DeployError:
-                pass
-            else:
-                raise AssertionError('Unhealthy update was accepted')
-            assert server.inspect(new)['Id'] == updated_id
-            assert (root / 'state' / (new + '.json')).read_text() == saved_state
-            assert server.inspect(peer)['Id'] == peer_id
-            print('PASS: first deploy, failed-first cleanup, update, rollback, private files, and unchanged peer container')
+            root.chmod(0o711)
+            routes = root / 'routes';routes.mkdir()
+            config = root / 'nginx.conf'
+            cert = root / 'cert.pem';private = root / 'key.pem'
+            subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+                '-keyout', str(private), '-out', str(cert), '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost'],
+                check=True, capture_output=True)
+            https_port = free_port()
+            config.write_text(f'''pid {root}/nginx.pid;
+error_log {root}/nginx-error.log;
+events {{ worker_connections 32; }}
+http {{
+ access_log off;
+ client_body_temp_path {root}/client_temp;
+ proxy_temp_path {root}/proxy_temp;
+ server {{
+  listen 127.0.0.1:{https_port} ssl;
+  server_name localhost;
+  ssl_certificate {cert};
+  ssl_certificate_key {private};
+  location /existing/ {{ return 200 "unchanged"; }}
+  location / {{ return 404; }}
+ }}
+}}
+''')
+            def nginx_command(*args):
+                return server.command([nginx, '-p', str(root), '-c', str(config), *args])
+            with patch.object(server, 'ROOT', root / 'deploy'), \
+                 patch.object(server, 'NGINX_ROUTES', routes), patch.object(server, 'NGINX_SITE', config), \
+                 patch.object(server, 'PUBLIC_ORIGIN', f'https://localhost:{https_port}'), \
+                 patch.object(server, 'validate_request', side_effect=local_image), \
+                 patch.object(server, 'pull_image', return_value=image_id), \
+                 patch.object(server, 'nginx_command', side_effect=nginx_command), \
+                 patch.object(server, 'reload_nginx', side_effect=lambda: nginx_command('-s', 'reload')), \
+                 patch.object(server, 'wait_healthy', side_effect=lambda s, t, e, r: real_wait(s, t, e, r, timeout=6)), \
+                 patch.object(server, 'wait_public', side_effect=lambda s, e, t, r=None: real_public(s, e, t, r, timeout=6)), \
+                 patch.dict(os.environ, {'SSL_CERT_FILE': str(cert)}):
+                config.write_text(server.nginx_include_content(config.read_text()))
+                nginx_command('-t')
+                process = subprocess.Popen([nginx, '-p', str(root), '-c', str(config), '-g', 'daemon off;'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                nginx_pid = str(process.pid)
+                for _ in range(50):
+                    if (root / 'nginx.pid').exists() and (root / 'nginx.pid').read_text().strip() == nginx_pid: break
+                    if process.poll() is not None: raise RuntimeError('Isolated Nginx failed to start')
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError('Isolated Nginx PID was not ready')
+                site_before = config.read_bytes()
+                peer, new, fail, public_fail = (prefix + '-' + suffix for suffix in ('peer', 'new', 'fail', 'public-fail'))
+                def state(service):
+                    return json.loads((server.ROOT / 'state' / (service + '.json')).read_text())
+                def deploy(service, rev=revision, **kwargs):
+                    server.deploy(service, rev, payload(**kwargs), target)
+                def reject(service, rev=revision, **kwargs):
+                    try: deploy(service, rev, **kwargs)
+                    except server.DeployError: return
+                    raise AssertionError('Invalid deployment was accepted')
+
+                deploy(peer)
+                peer_id = server.inspect(peer)['Id']
+                peer_route = (routes / (peer + '.conf')).read_bytes()
+                deploy(new)
+                initial = state(new)
+                assert initial['previous_container'] is None
+                assert initial['target']['port'] != state(peer)['target']['port']
+                assert initial['target']['container_port'] == 8000
+                assert initial['public_url'].endswith('/' + new + '/mcp')
+                assert (server.ROOT / 'state' / (new + '.json')).stat().st_mode & 0o777 == 0o600
+                reject(fail, fail='true')
+                reject(public_fail, public='true')
+                for name in (fail, public_fail):
+                    assert server.inspect_optional(name) is None
+                    assert not (server.ROOT / 'state' / (name + '.json')).exists()
+                    assert not (routes / (name + '.conf')).exists()
+                deploy(new, 'c' * 40, version='2')
+                updated = state(new)
+                assert updated['container'] != initial['container']
+                assert updated['target']['port'] == initial['target']['port']
+                saved_state = (server.ROOT / 'state' / (new + '.json')).read_bytes()
+                saved_route = (routes / (new + '.conf')).read_bytes()
+                reject(new, 'd' * 40, public='true', version='bad')
+                assert server.inspect(new)['Id'] == updated['container']
+                assert (server.ROOT / 'state' / (new + '.json')).read_bytes() == saved_state
+                assert (routes / (new + '.conf')).read_bytes() == saved_route
+                assert server.inspect(peer)['Id'] == peer_id
+                assert (routes / (peer + '.conf')).read_bytes() == peer_route
+                assert (root / 'nginx.pid').read_text().strip() == nginx_pid
+                assert config.read_bytes() == site_before
+                real_public(peer, payload()['environment'], state(peer)['target'], revision, timeout=6)
+                print('PASS: automatic distinct/stable ports, real TLS routes, bad-key rejection, first-deploy cleanup, public-failure rollback, unchanged peer and graceful Nginx reload')
+                nginx_command('-s', 'quit')
+                process.wait(timeout=15)
+                process = None
     finally:
+        if process and process.poll() is None:
+            process.terminate()
+            try: process.wait(timeout=10)
+            except subprocess.TimeoutExpired: process.kill();process.wait()
         ids = docker('container', 'ls', '--all', '--filter', 'name=^/' + prefix + '-', '--format', '{{.ID}}').splitlines()
-        if ids:
-            docker('rm', '-f', *ids)
+        if ids: docker('rm', '-f', *ids)
         docker('image', 'rm', image)
 
 

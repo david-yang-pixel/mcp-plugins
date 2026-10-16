@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 from catalog import SERVICES, spec, target, secret_items
+from server import wait_public, DeployError
 
 
 def payload(service, digest, env=os.environ):
@@ -69,6 +70,14 @@ def main():
         result = subprocess.run(args, input=json.dumps(data).encode(), timeout=1500)
         if result.returncode:
             raise ValueError("Remote deployment did not pass verification")
+    try:
+        url = wait_public(service, data['environment'], data['target'])
+    except DeployError:
+        raise ValueError('Server completed deployment; external HTTPS verification failed and needs investigation') from None
+    print('Verified public MCP URL:', url)
+    if os.environ.get('GITHUB_STEP_SUMMARY'):
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+            summary.write(f'### {service}\n\nVerified MCP endpoint: [{url}]({url})\n')
 
 
 if __name__ == "__main__":

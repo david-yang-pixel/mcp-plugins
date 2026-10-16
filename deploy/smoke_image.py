@@ -2,6 +2,7 @@
 """Start an image with disposable credentials and verify MCP authentication."""
 import json
 import secrets
+import socket
 import subprocess
 import sys
 import time
@@ -22,7 +23,11 @@ def main():
         env["ZENDESK_SESSION_SUPERVISOR_ENABLED"] = "false"
     args = ["docker", "run", "-d", "--name", name, "--network", target['network']]
     if target['network'] == 'bridge':
-        args += ['--publish', f"127.0.0.1:{target['port']}:{target['port']}"]
+        # CI host ports need not match the production allocation or container port.
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            target['port'] = listener.getsockname()[1]
+        args += ['--publish', f"127.0.0.1:{target['port']}:{target['container_port']}"]
     for k, v in env.items():
         args += ["-e", k + "=" + v]
     subprocess.run(args + [image], check=True, capture_output=True)

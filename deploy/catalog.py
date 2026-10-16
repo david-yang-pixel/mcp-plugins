@@ -88,9 +88,12 @@ def validate_catalog(root=ROOT):
     for service in discover(root):
         contract = target(service, root)
         port = contract['port']
-        if port in ports:
+        if port == 'auto':
+            pass
+        elif port in ports:
             raise ValueError('Duplicate service port: ' + service + ' and ' + ports[port])
-        ports[port] = service
+        else:
+            ports[port] = service
         for name in ('Dockerfile', 'pyproject.toml', 'uv.lock', 'requirements.runtime.txt'):
             if not (root / service / name).is_file():
                 raise ValueError('Missing build input: ' + service + '/' + name)
