@@ -1,0 +1,35 @@
+{
+  "verification": {
+    "application_source": "byte-identical to runtime snapshot"
+  },
+  "files": [
+    {
+      "path": "src/source_mcp/process_health.py",
+      "sha256": "f5e69c9adf5c8a91040ccf6cf86db8581c0bc0bab03211c380bff981fbfb1d79"
+    },
+    {
+      "path": "src/source_mcp/git_ops.py",
+      "sha256": "fdc97c6752e6e92d3d0d5721d1274671745bbb0982f91024ee72332c8e37867f"
+    },
+    {
+      "path": "src/source_mcp/__init__.py",
+      "sha256": "e2dfdcaf386b2ee9befa8ca8c14331b63053cd4b56a7ba114c5db67b012f246e"
+    },
+    {
+      "path": "src/source_mcp/runtime.py",
+      "sha256": "08338c9c1a32312dc8627491b40e6ebb040f25531013a7acb7e75c9919d413d6"
+    },
+    {
+      "path": "src/source_mcp/settings.py",
+      "sha256": "6878dd239133402259f3b6156634c9b9a1b834e8fb5bdcb6f50dbb402bf9bc42"
+    },
+    {
+      "path": "src/source_mcp/app.py",
+      "sha256": "78e519b4113ca1fa2c5140bfec2d1dbdca384a1c1b17c1c7a4a8c829f84a14d3"
+    },
+    {
+      "path": "src/source_mcp/errors.py",
+      "sha256": "d07f52331d5b17176c781077305e366c17048e306cec08a5173807f2899b0aef"
+    }
+  ]
+}

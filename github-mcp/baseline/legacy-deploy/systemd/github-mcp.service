@@ -1,0 +1,19 @@
+[Unit]
+Description=GitHub MCP service for zd-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tool-services/code
+EnvironmentFile=/etc/github-mcp/env
+Environment=PYTHONPATH=/opt/tool-services/code/src
+ExecStart=/opt/tool-services/code/.venv/bin/python -c 'from tool_services.app import main_github; main_github()'
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

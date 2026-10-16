@@ -1,0 +1,77 @@
+{
+  "source": {
+    "scope": "server",
+    "name": "zendesk-browser-relay"
+  },
+  "runtime_files": {
+    "README.md": {
+      "sha256": "4fe2daa4d3bb8a5959ecfed72fc2d9844bae1aab6722333f173f0d5bd9d72bb8",
+      "bytes": 6962
+    },
+    "pyproject.toml": {
+      "sha256": "c982457dc582cfe90d9922d1345cf0e62a9a72bc1ce7ed068709f26d643d1f39",
+      "bytes": 811
+    },
+    "src/zendesk_browser_relay/__init__.py": {
+      "sha256": "2515233a0cdac6c5447c9dbd6b0d54c89284f191d8cb41473d89b347ee296ae7",
+      "bytes": 50
+    },
+    "src/zendesk_browser_relay/app.py": {
+      "sha256": "0064ab86763d2bfa2ad1d1a242e656f7a436dfeddd2db65826fde871a1585c90",
+      "bytes": 15528
+    },
+    "src/zendesk_browser_relay/auth.py": {
+      "sha256": "ba331865a442f9ee1dd67c8bac31dfcee7d67bf5128632c0eb80df17357affe2",
+      "bytes": 1584
+    },
+    "src/zendesk_browser_relay/browser_relay.py": {
+      "sha256": "1c24e7ad1af9abeac12c42cf90f0d481f1cbfaeba9940ba2df205946d3562261",
+      "bytes": 36697
+    },
+    "src/zendesk_browser_relay/coordination.py": {
+      "sha256": "577ff03d4beab613fdcaa729a877139a58f98205bef01115cc07791097a858a9",
+      "bytes": 64483
+    },
+    "src/zendesk_browser_relay/customer_reply.py": {
+      "sha256": "2e1da2820d4862b71f686111b22b11b97841465f4cb263829f1448af8786ae7c",
+      "bytes": 3948
+    },
+    "src/zendesk_browser_relay/feishu_notifications.py": {
+      "sha256": "ef668a6b594ba90c13f9da63c31623280fb13e219d54cbe08588f075c761a505",
+      "bytes": 3950
+    },
+    "src/zendesk_browser_relay/login.py": {
+      "sha256": "8a052c758ac8ac4eda695f56e5ebd3f73436567d6e8a21728d4223aa8ede5aad",
+      "bytes": 1127
+    },
+    "src/zendesk_browser_relay/login_automation.py": {
+      "sha256": "755b0741ccc1da35302ef5b805fada9350b5ac8ecc5074b95f25da922cbb389c",
+      "bytes": 851
+    },
+    "src/zendesk_browser_relay/mcp.py": {
+      "sha256": "00dffda17f778e396f2ffac10f5670ea54162d1c0a3e296a0eecc6911af318c4",
+      "bytes": 20794
+    },
+    "src/zendesk_browser_relay/result_dispatch.py": {
+      "sha256": "4ab67d919806ad29573ddde2d0ec7f86db5fc8ddf6751b549e022bd10a44cad4",
+      "bytes": 6336
+    },
+    "src/zendesk_browser_relay/schemas.py": {
+      "sha256": "7d42fcc632c9ef252c1e25630343b52884524a4053c490a13411752b186915de",
+      "bytes": 7105
+    },
+    "src/zendesk_browser_relay/session_supervisor.py": {
+      "sha256": "19f7e4aee1b989f061565a61ae14c968e1f4c4c6b78e2a4d9960357b65c97186",
+      "bytes": 826
+    },
+    "src/zendesk_browser_relay/settings.py": {
+      "sha256": "5ca53857102a100770a91ab1c640adb45841a2f98b2409534152e45c482b5dda",
+      "bytes": 5374
+    },
+    "src/zendesk_browser_relay/zendesk_freshness.py": {
+      "sha256": "09c603ed6f9009e00e81670ecbf1cff2c5c099b75539a956e251193c42a9fb0c",
+      "bytes": 7512
+    }
+  },
+  "assembly": "runtime source bytes preserved"
+}

@@ -1,0 +1,38 @@
+[project]
+name = "db-gateway"
+version = "0.1.0"
+description = "Standalone Teleport DB proxy and read-only DB Gateway MCP/API"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp",
+    "httpx",
+    "pexpect>=4.9",
+    "pydantic>=2.0",
+    "pydantic-settings",
+    "pyotp>=2.9",
+    "pyyaml",
+    "structlog",
+]
+
+[project.scripts]
+db-gateway = "db_gateway.app:run_db_gateway_app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/db_gateway"]
+

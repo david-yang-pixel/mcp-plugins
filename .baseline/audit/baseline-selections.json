@@ -1,0 +1,681 @@
+{
+  "db-gateway": {
+    "source": {
+      "scope": "runtime",
+      "name": "db-gateway"
+    },
+    "reason": "以运行容器的源码、pyproject.toml、uv.lock 和脚本为基线；服务器 /opt/dify-db/src 已逐文件匹配。服务器根目录缺少项目元数据，不能只复制该目录。",
+    "source_sha256": "043d9cb0c5576063b1483d9c784b8d4d007c6156902af4b85d45d5c20f55a640",
+    "source_files": [
+      {
+        "path": "src/db_gateway/__init__.py",
+        "sha256": "b4e4b36884773cae500517d18cdb1bfd4bf85d27e5164ba620e37d5220095013"
+      },
+      {
+        "path": "src/db_gateway/app.py",
+        "sha256": "5bb1c6aaca2881c5be7c357623d62cf2a22cf8f0a2cfb25434f62756ab30f769"
+      },
+      {
+        "path": "src/db_gateway/app_context.py",
+        "sha256": "1a569798b713b5015ab3d9695feb46986f41a2c8a611c72db8d476ff4995f3f6"
+      },
+      {
+        "path": "src/db_gateway/config.py",
+        "sha256": "8941185d824234fa0fc635027553d3400ccca9646aeb2880c2a7ab1d636314dd"
+      },
+      {
+        "path": "src/db_gateway/core.py",
+        "sha256": "9e62ba791caebce4e5b0edb42a6da6db3268bc624235f665bf1211810553dd0c"
+      },
+      {
+        "path": "src/db_gateway/feishu.py",
+        "sha256": "b931fe510282798e0b6d2dbfd32b5f0c76fd13af7507c841dc894ee563d34490"
+      },
+      {
+        "path": "src/db_gateway/log.py",
+        "sha256": "208333950ded6c02e5e92e7c0e7504b6cc47a4b95c31550128a4292ecb065b03"
+      },
+      {
+        "path": "src/db_gateway/mcp.py",
+        "sha256": "5af18cda598db49c8345ee5bb2f22bdaeeb67da3bbd2a2ecae086986985e5971"
+      },
+      {
+        "path": "src/db_gateway/mcp_schema.py",
+        "sha256": "3f090c2a9a8295aa8305ad2c6f7150468e86181966db955fb3a2567642ade266"
+      },
+      {
+        "path": "src/db_gateway/postgres.py",
+        "sha256": "27711a470097076675ffe2d97c2a35ae4d76f0dce8e65a2c7ec0019790ace176"
+      },
+      {
+        "path": "src/db_gateway/teleport.py",
+        "sha256": "e296aca620553d416511cfa61df55a0472e6d2d71b1fbe64682092dda6d6f3a8"
+      },
+      {
+        "path": "src/db_gateway/teleport_auth_web.py",
+        "sha256": "28e74f41d6750f5860caea7b5cd048661afff27dccdc0824bdd176cefc935e83"
+      },
+      {
+        "path": "src/db_gateway/teleport_login.py",
+        "sha256": "7f875406866552198a259feaf403fc987ec9f56ab688415b495d85d7606db91d"
+      },
+      {
+        "path": "src/db_gateway/teleport_tokens.py",
+        "sha256": "dbabdc0eb27bdd7eb798f32607e3d4d047e4cffc8972271db4fba5234fb4d721"
+      }
+    ],
+    "matches_runtime_source": true,
+    "runtime": {
+      "image": "db-gateway:latest",
+      "image_id": "sha256:378972148a4081b135ca2fdf3870bd36dbc04940fc38a8c185048efd4465887e",
+      "container_id": "2885b9c19ee921f6f40befcd5f43716dde36235bd6e32013818674be30391bd8",
+      "started_at": "2026-09-02T20:10:04.820274826Z",
+      "runtime_source": "/app/src",
+      "installed_packages": {
+        "pyyaml": "6.0.3",
+        "yarl": "1.24.2",
+        "structlog": "26.1.0",
+        "frozenlist": "1.8.0",
+        "attrs": "26.1.0",
+        "db-gateway": "0.1.0",
+        "certifi": "2026.6.17",
+        "pyotp": "2.10.0",
+        "httpcore": "1.0.9",
+        "pydantic": "2.13.4",
+        "python-dotenv": "1.2.2",
+        "aiohttp": "3.14.1",
+        "annotated-types": "0.7.0",
+        "aiosignal": "1.4.0",
+        "anyio": "4.14.1",
+        "idna": "3.18",
+        "pydantic_core": "2.46.4",
+        "propcache": "0.5.2",
+        "pydantic-settings": "2.14.2",
+        "pexpect": "4.9.0",
+        "ptyprocess": "0.7.0",
+        "h11": "0.16.0",
+        "aiohappyeyeballs": "2.6.2",
+        "typing-inspection": "0.4.2",
+        "multidict": "6.7.1",
+        "typing_extensions": "4.15.0",
+        "httpx": "0.28.1",
+        "pytest-asyncio": "1.4.0",
+        "pygments": "2.20.0",
+        "packaging": "26.2",
+        "pluggy": "1.6.0",
+        "pytest": "9.1.1",
+        "iniconfig": "2.3.0"
+      },
+      "writable_source_changes": [
+        "C /app/src/db_gateway",
+        "C /app/src/db_gateway/app.py"
+      ]
+    }
+  },
+  "signoz-mcp": {
+    "source": {
+      "scope": "server",
+      "name": "signoz-mcp"
+    },
+    "reason": "采用 /opt/signoz-mcp/code；本次收集范围内所有文件与容器一致。记录容器 app.py 可写层修改和实际依赖。",
+    "source_sha256": "2cd3ff9327b6b256d6aa7ae3ecac6fd81087a879ce835a707c3735c2d9227c69",
+    "source_files": [
+      {
+        "path": "src/signoz_mcp/__init__.py",
+        "sha256": "d6c5d2c97a096bce05c4d49c4d1c0d859d51eafc414ebc3b05003843ba7b4b74"
+      },
+      {
+        "path": "src/signoz_mcp/app.py",
+        "sha256": "c6314650d1e930cb79080cd54596fd84c81964df70b974a1a4e4a13a974fb59a"
+      },
+      {
+        "path": "src/signoz_mcp/settings.py",
+        "sha256": "7cc3369384033cade607c02744968977ecbbe733d393611ca652697689b4b8d2"
+      },
+      {
+        "path": "src/signoz_mcp/structured_tools.py",
+        "sha256": "54b42632a96a4a31dfaa77980c497d7052a6b78e9e34c29e3cd1659b5acf42cb"
+      },
+      {
+        "path": "src/signoz_mcp/sz_runner.py",
+        "sha256": "9dc893c08031f2676310d5dcdb2168cd616221f553ed63fdb81a953170ec4640"
+      }
+    ],
+    "matches_runtime_source": true,
+    "runtime": {
+      "image": "signoz-mcp:latest",
+      "image_id": "sha256:85de4f2b94af5defd28ea15363566b66fec3bf8cc550dd9c43388c642980f2a0",
+      "container_id": "5143b833ee4bbc7f1ce490acd5ca5a481cb53a34bf65fa4bee64c3f41dccc5a7",
+      "started_at": "2026-09-02T20:14:01.294188265Z",
+      "runtime_source": "/app/src",
+      "installed_packages": {
+        "signoz-mcp": "0.2.0",
+        "pip": "25.0.1",
+        "fastapi": "0.140.13",
+        "pyyaml": "6.0.3",
+        "uvicorn": "0.51.0",
+        "watchfiles": "1.2.0",
+        "websockets": "16.1.1",
+        "pydantic": "2.13.4",
+        "uvloop": "0.22.1",
+        "python-dotenv": "1.2.2",
+        "httptools": "0.8.0",
+        "idna": "3.18",
+        "annotated-doc": "0.0.5",
+        "pydantic_core": "2.46.4",
+        "typing_extensions": "4.16.0",
+        "pydantic-settings": "2.14.2",
+        "annotated-types": "0.8.0",
+        "starlette": "1.3.1",
+        "h11": "0.16.0",
+        "click": "8.4.2",
+        "anyio": "4.14.2",
+        "typing-inspection": "0.4.2",
+        "uv": "0.12.0"
+      },
+      "writable_source_changes": [
+        "C /app/src/signoz_mcp",
+        "C /app/src/signoz_mcp/app.py"
+      ]
+    }
+  },
+  "source-mcp": {
+    "source": {
+      "scope": "server",
+      "name": "source-release"
+    },
+    "reason": "采用 /opt/dify-db/build/source-mcp-3741-concurrency2-20260803；源码、测试、README、锁文件等本次收集文件均与运行容器完全一致。不要以 /opt/source-mcp/code 为基线。",
+    "source_sha256": "8996d601da22ac4a8f9a2778950c50593491bdca52ed8a5f74da85c164b97a39",
+    "source_files": [
+      {
+        "path": "src/source_mcp/__init__.py",
+        "sha256": "e2dfdcaf386b2ee9befa8ca8c14331b63053cd4b56a7ba114c5db67b012f246e"
+      },
+      {
+        "path": "src/source_mcp/app.py",
+        "sha256": "78e519b4113ca1fa2c5140bfec2d1dbdca384a1c1b17c1c7a4a8c829f84a14d3"
+      },
+      {
+        "path": "src/source_mcp/errors.py",
+        "sha256": "d07f52331d5b17176c781077305e366c17048e306cec08a5173807f2899b0aef"
+      },
+      {
+        "path": "src/source_mcp/git_ops.py",
+        "sha256": "fdc97c6752e6e92d3d0d5721d1274671745bbb0982f91024ee72332c8e37867f"
+      },
+      {
+        "path": "src/source_mcp/process_health.py",
+        "sha256": "f5e69c9adf5c8a91040ccf6cf86db8581c0bc0bab03211c380bff981fbfb1d79"
+      },
+      {
+        "path": "src/source_mcp/runtime.py",
+        "sha256": "08338c9c1a32312dc8627491b40e6ebb040f25531013a7acb7e75c9919d413d6"
+      },
+      {
+        "path": "src/source_mcp/settings.py",
+        "sha256": "6878dd239133402259f3b6156634c9b9a1b834e8fb5bdcb6f50dbb402bf9bc42"
+      }
+    ],
+    "matches_runtime_source": true,
+    "runtime": {
+      "image": "source-mcp:3741-20260803.2",
+      "image_id": "sha256:3a7d3fbf2845e8bd75c94d5221bdc154d07b24f90015dd7ab23422bb2a55b29a",
+      "container_id": "2284fa141f2d0533f534ad264ab5c4d36567c321b6f6b981bfcbec418b2ba721",
+      "started_at": "2026-09-03T08:59:39.055451149Z",
+      "runtime_source": "/app/src",
+      "installed_packages": {
+        "source-mcp": "0.1.0",
+        "pip": "25.0.1",
+        "fastapi": "0.140.13",
+        "pyyaml": "6.0.3",
+        "uvicorn": "0.51.0",
+        "watchfiles": "1.2.0",
+        "websockets": "16.1.1",
+        "pydantic": "2.13.4",
+        "uvloop": "0.22.1",
+        "python-dotenv": "1.2.2",
+        "httptools": "0.8.0",
+        "idna": "3.18",
+        "annotated-doc": "0.0.5",
+        "pydantic_core": "2.46.4",
+        "typing_extensions": "4.16.0",
+        "pydantic-settings": "2.14.2",
+        "annotated-types": "0.8.0",
+        "starlette": "1.3.1",
+        "h11": "0.16.0",
+        "click": "8.4.2",
+        "anyio": "4.14.2",
+        "typing-inspection": "0.4.2",
+        "uv": "0.12.0"
+      },
+      "writable_source_changes": [
+        "C /app/src/source_mcp"
+      ]
+    }
+  },
+  "github-mcp": {
+    "source": {
+      "scope": "runtime",
+      "name": "github-mcp"
+    },
+    "reason": "保留当前 GitHub 容器的完整 tool_services 包版本。服务器副本只有 docs_tools.py 不同，GitHub 工具、app.py、mcp.py、settings.py 均已匹配，但整包不是同一版本。",
+    "source_sha256": "e2318cddf39265afbfe99e4c57c60818a601de8f999c449bf1009e8ce89684b7",
+    "source_files": [
+      {
+        "path": "src/tool_services/__init__.py",
+        "sha256": "4c4bbc323fcd5bba8bc63afa31daa98aa708bae1bb7f93420326d878dbc56607"
+      },
+      {
+        "path": "src/tool_services/app.py",
+        "sha256": "55e28814e252f0aac36aea7d1046958e9c1fe6959da58d3542928d601c33cdda"
+      },
+      {
+        "path": "src/tool_services/docs_tools.py",
+        "sha256": "9bcc3ce7fa834618cee07f9292c998de5e93c1f4d2183949930ca3c37ac963b2"
+      },
+      {
+        "path": "src/tool_services/github_tools.py",
+        "sha256": "964b665b9cc815c5af43d5ba0a3569a21a209f51b8392a9578a6d9decb7d1c90"
+      },
+      {
+        "path": "src/tool_services/mcp.py",
+        "sha256": "c0bb446e3e264e18b317d7f024da7ccaf3835f7467590fe972334aa01f2174bb"
+      },
+      {
+        "path": "src/tool_services/notification_tools.py",
+        "sha256": "db0e66470d9eaf628336d4d019863fb79afda5ad022cf14873691848d5b32c50"
+      },
+      {
+        "path": "src/tool_services/sandbox_tools.py",
+        "sha256": "9681ef7b42bf253351582f0290d3626655585eda89a3b20eec677ac8e088c3f9"
+      },
+      {
+        "path": "src/tool_services/settings.py",
+        "sha256": "a2068c0a3c452df08f056b743e2736f367de60058ce1dde1f7a26ee32fa65333"
+      }
+    ],
+    "matches_runtime_source": true,
+    "runtime": {
+      "image": "tool-services:latest",
+      "image_id": "sha256:43da7ac7671acec3ed1c18ec8cf04a5afddf822bf77400bdb14e825c555f0453",
+      "container_id": "24480d3599c3927e9a47d0c22fced0ebecf901fbfd8d6f642cbfa08a58eaad4e",
+      "started_at": "2026-09-02T20:15:57.86018621Z",
+      "runtime_source": "/app/src",
+      "installed_packages": {
+        "tool-services": "0.1.0",
+        "pip": "25.0.1",
+        "pyyaml": "6.0.3",
+        "watchfiles": "1.2.0",
+        "fastapi": "0.141.0",
+        "websockets": "16.1.1",
+        "httpcore": "1.0.9",
+        "pydantic": "2.13.4",
+        "uvloop": "0.22.1",
+        "python-dotenv": "1.2.2",
+        "httptools": "0.8.0",
+        "idna": "3.18",
+        "annotated-doc": "0.0.5",
+        "pydantic_core": "2.46.4",
+        "typing_extensions": "4.16.0",
+        "pydantic-settings": "2.14.2",
+        "annotated-types": "0.8.0",
+        "starlette": "1.3.1",
+        "certifi": "2026.7.22",
+        "h11": "0.16.0",
+        "click": "8.4.2",
+        "anyio": "4.14.2",
+        "typing-inspection": "0.4.2",
+        "uvicorn": "0.52.0",
+        "httpx": "0.28.1",
+        "uv": "0.12.0"
+      },
+      "writable_source_changes": [
+        "C /app/src/tool_services",
+        "C /app/src/tool_services/app.py"
+      ]
+    }
+  },
+  "docs-tool-service": {
+    "source": {
+      "scope": "server",
+      "name": "tool-services"
+    },
+    "reason": "采用 /opt/tool-services/code，当前文档容器与其收集文件完全一致。保留完整文档检索和官网读取能力。",
+    "source_sha256": "d3b247492c1f55e8f0348f6151af6c0a5ef3c8bfd827b30afa170a59a6faba5d",
+    "source_files": [
+      {
+        "path": "src/tool_services/__init__.py",
+        "sha256": "4c4bbc323fcd5bba8bc63afa31daa98aa708bae1bb7f93420326d878dbc56607"
+      },
+      {
+        "path": "src/tool_services/app.py",
+        "sha256": "55e28814e252f0aac36aea7d1046958e9c1fe6959da58d3542928d601c33cdda"
+      },
+      {
+        "path": "src/tool_services/docs_tools.py",
+        "sha256": "6b94e366d5cff823b16f1134461420e340bb64489e06776a4fe02a64e5566af6"
+      },
+      {
+        "path": "src/tool_services/github_tools.py",
+        "sha256": "964b665b9cc815c5af43d5ba0a3569a21a209f51b8392a9578a6d9decb7d1c90"
+      },
+      {
+        "path": "src/tool_services/mcp.py",
+        "sha256": "c0bb446e3e264e18b317d7f024da7ccaf3835f7467590fe972334aa01f2174bb"
+      },
+      {
+        "path": "src/tool_services/notification_tools.py",
+        "sha256": "db0e66470d9eaf628336d4d019863fb79afda5ad022cf14873691848d5b32c50"
+      },
+      {
+        "path": "src/tool_services/sandbox_tools.py",
+        "sha256": "9681ef7b42bf253351582f0290d3626655585eda89a3b20eec677ac8e088c3f9"
+      },
+      {
+        "path": "src/tool_services/settings.py",
+        "sha256": "a2068c0a3c452df08f056b743e2736f367de60058ce1dde1f7a26ee32fa65333"
+      }
+    ],
+    "matches_runtime_source": true,
+    "runtime": {
+      "image": "tool-services:latest",
+      "image_id": "sha256:293a6a806085797799cafdaa269ed0cce2b03a37471fe10ce9556dfee95d4f21",
+      "container_id": "5dd5b329fee331b47f8a8258ac8965eda84fced16388dec4b33ad543d53baceb",
+      "started_at": "2026-09-20T17:28:54.132131378Z",
+      "runtime_source": "/app/src",
+      "installed_packages": {
+        "tool-services": "0.1.0",
+        "pip": "25.0.1",
+        "pyyaml": "6.0.3",
+        "watchfiles": "1.2.0",
+        "fastapi": "0.141.1",
+        "click": "8.5.0",
+        "httpcore": "1.0.9",
+        "pydantic-settings": "2.15.0",
+        "uvloop": "0.22.1",
+        "httptools": "0.8.0",
+        "annotated-doc": "0.0.5",
+        "python-dotenv": "1.2.3",
+        "pydantic_core": "2.46.5",
+        "typing_extensions": "4.16.0",
+        "uvicorn": "0.53.0",
+        "idna": "3.20",
+        "annotated-types": "0.8.0",
+        "pydantic": "2.13.5",
+        "anyio": "4.15.1",
+        "typing-inspection": "0.4.4",
+        "certifi": "2026.7.22",
+        "h11": "0.16.0",
+        "websockets": "17.1",
+        "starlette": "1.6.0",
+        "httpx": "0.28.1",
+        "uv": "0.12.17"
+      },
+      "writable_source_changes": [
+        "C /app/src/tool_services"
+      ]
+    }
+  },
+  "notification-service": {
+    "source": {
+      "scope": "runtime",
+      "name": "notification-service"
+    },
+    "reason": "保留当前通知容器的完整 tool_services 包版本。notification_tools.py 与服务器及本地独立通知工具一致；服务器 app.py 已使用不同的 MCP/SSE 处理，不能静默合并为线上同版本。",
+    "source_sha256": "c9b3efe4aeb0c6d9096ba6d34ef042531f37b5a9223b408d9ed7a0673f5f0e53",
+    "source_files": [
+      {
+        "path": "src/tool_services/__init__.py",
+        "sha256": "4c4bbc323fcd5bba8bc63afa31daa98aa708bae1bb7f93420326d878dbc56607"
+      },
+      {
+        "path": "src/tool_services/app.py",
+        "sha256": "54c28a69a1bab3eb6ce00945606a4794f306e5b39575e9d78f2d88da2b59ff03"
+      },
+      {
+        "path": "src/tool_services/docs_tools.py",
+        "sha256": "9bcc3ce7fa834618cee07f9292c998de5e93c1f4d2183949930ca3c37ac963b2"
+      },
+      {
+        "path": "src/tool_services/github_tools.py",
+        "sha256": "f6b8e91ba8cbbcf45ecba443671dfcc70a1474cf7375f06652da193c0b510511"
+      },
+      {
+        "path": "src/tool_services/mcp.py",
+        "sha256": "c0bb446e3e264e18b317d7f024da7ccaf3835f7467590fe972334aa01f2174bb"
+      },
+      {
+        "path": "src/tool_services/notification_tools.py",
+        "sha256": "db0e66470d9eaf628336d4d019863fb79afda5ad022cf14873691848d5b32c50"
+      },
+      {
+        "path": "src/tool_services/sandbox_tools.py",
+        "sha256": "9681ef7b42bf253351582f0290d3626655585eda89a3b20eec677ac8e088c3f9"
+      },
+      {
+        "path": "src/tool_services/settings.py",
+        "sha256": "a2068c0a3c452df08f056b743e2736f367de60058ce1dde1f7a26ee32fa65333"
+      }
+    ],
+    "matches_runtime_source": true,
+    "runtime": {
+      "image": "tool-services:latest",
+      "image_id": "sha256:fd4449475f9d4f5eba5a8932fbfe172d82c88d42446672210df705531d92e058",
+      "container_id": "0d0a317e8116d2681a67fdd45e819be48e416b1da50094bb7e2ffff0fb4c201f",
+      "started_at": "2026-07-29T07:46:15.608401063Z",
+      "runtime_source": "/app/src",
+      "installed_packages": {
+        "tool-services": "0.1.0",
+        "pip": "25.0.1",
+        "fastapi": "0.140.13",
+        "pyyaml": "6.0.3",
+        "uvicorn": "0.51.0",
+        "watchfiles": "1.2.0",
+        "websockets": "16.1.1",
+        "httpcore": "1.0.9",
+        "pydantic": "2.13.4",
+        "uvloop": "0.22.1",
+        "python-dotenv": "1.2.2",
+        "httptools": "0.8.0",
+        "idna": "3.18",
+        "annotated-doc": "0.0.5",
+        "pydantic_core": "2.46.4",
+        "typing_extensions": "4.16.0",
+        "pydantic-settings": "2.14.2",
+        "annotated-types": "0.8.0",
+        "starlette": "1.3.1",
+        "certifi": "2026.7.22",
+        "h11": "0.16.0",
+        "click": "8.4.2",
+        "anyio": "4.14.2",
+        "typing-inspection": "0.4.2",
+        "httpx": "0.28.1",
+        "uv": "0.12.0"
+      },
+      "writable_source_changes": [
+        "C /app/src/tool_services"
+      ]
+    }
+  },
+  "zendesk-mcp": {
+    "source": {
+      "scope": "server",
+      "name": "zendesk-mcp"
+    },
+    "reason": "采用 /opt/zendesk-mcp/code；源码及容器内已有元数据一致，并保留服务器的附件 Accept 回归测试。",
+    "source_sha256": "b4e7ccff24d927bfa8c8982b6985ca95b0bc75a6c61f1c2370703e22a84cd854",
+    "source_files": [
+      {
+        "path": "src/zendesk_mcp/__init__.py",
+        "sha256": "189898836f395a015bccdacd898e4f9e8a6e9aead9651042e134d1ea9ccc73e7"
+      },
+      {
+        "path": "src/zendesk_mcp/app.py",
+        "sha256": "a38800ab144747ccf9b0e630ec80d0e12f921c3e3f5b653628fd719f43dcf94c"
+      },
+      {
+        "path": "src/zendesk_mcp/client.py",
+        "sha256": "cf891af0c3bb162d89f889df2ee41d3c9134d7de4f0c8d80511e6ad82e429398"
+      },
+      {
+        "path": "src/zendesk_mcp/mcp_schema.py",
+        "sha256": "30db1351a6e11ce79e788e185d73d7ca9f3bae7ab1fde9025faec654ce0c450d"
+      },
+      {
+        "path": "src/zendesk_mcp/settings.py",
+        "sha256": "553f63028096e3ff5dc0d702b1027d39f7f726c114f15848ecb8091b9dd9fbd9"
+      },
+      {
+        "path": "src/zendesk_mcp/tools.py",
+        "sha256": "46072e8a7802ed729c52d4d942d30500dc31417ca203a158519ace2467c89b0a"
+      }
+    ],
+    "matches_runtime_source": true,
+    "runtime": {
+      "image": "zendesk-mcp:accept-fix-20261012",
+      "image_id": "sha256:08cf136ea5767039e6b7b7bcf3712793295f126b37817d8a2d28007088e682f3",
+      "container_id": "a53cefaceaf3df01014ca92d45719e885f702a23fb227721e21eae601c4b2d0b",
+      "started_at": "2026-10-12T06:17:42.674174677Z",
+      "runtime_source": "/app/src",
+      "installed_packages": {
+        "zendesk-mcp": "0.1.0",
+        "pip": "25.0.1",
+        "pyyaml": "6.0.3",
+        "charset-normalizer": "3.5.1",
+        "watchfiles": "1.2.0",
+        "fastapi": "0.141.1",
+        "click": "8.5.0",
+        "urllib3": "2.8.0",
+        "uvloop": "0.22.1",
+        "httptools": "0.8.0",
+        "annotated-doc": "0.0.5",
+        "python-dotenv": "1.2.3",
+        "pydantic_core": "2.46.5",
+        "typing_extensions": "4.16.0",
+        "uvicorn": "0.53.0",
+        "requests": "2.34.2",
+        "idna": "3.20",
+        "annotated-types": "0.8.0",
+        "pydantic": "2.13.5",
+        "anyio": "4.15.1",
+        "typing-inspection": "0.4.4",
+        "certifi": "2026.7.22",
+        "h11": "0.16.0",
+        "websockets": "17.1",
+        "starlette": "1.6.0",
+        "uv": "0.12.17"
+      },
+      "writable_source_changes": [
+        "C /app/src/zendesk_mcp"
+      ]
+    }
+  },
+  "zendesk-browser-relay": {
+    "source": {
+      "scope": "server",
+      "name": "zendesk-browser-relay"
+    },
+    "reason": "采用 /opt/zendesk-browser-relay；15 个源码文件、pyproject.toml、README 与容器一致，保留服务器测试和脚本。uv.lock 与实际已安装依赖仍有差异，须另外记录。",
+    "source_sha256": "abf3bc6cfea3873e22a675dacabee79e272d6fa660ce8149e7b4a693606e6c8a",
+    "source_files": [
+      {
+        "path": "src/zendesk_browser_relay/__init__.py",
+        "sha256": "2515233a0cdac6c5447c9dbd6b0d54c89284f191d8cb41473d89b347ee296ae7"
+      },
+      {
+        "path": "src/zendesk_browser_relay/app.py",
+        "sha256": "0064ab86763d2bfa2ad1d1a242e656f7a436dfeddd2db65826fde871a1585c90"
+      },
+      {
+        "path": "src/zendesk_browser_relay/auth.py",
+        "sha256": "ba331865a442f9ee1dd67c8bac31dfcee7d67bf5128632c0eb80df17357affe2"
+      },
+      {
+        "path": "src/zendesk_browser_relay/browser_relay.py",
+        "sha256": "1c24e7ad1af9abeac12c42cf90f0d481f1cbfaeba9940ba2df205946d3562261"
+      },
+      {
+        "path": "src/zendesk_browser_relay/coordination.py",
+        "sha256": "577ff03d4beab613fdcaa729a877139a58f98205bef01115cc07791097a858a9"
+      },
+      {
+        "path": "src/zendesk_browser_relay/customer_reply.py",
+        "sha256": "2e1da2820d4862b71f686111b22b11b97841465f4cb263829f1448af8786ae7c"
+      },
+      {
+        "path": "src/zendesk_browser_relay/feishu_notifications.py",
+        "sha256": "ef668a6b594ba90c13f9da63c31623280fb13e219d54cbe08588f075c761a505"
+      },
+      {
+        "path": "src/zendesk_browser_relay/login.py",
+        "sha256": "8a052c758ac8ac4eda695f56e5ebd3f73436567d6e8a21728d4223aa8ede5aad"
+      },
+      {
+        "path": "src/zendesk_browser_relay/login_automation.py",
+        "sha256": "755b0741ccc1da35302ef5b805fada9350b5ac8ecc5074b95f25da922cbb389c"
+      },
+      {
+        "path": "src/zendesk_browser_relay/mcp.py",
+        "sha256": "00dffda17f778e396f2ffac10f5670ea54162d1c0a3e296a0eecc6911af318c4"
+      },
+      {
+        "path": "src/zendesk_browser_relay/result_dispatch.py",
+        "sha256": "4ab67d919806ad29573ddde2d0ec7f86db5fc8ddf6751b549e022bd10a44cad4"
+      },
+      {
+        "path": "src/zendesk_browser_relay/schemas.py",
+        "sha256": "7d42fcc632c9ef252c1e25630343b52884524a4053c490a13411752b186915de"
+      },
+      {
+        "path": "src/zendesk_browser_relay/session_supervisor.py",
+        "sha256": "19f7e4aee1b989f061565a61ae14c968e1f4c4c6b78e2a4d9960357b65c97186"
+      },
+      {
+        "path": "src/zendesk_browser_relay/settings.py",
+        "sha256": "5ca53857102a100770a91ab1c640adb45841a2f98b2409534152e45c482b5dda"
+      },
+      {
+        "path": "src/zendesk_browser_relay/zendesk_freshness.py",
+        "sha256": "09c603ed6f9009e00e81670ecbf1cff2c5c099b75539a956e251193c42a9fb0c"
+      }
+    ],
+    "matches_runtime_source": true,
+    "runtime": {
+      "image": "zendesk-browser-relay:multilingual-footer-20261003",
+      "image_id": "sha256:069bd86ab5f622691eb8ff36f2a911bcb6f73830056ffb9c8bbdf2a1ced9e991",
+      "container_id": "695e826b471b8df732c15ed2c4bbba6d44b9d417f9b42d53b3e415bf649b914e",
+      "started_at": "2026-10-03T03:28:30.783748559Z",
+      "runtime_source": "/app/src",
+      "installed_packages": {
+        "zendesk-browser-relay": "0.2.0",
+        "pip": "25.0.1",
+        "pyyaml": "6.0.3",
+        "idna": "3.19",
+        "watchfiles": "1.2.0",
+        "fastapi": "0.141.1",
+        "click": "8.5.0",
+        "pydantic": "2.13.4",
+        "pydantic-settings": "2.15.0",
+        "uvloop": "0.22.1",
+        "playwright": "1.60.0",
+        "httptools": "0.8.0",
+        "annotated-doc": "0.0.5",
+        "python-dotenv": "1.2.3",
+        "pydantic_core": "2.46.4",
+        "typing_extensions": "4.16.0",
+        "greenlet": "3.5.5",
+        "annotated-types": "0.8.0",
+        "pyee": "13.0.1",
+        "typing-inspection": "0.4.4",
+        "h11": "0.16.0",
+        "websockets": "17.1",
+        "anyio": "4.14.2",
+        "starlette": "1.6.0",
+        "uvicorn": "0.52.4"
+      },
+      "writable_source_changes": [
+        "C /app/src/zendesk_browser_relay"
+      ]
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "db-gateway": {
+    "application_source": "byte-identical to runtime snapshot"
+  },
+  "signoz-mcp": {
+    "application_source": "byte-identical to runtime snapshot"
+  },
+  "source-mcp": {
+    "application_source": "byte-identical to runtime snapshot"
+  },
+  "github-mcp": {
+    "business_and_protocol_helpers": "byte-identical to runtime snapshot",
+    "transport_and_auth_functions": "AST-identical to runtime snapshot",
+    "packaging": "independent namespace, one service definition and its settings"
+  },
+  "docs-tool-service": {
+    "business_and_protocol_helpers": "byte-identical to runtime snapshot",
+    "transport_and_auth_functions": "AST-identical to runtime snapshot",
+    "packaging": "independent namespace, one service definition and its settings"
+  },
+  "notification-service": {
+    "business_and_protocol_helpers": "byte-identical to runtime snapshot",
+    "transport_and_auth_functions": "AST-identical to runtime snapshot",
+    "packaging": "independent namespace, one service definition and its settings"
+  },
+  "zendesk-mcp": {
+    "application_source": "byte-identical to runtime snapshot"
+  },
+  "zendesk-browser-relay": {
+    "application_source": "byte-identical to runtime snapshot"
+  }
+}

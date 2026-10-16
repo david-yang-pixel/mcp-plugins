@@ -1,0 +1,9 @@
+ARG BASE_IMAGE=zendesk-browser-relay:email-paragraphs-20260813T1815
+FROM ${BASE_IMAGE}
+
+WORKDIR /app
+COPY pyproject.toml README.md /app/
+COPY src /app/src
+
+ENV PYTHONPATH=/app/src
+CMD ["uvicorn", "zendesk_browser_relay.app:app", "--host", "127.0.0.1", "--port", "8097"]

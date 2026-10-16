@@ -1,0 +1,17 @@
+resources:
+  base_dir: ./data
+postgres:
+  host: 127.0.0.1
+  port_prod: 56061
+  port_billing: 56062
+  port_plugin: 56063
+  user: your-read-only-database-user
+  db_prod: your-production-database
+  db_billing: your-billing-database
+  db_plugin: your-plugin-database
+db_gateway:
+  listen_host: 127.0.0.1
+  listen_port: 18081
+teleport:
+  proxy: teleport.example.com:443
+  auth_home: ./.tsh

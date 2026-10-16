@@ -1,0 +1,2140 @@
+{
+  "runtime": {
+    "db-gateway": {
+      "README.md": {
+        "sha256": "c024fdfeb15e6ff938df868b95a2410671793974ee3cafe3d57bccdc05e8a38b",
+        "bytes": 957
+      },
+      "pyproject.toml": {
+        "sha256": "5ee6f9b50878d099af1270a25bdc92910068c98a4e7500a446397d347606e0b5",
+        "bytes": 703
+      },
+      "scripts/auth-watchdog.py": {
+        "sha256": "80831e027eb41e81d117a24d1531e56fa48158a1950e4c8268f8f94517f006f1",
+        "bytes": 8774
+      },
+      "scripts/db_gateway_mcp.py": {
+        "sha256": "b3b0f07db6e0967d753bc0a3d825e09c803730cd1e97c7859079d6e4873f76c5",
+        "bytes": 4194
+      },
+      "scripts/dump_db_schema.py": {
+        "sha256": "0003a7d6aecc8b8701174e406473bf2f34d282725de213985524d941c3d93c16",
+        "bytes": 3760
+      },
+      "scripts/dump_db_schema.sh": {
+        "sha256": "5633ca6bf6d8080eb3ebd4ac83ff5e6c7bf60f612453fdc9ad29d3eb5f934a53",
+        "bytes": 2919
+      },
+      "scripts/proxy-health.sh": {
+        "sha256": "60f3aca79dc491f9f2eccc01c01a0f59a8fd4051e47ad08be84e898004b58bde",
+        "bytes": 1943
+      },
+      "src/db_gateway/__init__.py": {
+        "sha256": "b4e4b36884773cae500517d18cdb1bfd4bf85d27e5164ba620e37d5220095013",
+        "bytes": 38
+      },
+      "src/db_gateway/app.py": {
+        "sha256": "5bb1c6aaca2881c5be7c357623d62cf2a22cf8f0a2cfb25434f62756ab30f769",
+        "bytes": 5142
+      },
+      "src/db_gateway/app_context.py": {
+        "sha256": "1a569798b713b5015ab3d9695feb46986f41a2c8a611c72db8d476ff4995f3f6",
+        "bytes": 494
+      },
+      "src/db_gateway/config.py": {
+        "sha256": "8941185d824234fa0fc635027553d3400ccca9646aeb2880c2a7ab1d636314dd",
+        "bytes": 3820
+      },
+      "src/db_gateway/core.py": {
+        "sha256": "9e62ba791caebce4e5b0edb42a6da6db3268bc624235f665bf1211810553dd0c",
+        "bytes": 7738
+      },
+      "src/db_gateway/feishu.py": {
+        "sha256": "b931fe510282798e0b6d2dbfd32b5f0c76fd13af7507c841dc894ee563d34490",
+        "bytes": 1793
+      },
+      "src/db_gateway/log.py": {
+        "sha256": "208333950ded6c02e5e92e7c0e7504b6cc47a4b95c31550128a4292ecb065b03",
+        "bytes": 2734
+      },
+      "src/db_gateway/mcp.py": {
+        "sha256": "5af18cda598db49c8345ee5bb2f22bdaeeb67da3bbd2a2ecae086986985e5971",
+        "bytes": 2824
+      },
+      "src/db_gateway/mcp_schema.py": {
+        "sha256": "3f090c2a9a8295aa8305ad2c6f7150468e86181966db955fb3a2567642ade266",
+        "bytes": 991
+      },
+      "src/db_gateway/postgres.py": {
+        "sha256": "27711a470097076675ffe2d97c2a35ae4d76f0dce8e65a2c7ec0019790ace176",
+        "bytes": 5841
+      },
+      "src/db_gateway/teleport.py": {
+        "sha256": "e296aca620553d416511cfa61df55a0472e6d2d71b1fbe64682092dda6d6f3a8",
+        "bytes": 3785
+      },
+      "src/db_gateway/teleport_auth_web.py": {
+        "sha256": "28e74f41d6750f5860caea7b5cd048661afff27dccdc0824bdd176cefc935e83",
+        "bytes": 11026
+      },
+      "src/db_gateway/teleport_login.py": {
+        "sha256": "7f875406866552198a259feaf403fc987ec9f56ab688415b495d85d7606db91d",
+        "bytes": 5402
+      },
+      "src/db_gateway/teleport_tokens.py": {
+        "sha256": "dbabdc0eb27bdd7eb798f32607e3d4d047e4cffc8972271db4fba5234fb4d721",
+        "bytes": 1939
+      },
+      "uv.lock": {
+        "sha256": "3670270a00ec51457beaf240cfaaf055f55e7f3aa0daaf470a698288061ccf48",
+        "bytes": 190318
+      }
+    },
+    "signoz-mcp": {
+      ".gitignore": {
+        "sha256": "58fcc52dbe01f13fb16391acc567281c46d69f931e0cef8f43cd4d0b0ee3602f",
+        "bytes": 58
+      },
+      "README.md": {
+        "sha256": "cf68fd83cbae6d8e19d4143b8c608ca80ecb9686f055a6a04f231ff8c1f8162b",
+        "bytes": 4078
+      },
+      "deploy/systemd/signoz-mcp.service": {
+        "sha256": "99eff6bec6ad585e069fb28a6c6af9cfb14e4d342a5449417e31865e3e77d599",
+        "bytes": 353
+      },
+      "pyproject.toml": {
+        "sha256": "2da00d1e5fec007e93b4ffd7a447b887647c27ea3f98fdfcd22773e03d3ab9ec",
+        "bytes": 728
+      },
+      "scripts/README.md": {
+        "sha256": "7af2dc1cea55b017861634b5d80642b649eaa7f1919b47f077864684f43c584d",
+        "bytes": 3495
+      },
+      "scripts/sz": {
+        "sha256": "68971ff0c758b510323a9936107313a65d18801c9a3e129d9f65676d68b3bd6a",
+        "bytes": 14587
+      },
+      "src/signoz_mcp/__init__.py": {
+        "sha256": "d6c5d2c97a096bce05c4d49c4d1c0d859d51eafc414ebc3b05003843ba7b4b74",
+        "bytes": 33
+      },
+      "src/signoz_mcp/app.py": {
+        "sha256": "c6314650d1e930cb79080cd54596fd84c81964df70b974a1a4e4a13a974fb59a",
+        "bytes": 9914
+      },
+      "src/signoz_mcp/settings.py": {
+        "sha256": "7cc3369384033cade607c02744968977ecbbe733d393611ca652697689b4b8d2",
+        "bytes": 1712
+      },
+      "src/signoz_mcp/structured_tools.py": {
+        "sha256": "54b42632a96a4a31dfaa77980c497d7052a6b78e9e34c29e3cd1659b5acf42cb",
+        "bytes": 31591
+      },
+      "src/signoz_mcp/sz_runner.py": {
+        "sha256": "9dc893c08031f2676310d5dcdb2168cd616221f553ed63fdb81a953170ec4640",
+        "bytes": 3832
+      },
+      "tests/test_app.py": {
+        "sha256": "483ee3a72f060ca3b5b9b72d692886c5226e74917ee0c126251c068a6f6ab186",
+        "bytes": 13092
+      },
+      "tests/test_structured_tools.py": {
+        "sha256": "3614350185c37d00d7a02df2f956e9598848d3876c2a7d1eb261eab4314fe235",
+        "bytes": 6263
+      },
+      "tests/test_sz_runner.py": {
+        "sha256": "2d52e5ad743e893bf1214c8ce92d63a009ca1ec56699c6c7c147daf58c28a83a",
+        "bytes": 3084
+      },
+      "uv.lock": {
+        "sha256": "9e824322a14bd00750cf7fd90c26be087ab22bc602cfd2bc6cf43dc4f2488b5d",
+        "bytes": 257159
+      }
+    },
+    "source-mcp": {
+      ".dockerignore": {
+        "sha256": "e8839f38450183451f6b39ef30da18e47e9f6f8fd0362d04219376471c4793cb",
+        "bytes": 50
+      },
+      ".gitignore": {
+        "sha256": "b515571f057797f431fac367b42edf1d3812bfd7d79daec9398d3f7aa7446e41",
+        "bytes": 45
+      },
+      "Dockerfile.overlay": {
+        "sha256": "bd5c30e881fb6d539f0da63744cc0b42d19daf4d70f93e15055619c379d5df1f",
+        "bytes": 242
+      },
+      "README.md": {
+        "sha256": "1ba05f63ce75026ca88c4e4049813faf5fdc6b458de922f2a2449fa67e014a72",
+        "bytes": 1425
+      },
+      "pyproject.toml": {
+        "sha256": "6a1d21ee1086f56721d891f0ea5b9691e0ddd42b8378b1830e821d4b1df1d362",
+        "bytes": 598
+      },
+      "scripts/github_askpass.sh": {
+        "sha256": "eda768e3488cad641a447bcab1043a0fefb3549fe2d08b1c2d12796c86fe51ee",
+        "bytes": 154
+      },
+      "src/source_mcp/__init__.py": {
+        "sha256": "e2dfdcaf386b2ee9befa8ca8c14331b63053cd4b56a7ba114c5db67b012f246e",
+        "bytes": 49
+      },
+      "src/source_mcp/app.py": {
+        "sha256": "78e519b4113ca1fa2c5140bfec2d1dbdca384a1c1b17c1c7a4a8c829f84a14d3",
+        "bytes": 12795
+      },
+      "src/source_mcp/errors.py": {
+        "sha256": "d07f52331d5b17176c781077305e366c17048e306cec08a5173807f2899b0aef",
+        "bytes": 177
+      },
+      "src/source_mcp/git_ops.py": {
+        "sha256": "fdc97c6752e6e92d3d0d5721d1274671745bbb0982f91024ee72332c8e37867f",
+        "bytes": 18419
+      },
+      "src/source_mcp/process_health.py": {
+        "sha256": "f5e69c9adf5c8a91040ccf6cf86db8581c0bc0bab03211c380bff981fbfb1d79",
+        "bytes": 1935
+      },
+      "src/source_mcp/runtime.py": {
+        "sha256": "08338c9c1a32312dc8627491b40e6ebb040f25531013a7acb7e75c9919d413d6",
+        "bytes": 9223
+      },
+      "src/source_mcp/settings.py": {
+        "sha256": "6878dd239133402259f3b6156634c9b9a1b834e8fb5bdcb6f50dbb402bf9bc42",
+        "bytes": 3575
+      },
+      "tests/test_app.py": {
+        "sha256": "bf9beae5b5804ddd72b3058a6712d3b5437ed4040e88c2132c96e7711d6e6950",
+        "bytes": 7029
+      },
+      "tests/test_git_ops.py": {
+        "sha256": "e8bcdaa7e23cf90d2fa1411eb51b0a1a38df5cd83624bbff406ac83debac448d",
+        "bytes": 12134
+      },
+      "tests/test_process_health.py": {
+        "sha256": "24e70615aad89d59d26c8e29af8c0488732381658f58487ec8533128c21ef019",
+        "bytes": 1738
+      },
+      "tests/test_runtime.py": {
+        "sha256": "8b012de5c8e95bb62eda84c6319e0f05fec048de6d61496c2906a1ec921f9cb6",
+        "bytes": 5906
+      },
+      "tests/test_settings.py": {
+        "sha256": "c900ad83c0049a7a89ac666106f5276888301f05e35db1812dd2dcb8ea07fc5c",
+        "bytes": 713
+      },
+      "uv.lock": {
+        "sha256": "56c9366a3f3661bfb66faa0607d5237f836c2b57f16e00dd68ea9405f0740a50",
+        "bytes": 262633
+      }
+    },
+    "github-mcp": {
+      "deploy/nginx/tool-services.conf": {
+        "sha256": "ad866f6c3f505a0a1eab4a9d22bc21e7038381f3c7f35df5b996129debe6d6b0",
+        "bytes": 1464
+      },
+      "deploy/systemd/docs-tool-service.service": {
+        "sha256": "9c83ceaf32a3457c081f78ab20930f5c28917a0d87bc0e813a475bf6c0dc487b",
+        "bytes": 503
+      },
+      "deploy/systemd/github-mcp.service": {
+        "sha256": "e286039cac093aeebbbf172bcb4e43f41b2fc2c88e5a9db4925302f88c81673a",
+        "bytes": 493
+      },
+      "deploy/systemd/notification-service.service": {
+        "sha256": "c0839655698998cb963eff8fad262e0ec5720c0e5c332b0d6f6f9dd0eea03f4c",
+        "bytes": 521
+      },
+      "deploy/systemd/sandbox-worker.service": {
+        "sha256": "7f4d8ccea91f5b205061f776b6ee2b9f5665f87141171304fc8a23bfde69ab8d",
+        "bytes": 554
+      },
+      "pyproject.toml": {
+        "sha256": "7eb2d3548dde91ce87c1e3e3ee86209ce18d3b5b792340e5adaf43413432d9cf",
+        "bytes": 769
+      },
+      "src/tool_services/__init__.py": {
+        "sha256": "4c4bbc323fcd5bba8bc63afa31daa98aa708bae1bb7f93420326d878dbc56607",
+        "bytes": 46
+      },
+      "src/tool_services/app.py": {
+        "sha256": "55e28814e252f0aac36aea7d1046958e9c1fe6959da58d3542928d601c33cdda",
+        "bytes": 6456
+      },
+      "src/tool_services/docs_tools.py": {
+        "sha256": "9bcc3ce7fa834618cee07f9292c998de5e93c1f4d2183949930ca3c37ac963b2",
+        "bytes": 6603
+      },
+      "src/tool_services/github_tools.py": {
+        "sha256": "964b665b9cc815c5af43d5ba0a3569a21a209f51b8392a9578a6d9decb7d1c90",
+        "bytes": 6846
+      },
+      "src/tool_services/mcp.py": {
+        "sha256": "c0bb446e3e264e18b317d7f024da7ccaf3835f7467590fe972334aa01f2174bb",
+        "bytes": 3396
+      },
+      "src/tool_services/notification_tools.py": {
+        "sha256": "db0e66470d9eaf628336d4d019863fb79afda5ad022cf14873691848d5b32c50",
+        "bytes": 5645
+      },
+      "src/tool_services/sandbox_tools.py": {
+        "sha256": "9681ef7b42bf253351582f0290d3626655585eda89a3b20eec677ac8e088c3f9",
+        "bytes": 16780
+      },
+      "src/tool_services/settings.py": {
+        "sha256": "a2068c0a3c452df08f056b743e2736f367de60058ce1dde1f7a26ee32fa65333",
+        "bytes": 2633
+      },
+      "tests/test_apps.py": {
+        "sha256": "9ca9c1289011f4665c8b753ad293e1ad553231d6ccd9792b5fef850425c88d02",
+        "bytes": 4796
+      },
+      "uv.lock": {
+        "sha256": "618a3a93762e25159ad28c7466299c1dd63f624f363a43a082a7bccdcfb08f90",
+        "bytes": 253659
+      }
+    },
+    "docs-tool-service": {
+      "deploy/nginx/tool-services.conf": {
+        "sha256": "ad866f6c3f505a0a1eab4a9d22bc21e7038381f3c7f35df5b996129debe6d6b0",
+        "bytes": 1464
+      },
+      "deploy/systemd/docs-tool-service.service": {
+        "sha256": "9c83ceaf32a3457c081f78ab20930f5c28917a0d87bc0e813a475bf6c0dc487b",
+        "bytes": 503
+      },
+      "deploy/systemd/github-mcp.service": {
+        "sha256": "e286039cac093aeebbbf172bcb4e43f41b2fc2c88e5a9db4925302f88c81673a",
+        "bytes": 493
+      },
+      "deploy/systemd/notification-service.service": {
+        "sha256": "c0839655698998cb963eff8fad262e0ec5720c0e5c332b0d6f6f9dd0eea03f4c",
+        "bytes": 521
+      },
+      "deploy/systemd/sandbox-worker.service": {
+        "sha256": "7f4d8ccea91f5b205061f776b6ee2b9f5665f87141171304fc8a23bfde69ab8d",
+        "bytes": 554
+      },
+      "pyproject.toml": {
+        "sha256": "7eb2d3548dde91ce87c1e3e3ee86209ce18d3b5b792340e5adaf43413432d9cf",
+        "bytes": 769
+      },
+      "src/tool_services/__init__.py": {
+        "sha256": "4c4bbc323fcd5bba8bc63afa31daa98aa708bae1bb7f93420326d878dbc56607",
+        "bytes": 46
+      },
+      "src/tool_services/app.py": {
+        "sha256": "55e28814e252f0aac36aea7d1046958e9c1fe6959da58d3542928d601c33cdda",
+        "bytes": 6456
+      },
+      "src/tool_services/docs_tools.py": {
+        "sha256": "6b94e366d5cff823b16f1134461420e340bb64489e06776a4fe02a64e5566af6",
+        "bytes": 29806
+      },
+      "src/tool_services/github_tools.py": {
+        "sha256": "964b665b9cc815c5af43d5ba0a3569a21a209f51b8392a9578a6d9decb7d1c90",
+        "bytes": 6846
+      },
+      "src/tool_services/mcp.py": {
+        "sha256": "c0bb446e3e264e18b317d7f024da7ccaf3835f7467590fe972334aa01f2174bb",
+        "bytes": 3396
+      },
+      "src/tool_services/notification_tools.py": {
+        "sha256": "db0e66470d9eaf628336d4d019863fb79afda5ad022cf14873691848d5b32c50",
+        "bytes": 5645
+      },
+      "src/tool_services/sandbox_tools.py": {
+        "sha256": "9681ef7b42bf253351582f0290d3626655585eda89a3b20eec677ac8e088c3f9",
+        "bytes": 16780
+      },
+      "src/tool_services/settings.py": {
+        "sha256": "a2068c0a3c452df08f056b743e2736f367de60058ce1dde1f7a26ee32fa65333",
+        "bytes": 2633
+      },
+      "tests/test_apps.py": {
+        "sha256": "12345d7efe6dcb685cc2986db7caf1c6625bb46f271510966e31954ca22d3823",
+        "bytes": 9785
+      },
+      "uv.lock": {
+        "sha256": "618a3a93762e25159ad28c7466299c1dd63f624f363a43a082a7bccdcfb08f90",
+        "bytes": 253659
+      }
+    },
+    "notification-service": {
+      "deploy/nginx/tool-services.conf": {
+        "sha256": "ad866f6c3f505a0a1eab4a9d22bc21e7038381f3c7f35df5b996129debe6d6b0",
+        "bytes": 1464
+      },
+      "deploy/systemd/docs-tool-service.service": {
+        "sha256": "9c83ceaf32a3457c081f78ab20930f5c28917a0d87bc0e813a475bf6c0dc487b",
+        "bytes": 503
+      },
+      "deploy/systemd/github-mcp.service": {
+        "sha256": "e286039cac093aeebbbf172bcb4e43f41b2fc2c88e5a9db4925302f88c81673a",
+        "bytes": 493
+      },
+      "deploy/systemd/notification-service.service": {
+        "sha256": "c0839655698998cb963eff8fad262e0ec5720c0e5c332b0d6f6f9dd0eea03f4c",
+        "bytes": 521
+      },
+      "deploy/systemd/sandbox-worker.service": {
+        "sha256": "7f4d8ccea91f5b205061f776b6ee2b9f5665f87141171304fc8a23bfde69ab8d",
+        "bytes": 554
+      },
+      "pyproject.toml": {
+        "sha256": "7eb2d3548dde91ce87c1e3e3ee86209ce18d3b5b792340e5adaf43413432d9cf",
+        "bytes": 769
+      },
+      "src/tool_services/__init__.py": {
+        "sha256": "4c4bbc323fcd5bba8bc63afa31daa98aa708bae1bb7f93420326d878dbc56607",
+        "bytes": 46
+      },
+      "src/tool_services/app.py": {
+        "sha256": "54c28a69a1bab3eb6ce00945606a4794f306e5b39575e9d78f2d88da2b59ff03",
+        "bytes": 5810
+      },
+      "src/tool_services/docs_tools.py": {
+        "sha256": "9bcc3ce7fa834618cee07f9292c998de5e93c1f4d2183949930ca3c37ac963b2",
+        "bytes": 6603
+      },
+      "src/tool_services/github_tools.py": {
+        "sha256": "f6b8e91ba8cbbcf45ecba443671dfcc70a1474cf7375f06652da193c0b510511",
+        "bytes": 5270
+      },
+      "src/tool_services/mcp.py": {
+        "sha256": "c0bb446e3e264e18b317d7f024da7ccaf3835f7467590fe972334aa01f2174bb",
+        "bytes": 3396
+      },
+      "src/tool_services/notification_tools.py": {
+        "sha256": "db0e66470d9eaf628336d4d019863fb79afda5ad022cf14873691848d5b32c50",
+        "bytes": 5645
+      },
+      "src/tool_services/sandbox_tools.py": {
+        "sha256": "9681ef7b42bf253351582f0290d3626655585eda89a3b20eec677ac8e088c3f9",
+        "bytes": 16780
+      },
+      "src/tool_services/settings.py": {
+        "sha256": "a2068c0a3c452df08f056b743e2736f367de60058ce1dde1f7a26ee32fa65333",
+        "bytes": 2633
+      },
+      "tests/test_apps.py": {
+        "sha256": "44f8d6a8803eefecd4cac08eba7e8e543ddff33a30a0d204e67ba892f8c6d841",
+        "bytes": 3172
+      },
+      "uv.lock": {
+        "sha256": "618a3a93762e25159ad28c7466299c1dd63f624f363a43a082a7bccdcfb08f90",
+        "bytes": 253659
+      }
+    },
+    "zendesk-mcp": {
+      ".dockerignore": {
+        "sha256": "43edc3d31f137f08ee2c98bb2871be47e8c939e56e97f7aec68109a35a21826c",
+        "bytes": 49
+      },
+      "Dockerfile": {
+        "sha256": "7cecd0bb721d9db071823eb4a352254620fd2d70010236284c78ed3a639d8290",
+        "bytes": 209
+      },
+      "README.md": {
+        "sha256": "f258fe6888501e27fd9ee60966c9780a245add001cdb72ed392b345312356755",
+        "bytes": 4788
+      },
+      "deploy/nginx/zendesk-mcp.conf": {
+        "sha256": "76960f00cbc31605067769600c70dc5c04836b8baa4cad81569dc3553fcdc7cf",
+        "bytes": 286
+      },
+      "deploy/systemd/zendesk-mcp.service": {
+        "sha256": "d8dc80a06e3bdbab7c80c6a9e975de6d14be1fefc8ec857b1622784d7d8f00e7",
+        "bytes": 448
+      },
+      "pyproject.toml": {
+        "sha256": "2644ca675f135c7098e85c98cc538d99d12f69d9fe6f3e81278f8502617d3163",
+        "bytes": 588
+      },
+      "src/zendesk_mcp/__init__.py": {
+        "sha256": "189898836f395a015bccdacd898e4f9e8a6e9aead9651042e134d1ea9ccc73e7",
+        "bytes": 57
+      },
+      "src/zendesk_mcp/app.py": {
+        "sha256": "a38800ab144747ccf9b0e630ec80d0e12f921c3e3f5b653628fd719f43dcf94c",
+        "bytes": 7343
+      },
+      "src/zendesk_mcp/client.py": {
+        "sha256": "cf891af0c3bb162d89f889df2ee41d3c9134d7de4f0c8d80511e6ad82e429398",
+        "bytes": 13892
+      },
+      "src/zendesk_mcp/mcp_schema.py": {
+        "sha256": "30db1351a6e11ce79e788e185d73d7ca9f3bae7ab1fde9025faec654ce0c450d",
+        "bytes": 11637
+      },
+      "src/zendesk_mcp/settings.py": {
+        "sha256": "553f63028096e3ff5dc0d702b1027d39f7f726c114f15848ecb8091b9dd9fbd9",
+        "bytes": 3018
+      },
+      "src/zendesk_mcp/tools.py": {
+        "sha256": "46072e8a7802ed729c52d4d942d30500dc31417ca203a158519ace2467c89b0a",
+        "bytes": 33253
+      },
+      "uv.lock": {
+        "sha256": "d685f3cdb59d8fbbb9f82d298a11eccf6f4138d0297c459b5f65b75a4e46ee9a",
+        "bytes": 286703
+      }
+    },
+    "zendesk-browser-relay": {
+      "README.md": {
+        "sha256": "4fe2daa4d3bb8a5959ecfed72fc2d9844bae1aab6722333f173f0d5bd9d72bb8",
+        "bytes": 6962
+      },
+      "pyproject.toml": {
+        "sha256": "c982457dc582cfe90d9922d1345cf0e62a9a72bc1ce7ed068709f26d643d1f39",
+        "bytes": 811
+      },
+      "src/zendesk_browser_relay/__init__.py": {
+        "sha256": "2515233a0cdac6c5447c9dbd6b0d54c89284f191d8cb41473d89b347ee296ae7",
+        "bytes": 50
+      },
+      "src/zendesk_browser_relay/app.py": {
+        "sha256": "0064ab86763d2bfa2ad1d1a242e656f7a436dfeddd2db65826fde871a1585c90",
+        "bytes": 15528
+      },
+      "src/zendesk_browser_relay/auth.py": {
+        "sha256": "ba331865a442f9ee1dd67c8bac31dfcee7d67bf5128632c0eb80df17357affe2",
+        "bytes": 1584
+      },
+      "src/zendesk_browser_relay/browser_relay.py": {
+        "sha256": "1c24e7ad1af9abeac12c42cf90f0d481f1cbfaeba9940ba2df205946d3562261",
+        "bytes": 36697
+      },
+      "src/zendesk_browser_relay/coordination.py": {
+        "sha256": "577ff03d4beab613fdcaa729a877139a58f98205bef01115cc07791097a858a9",
+        "bytes": 64483
+      },
+      "src/zendesk_browser_relay/customer_reply.py": {
+        "sha256": "2e1da2820d4862b71f686111b22b11b97841465f4cb263829f1448af8786ae7c",
+        "bytes": 3948
+      },
+      "src/zendesk_browser_relay/feishu_notifications.py": {
+        "sha256": "ef668a6b594ba90c13f9da63c31623280fb13e219d54cbe08588f075c761a505",
+        "bytes": 3950
+      },
+      "src/zendesk_browser_relay/login.py": {
+        "sha256": "8a052c758ac8ac4eda695f56e5ebd3f73436567d6e8a21728d4223aa8ede5aad",
+        "bytes": 1127
+      },
+      "src/zendesk_browser_relay/login_automation.py": {
+        "sha256": "755b0741ccc1da35302ef5b805fada9350b5ac8ecc5074b95f25da922cbb389c",
+        "bytes": 851
+      },
+      "src/zendesk_browser_relay/mcp.py": {
+        "sha256": "00dffda17f778e396f2ffac10f5670ea54162d1c0a3e296a0eecc6911af318c4",
+        "bytes": 20794
+      },
+      "src/zendesk_browser_relay/result_dispatch.py": {
+        "sha256": "4ab67d919806ad29573ddde2d0ec7f86db5fc8ddf6751b549e022bd10a44cad4",
+        "bytes": 6336
+      },
+      "src/zendesk_browser_relay/schemas.py": {
+        "sha256": "7d42fcc632c9ef252c1e25630343b52884524a4053c490a13411752b186915de",
+        "bytes": 7105
+      },
+      "src/zendesk_browser_relay/session_supervisor.py": {
+        "sha256": "19f7e4aee1b989f061565a61ae14c968e1f4c4c6b78e2a4d9960357b65c97186",
+        "bytes": 826
+      },
+      "src/zendesk_browser_relay/settings.py": {
+        "sha256": "5ca53857102a100770a91ab1c640adb45841a2f98b2409534152e45c482b5dda",
+        "bytes": 5374
+      },
+      "src/zendesk_browser_relay/zendesk_freshness.py": {
+        "sha256": "09c603ed6f9009e00e81670ecbf1cff2c5c099b75539a956e251193c42a9fb0c",
+        "bytes": 7512
+      }
+    }
+  },
+  "server": {
+    "db-gateway": {
+      "scripts/tsh-init.py": {
+        "sha256": "83db12d8848f716cd7f4ab658316089b8a2ce70dbaaa49524e81a893f03d99cc",
+        "bytes": 1248
+      },
+      "src/db_gateway/__init__.py": {
+        "sha256": "b4e4b36884773cae500517d18cdb1bfd4bf85d27e5164ba620e37d5220095013",
+        "bytes": 38
+      },
+      "src/db_gateway/app.py": {
+        "sha256": "5bb1c6aaca2881c5be7c357623d62cf2a22cf8f0a2cfb25434f62756ab30f769",
+        "bytes": 5142
+      },
+      "src/db_gateway/app_context.py": {
+        "sha256": "1a569798b713b5015ab3d9695feb46986f41a2c8a611c72db8d476ff4995f3f6",
+        "bytes": 494
+      },
+      "src/db_gateway/config.py": {
+        "sha256": "8941185d824234fa0fc635027553d3400ccca9646aeb2880c2a7ab1d636314dd",
+        "bytes": 3820
+      },
+      "src/db_gateway/core.py": {
+        "sha256": "9e62ba791caebce4e5b0edb42a6da6db3268bc624235f665bf1211810553dd0c",
+        "bytes": 7738
+      },
+      "src/db_gateway/feishu.py": {
+        "sha256": "b931fe510282798e0b6d2dbfd32b5f0c76fd13af7507c841dc894ee563d34490",
+        "bytes": 1793
+      },
+      "src/db_gateway/log.py": {
+        "sha256": "208333950ded6c02e5e92e7c0e7504b6cc47a4b95c31550128a4292ecb065b03",
+        "bytes": 2734
+      },
+      "src/db_gateway/mcp.py": {
+        "sha256": "5af18cda598db49c8345ee5bb2f22bdaeeb67da3bbd2a2ecae086986985e5971",
+        "bytes": 2824
+      },
+      "src/db_gateway/mcp_schema.py": {
+        "sha256": "3f090c2a9a8295aa8305ad2c6f7150468e86181966db955fb3a2567642ade266",
+        "bytes": 991
+      },
+      "src/db_gateway/postgres.py": {
+        "sha256": "27711a470097076675ffe2d97c2a35ae4d76f0dce8e65a2c7ec0019790ace176",
+        "bytes": 5841
+      },
+      "src/db_gateway/teleport.py": {
+        "sha256": "e296aca620553d416511cfa61df55a0472e6d2d71b1fbe64682092dda6d6f3a8",
+        "bytes": 3785
+      },
+      "src/db_gateway/teleport_auth_web.py": {
+        "sha256": "28e74f41d6750f5860caea7b5cd048661afff27dccdc0824bdd176cefc935e83",
+        "bytes": 11026
+      },
+      "src/db_gateway/teleport_login.py": {
+        "sha256": "7f875406866552198a259feaf403fc987ec9f56ab688415b495d85d7606db91d",
+        "bytes": 5402
+      },
+      "src/db_gateway/teleport_tokens.py": {
+        "sha256": "dbabdc0eb27bdd7eb798f32607e3d4d047e4cffc8972271db4fba5234fb4d721",
+        "bytes": 1939
+      }
+    },
+    "signoz-mcp": {
+      ".gitignore": {
+        "sha256": "58fcc52dbe01f13fb16391acc567281c46d69f931e0cef8f43cd4d0b0ee3602f",
+        "bytes": 58
+      },
+      "README.md": {
+        "sha256": "cf68fd83cbae6d8e19d4143b8c608ca80ecb9686f055a6a04f231ff8c1f8162b",
+        "bytes": 4078
+      },
+      "deploy/systemd/signoz-mcp.service": {
+        "sha256": "99eff6bec6ad585e069fb28a6c6af9cfb14e4d342a5449417e31865e3e77d599",
+        "bytes": 353
+      },
+      "pyproject.toml": {
+        "sha256": "2da00d1e5fec007e93b4ffd7a447b887647c27ea3f98fdfcd22773e03d3ab9ec",
+        "bytes": 728
+      },
+      "scripts/README.md": {
+        "sha256": "7af2dc1cea55b017861634b5d80642b649eaa7f1919b47f077864684f43c584d",
+        "bytes": 3495
+      },
+      "scripts/sz": {
+        "sha256": "68971ff0c758b510323a9936107313a65d18801c9a3e129d9f65676d68b3bd6a",
+        "bytes": 14587
+      },
+      "src/signoz_mcp/__init__.py": {
+        "sha256": "d6c5d2c97a096bce05c4d49c4d1c0d859d51eafc414ebc3b05003843ba7b4b74",
+        "bytes": 33
+      },
+      "src/signoz_mcp/app.py": {
+        "sha256": "c6314650d1e930cb79080cd54596fd84c81964df70b974a1a4e4a13a974fb59a",
+        "bytes": 9914
+      },
+      "src/signoz_mcp/settings.py": {
+        "sha256": "7cc3369384033cade607c02744968977ecbbe733d393611ca652697689b4b8d2",
+        "bytes": 1712
+      },
+      "src/signoz_mcp/structured_tools.py": {
+        "sha256": "54b42632a96a4a31dfaa77980c497d7052a6b78e9e34c29e3cd1659b5acf42cb",
+        "bytes": 31591
+      },
+      "src/signoz_mcp/sz_runner.py": {
+        "sha256": "9dc893c08031f2676310d5dcdb2168cd616221f553ed63fdb81a953170ec4640",
+        "bytes": 3832
+      },
+      "tests/test_app.py": {
+        "sha256": "483ee3a72f060ca3b5b9b72d692886c5226e74917ee0c126251c068a6f6ab186",
+        "bytes": 13092
+      },
+      "tests/test_structured_tools.py": {
+        "sha256": "3614350185c37d00d7a02df2f956e9598848d3876c2a7d1eb261eab4314fe235",
+        "bytes": 6263
+      },
+      "tests/test_sz_runner.py": {
+        "sha256": "2d52e5ad743e893bf1214c8ce92d63a009ca1ec56699c6c7c147daf58c28a83a",
+        "bytes": 3084
+      },
+      "uv.lock": {
+        "sha256": "9e824322a14bd00750cf7fd90c26be087ab22bc602cfd2bc6cf43dc4f2488b5d",
+        "bytes": 257159
+      }
+    },
+    "source-mcp": {
+      "README.md": {
+        "sha256": "87ef465045a43ca67e6aa12da949abf433025cc74e9ac5e2a7d31097a0acb17c",
+        "bytes": 946
+      },
+      "pyproject.toml": {
+        "sha256": "6a1d21ee1086f56721d891f0ea5b9691e0ddd42b8378b1830e821d4b1df1d362",
+        "bytes": 598
+      },
+      "scripts/github_askpass.sh": {
+        "sha256": "eda768e3488cad641a447bcab1043a0fefb3549fe2d08b1c2d12796c86fe51ee",
+        "bytes": 154
+      },
+      "src/source_mcp/__init__.py": {
+        "sha256": "e2dfdcaf386b2ee9befa8ca8c14331b63053cd4b56a7ba114c5db67b012f246e",
+        "bytes": 49
+      },
+      "src/source_mcp/app.py": {
+        "sha256": "76722152f4d152cbf01550105fa158444089282a64b6bc2fc2ec2bbf05d35d06",
+        "bytes": 13015
+      },
+      "src/source_mcp/errors.py": {
+        "sha256": "d07f52331d5b17176c781077305e366c17048e306cec08a5173807f2899b0aef",
+        "bytes": 177
+      },
+      "src/source_mcp/git_ops.py": {
+        "sha256": "4b4f0f56e7d8dfe9261ca16740ab4289a832b1de5b5d6fd7d169c55fd3a4159c",
+        "bytes": 15826
+      },
+      "src/source_mcp/runtime.py": {
+        "sha256": "08338c9c1a32312dc8627491b40e6ebb040f25531013a7acb7e75c9919d413d6",
+        "bytes": 9223
+      },
+      "src/source_mcp/settings.py": {
+        "sha256": "19f6edf353e4ac4be1494ed0d95ec766cf9276028b27e1e97afa3788b7e803c6",
+        "bytes": 3118
+      },
+      "tests/test_app.py": {
+        "sha256": "979b4c09c4885ac774bc1868eb52ca580c5d5e7a9c623bd0af5e4dca4778384c",
+        "bytes": 6205
+      },
+      "tests/test_git_ops.py": {
+        "sha256": "42cfb55b280e12a4f38fb64f883ceb70375e668f05714c405343151fe454ca62",
+        "bytes": 6000
+      },
+      "tests/test_runtime.py": {
+        "sha256": "8b012de5c8e95bb62eda84c6319e0f05fec048de6d61496c2906a1ec921f9cb6",
+        "bytes": 5906
+      },
+      "uv.lock": {
+        "sha256": "56c9366a3f3661bfb66faa0607d5237f836c2b57f16e00dd68ea9405f0740a50",
+        "bytes": 262633
+      }
+    },
+    "tool-services": {
+      "deploy/nginx/tool-services.conf": {
+        "sha256": "ad866f6c3f505a0a1eab4a9d22bc21e7038381f3c7f35df5b996129debe6d6b0",
+        "bytes": 1464
+      },
+      "deploy/systemd/docs-tool-service.service": {
+        "sha256": "9c83ceaf32a3457c081f78ab20930f5c28917a0d87bc0e813a475bf6c0dc487b",
+        "bytes": 503
+      },
+      "deploy/systemd/github-mcp.service": {
+        "sha256": "e286039cac093aeebbbf172bcb4e43f41b2fc2c88e5a9db4925302f88c81673a",
+        "bytes": 493
+      },
+      "deploy/systemd/notification-service.service": {
+        "sha256": "c0839655698998cb963eff8fad262e0ec5720c0e5c332b0d6f6f9dd0eea03f4c",
+        "bytes": 521
+      },
+      "deploy/systemd/sandbox-worker.service": {
+        "sha256": "7f4d8ccea91f5b205061f776b6ee2b9f5665f87141171304fc8a23bfde69ab8d",
+        "bytes": 554
+      },
+      "pyproject.toml": {
+        "sha256": "7eb2d3548dde91ce87c1e3e3ee86209ce18d3b5b792340e5adaf43413432d9cf",
+        "bytes": 769
+      },
+      "src/tool_services/__init__.py": {
+        "sha256": "4c4bbc323fcd5bba8bc63afa31daa98aa708bae1bb7f93420326d878dbc56607",
+        "bytes": 46
+      },
+      "src/tool_services/app.py": {
+        "sha256": "55e28814e252f0aac36aea7d1046958e9c1fe6959da58d3542928d601c33cdda",
+        "bytes": 6456
+      },
+      "src/tool_services/docs_tools.py": {
+        "sha256": "6b94e366d5cff823b16f1134461420e340bb64489e06776a4fe02a64e5566af6",
+        "bytes": 29806
+      },
+      "src/tool_services/github_tools.py": {
+        "sha256": "964b665b9cc815c5af43d5ba0a3569a21a209f51b8392a9578a6d9decb7d1c90",
+        "bytes": 6846
+      },
+      "src/tool_services/mcp.py": {
+        "sha256": "c0bb446e3e264e18b317d7f024da7ccaf3835f7467590fe972334aa01f2174bb",
+        "bytes": 3396
+      },
+      "src/tool_services/notification_tools.py": {
+        "sha256": "db0e66470d9eaf628336d4d019863fb79afda5ad022cf14873691848d5b32c50",
+        "bytes": 5645
+      },
+      "src/tool_services/sandbox_tools.py": {
+        "sha256": "9681ef7b42bf253351582f0290d3626655585eda89a3b20eec677ac8e088c3f9",
+        "bytes": 16780
+      },
+      "src/tool_services/settings.py": {
+        "sha256": "a2068c0a3c452df08f056b743e2736f367de60058ce1dde1f7a26ee32fa65333",
+        "bytes": 2633
+      },
+      "tests/test_apps.py": {
+        "sha256": "12345d7efe6dcb685cc2986db7caf1c6625bb46f271510966e31954ca22d3823",
+        "bytes": 9785
+      },
+      "uv.lock": {
+        "sha256": "618a3a93762e25159ad28c7466299c1dd63f624f363a43a082a7bccdcfb08f90",
+        "bytes": 253659
+      }
+    },
+    "zendesk-mcp": {
+      ".dockerignore": {
+        "sha256": "43edc3d31f137f08ee2c98bb2871be47e8c939e56e97f7aec68109a35a21826c",
+        "bytes": 49
+      },
+      "Dockerfile": {
+        "sha256": "7cecd0bb721d9db071823eb4a352254620fd2d70010236284c78ed3a639d8290",
+        "bytes": 209
+      },
+      "Dockerfile.accept-fix": {
+        "sha256": "2ddf1c15ea514a17a73bb5c5c05cc284f64aeaae46816d4759d0129fb9b26745",
+        "bytes": 165
+      },
+      "README.md": {
+        "sha256": "f258fe6888501e27fd9ee60966c9780a245add001cdb72ed392b345312356755",
+        "bytes": 4788
+      },
+      "deploy/nginx/zendesk-mcp.conf": {
+        "sha256": "76960f00cbc31605067769600c70dc5c04836b8baa4cad81569dc3553fcdc7cf",
+        "bytes": 286
+      },
+      "deploy/systemd/zendesk-mcp.service": {
+        "sha256": "d8dc80a06e3bdbab7c80c6a9e975de6d14be1fefc8ec857b1622784d7d8f00e7",
+        "bytes": 448
+      },
+      "pyproject.toml": {
+        "sha256": "2644ca675f135c7098e85c98cc538d99d12f69d9fe6f3e81278f8502617d3163",
+        "bytes": 588
+      },
+      "src/zendesk_mcp/__init__.py": {
+        "sha256": "189898836f395a015bccdacd898e4f9e8a6e9aead9651042e134d1ea9ccc73e7",
+        "bytes": 57
+      },
+      "src/zendesk_mcp/app.py": {
+        "sha256": "a38800ab144747ccf9b0e630ec80d0e12f921c3e3f5b653628fd719f43dcf94c",
+        "bytes": 7343
+      },
+      "src/zendesk_mcp/client.py": {
+        "sha256": "cf891af0c3bb162d89f889df2ee41d3c9134d7de4f0c8d80511e6ad82e429398",
+        "bytes": 13892
+      },
+      "src/zendesk_mcp/mcp_schema.py": {
+        "sha256": "30db1351a6e11ce79e788e185d73d7ca9f3bae7ab1fde9025faec654ce0c450d",
+        "bytes": 11637
+      },
+      "src/zendesk_mcp/settings.py": {
+        "sha256": "553f63028096e3ff5dc0d702b1027d39f7f726c114f15848ecb8091b9dd9fbd9",
+        "bytes": 3018
+      },
+      "src/zendesk_mcp/tools.py": {
+        "sha256": "46072e8a7802ed729c52d4d942d30500dc31417ca203a158519ace2467c89b0a",
+        "bytes": 33253
+      },
+      "tests/conftest.py": {
+        "sha256": "18428c8ec29def69ac66fdbe51cbcb8833b7fee536d6f0e1d0494d961271a614",
+        "bytes": 198
+      },
+      "tests/test_app.py": {
+        "sha256": "151d2ebcec252e683f1b4fc6105cff6cc675fabe9cf6a49951c471f7c016287c",
+        "bytes": 28154
+      },
+      "tests/test_attachment_accept.py": {
+        "sha256": "f5825a8c7cb140dda1b6391549f320523c51aa218588725a9f7552a8a42dcdf7",
+        "bytes": 3107
+      },
+      "tests/test_client.py": {
+        "sha256": "68f840e1b5c042c28803593595ef818023ed2621edf525e6c5879a67cac48f8a",
+        "bytes": 4817
+      },
+      "uv.lock": {
+        "sha256": "d685f3cdb59d8fbbb9f82d298a11eccf6f4138d0297c459b5f65b75a4e46ee9a",
+        "bytes": 286703
+      }
+    },
+    "zendesk-browser-relay": {
+      ".gitignore": {
+        "sha256": "132d58e61df4ee787e1ca911cea6632f0bc4c8a7353bf1f98b91f74083b5790e",
+        "bytes": 87
+      },
+      "Dockerfile": {
+        "sha256": "40d202c6f94a309265eba80c5124928640a1cc8bbaf99835664d13a4933a24d0",
+        "bytes": 987
+      },
+      "Dockerfile.overlay": {
+        "sha256": "e57fb998b0098a046b46c819ddefba54921902f0ff158dc7e438ed36c1bf6787",
+        "bytes": 270
+      },
+      "README.md": {
+        "sha256": "4fe2daa4d3bb8a5959ecfed72fc2d9844bae1aab6722333f173f0d5bd9d72bb8",
+        "bytes": 6962
+      },
+      "deploy/systemd/zendesk-browser-relay-session-watchdog.service": {
+        "sha256": "f54b13ae037ce1934c966a837dc9a25c81a1f6b61ece2bc7a7130de724a6b6c5",
+        "bytes": 317
+      },
+      "deploy/systemd/zendesk-browser-relay-session-watchdog.timer": {
+        "sha256": "a634e01d2481f1f8b52e489265f10efbb327969166f8c25a9118351a29e594d6",
+        "bytes": 181
+      },
+      "deploy/systemd/zendesk-browser-relay.service": {
+        "sha256": "fcc14eaef9fee7cf4e8dc5ac79f900ed5fa62145154ab39b246b4ca40afe66d6",
+        "bytes": 560
+      },
+      "pyproject.toml": {
+        "sha256": "c982457dc582cfe90d9922d1345cf0e62a9a72bc1ce7ed068709f26d643d1f39",
+        "bytes": 811
+      },
+      "scripts/inspect_mfa_after_password.py": {
+        "sha256": "e24dd851fed1270c5fa60c81d7297429245c5d9fad927b33761c2c6f7708771f",
+        "bytes": 4494
+      },
+      "scripts/inspect_page.py": {
+        "sha256": "7b9079fa83b1ff02895ffa8d5a6dd0190402447d7d239bc7530958b01602ee4d",
+        "bytes": 2769
+      },
+      "scripts/login_once.py": {
+        "sha256": "8fb3b46fc415f21f2b61dcfbb8940b1898b9ba54170ae130d3a558a84212fe36",
+        "bytes": 4724
+      },
+      "scripts/login_with_mfa_once.py": {
+        "sha256": "01e87adf90dadc0cdf3caee0dcf02dc989e30a9f0b12e5b66b7e3126aee2d46f",
+        "bytes": 6304
+      },
+      "scripts/mfa_once.py": {
+        "sha256": "9730a912ffd606a012f2e645f022b2e6bfdd033a3c62e4e3c8d423151e4d5702",
+        "bytes": 4139
+      },
+      "scripts/session_watchdog.py": {
+        "sha256": "58311fef4ea3f261531cba36937e3131710f6ef4c68ce8c9ba5f3b144a1ac883",
+        "bytes": 3536
+      },
+      "src/zendesk_browser_relay/__init__.py": {
+        "sha256": "2515233a0cdac6c5447c9dbd6b0d54c89284f191d8cb41473d89b347ee296ae7",
+        "bytes": 50
+      },
+      "src/zendesk_browser_relay/app.py": {
+        "sha256": "0064ab86763d2bfa2ad1d1a242e656f7a436dfeddd2db65826fde871a1585c90",
+        "bytes": 15528
+      },
+      "src/zendesk_browser_relay/auth.py": {
+        "sha256": "ba331865a442f9ee1dd67c8bac31dfcee7d67bf5128632c0eb80df17357affe2",
+        "bytes": 1584
+      },
+      "src/zendesk_browser_relay/browser_relay.py": {
+        "sha256": "1c24e7ad1af9abeac12c42cf90f0d481f1cbfaeba9940ba2df205946d3562261",
+        "bytes": 36697
+      },
+      "src/zendesk_browser_relay/coordination.py": {
+        "sha256": "577ff03d4beab613fdcaa729a877139a58f98205bef01115cc07791097a858a9",
+        "bytes": 64483
+      },
+      "src/zendesk_browser_relay/customer_reply.py": {
+        "sha256": "2e1da2820d4862b71f686111b22b11b97841465f4cb263829f1448af8786ae7c",
+        "bytes": 3948
+      },
+      "src/zendesk_browser_relay/feishu_notifications.py": {
+        "sha256": "ef668a6b594ba90c13f9da63c31623280fb13e219d54cbe08588f075c761a505",
+        "bytes": 3950
+      },
+      "src/zendesk_browser_relay/login.py": {
+        "sha256": "8a052c758ac8ac4eda695f56e5ebd3f73436567d6e8a21728d4223aa8ede5aad",
+        "bytes": 1127
+      },
+      "src/zendesk_browser_relay/login_automation.py": {
+        "sha256": "755b0741ccc1da35302ef5b805fada9350b5ac8ecc5074b95f25da922cbb389c",
+        "bytes": 851
+      },
+      "src/zendesk_browser_relay/mcp.py": {
+        "sha256": "00dffda17f778e396f2ffac10f5670ea54162d1c0a3e296a0eecc6911af318c4",
+        "bytes": 20794
+      },
+      "src/zendesk_browser_relay/result_dispatch.py": {
+        "sha256": "4ab67d919806ad29573ddde2d0ec7f86db5fc8ddf6751b549e022bd10a44cad4",
+        "bytes": 6336
+      },
+      "src/zendesk_browser_relay/schemas.py": {
+        "sha256": "7d42fcc632c9ef252c1e25630343b52884524a4053c490a13411752b186915de",
+        "bytes": 7105
+      },
+      "src/zendesk_browser_relay/session_supervisor.py": {
+        "sha256": "19f7e4aee1b989f061565a61ae14c968e1f4c4c6b78e2a4d9960357b65c97186",
+        "bytes": 826
+      },
+      "src/zendesk_browser_relay/settings.py": {
+        "sha256": "5ca53857102a100770a91ab1c640adb45841a2f98b2409534152e45c482b5dda",
+        "bytes": 5374
+      },
+      "src/zendesk_browser_relay/zendesk_freshness.py": {
+        "sha256": "09c603ed6f9009e00e81670ecbf1cff2c5c099b75539a956e251193c42a9fb0c",
+        "bytes": 7512
+      },
+      "tests/test_app.py": {
+        "sha256": "d1a975329e53588c127a94b7294611857fd0b3eb39d4e55274890df9f84885ee",
+        "bytes": 16973
+      },
+      "tests/test_auth.py": {
+        "sha256": "2c4a29492e4565f342925a520ce01bd94ed6fcda309b2178844fefe294746be3",
+        "bytes": 1073
+      },
+      "tests/test_browser_relay.py": {
+        "sha256": "c9be24bb669f3d804124afef0793f5dd47e77cf03178aaa320a142fe422f9b5a",
+        "bytes": 23344
+      },
+      "tests/test_coordination.py": {
+        "sha256": "9c3a0c6b938e20054b4a972d80c950658da41c980fe41f78cce6ee238338b23e",
+        "bytes": 30472
+      },
+      "tests/test_customer_reply.py": {
+        "sha256": "ace536496cba0dbc90800ce0725955b5f58d7beb7d53a07afbbcf04b9961408c",
+        "bytes": 4111
+      },
+      "tests/test_feishu_notifications.py": {
+        "sha256": "4cdb8158caf6cd7da90fce70a60828eb739d1230dbec10c6be154724818f58ae",
+        "bytes": 2281
+      },
+      "tests/test_login_automation.py": {
+        "sha256": "dff5556885e602592578a9e4c9ac6ce020376826e65c91bbc885ffb775628c23",
+        "bytes": 416
+      },
+      "tests/test_mcp.py": {
+        "sha256": "c74cf0513fd94b87058e247317725fd151d50771da6e54fc66be5b7b8f01ea46",
+        "bytes": 24271
+      },
+      "tests/test_result_dispatch.py": {
+        "sha256": "97cc02ca6501da815996f569d2128a817156d23f92a14369d129af63a9cc24b2",
+        "bytes": 3871
+      },
+      "tests/test_session_supervisor.py": {
+        "sha256": "90ed6cd4792b50b611b12ce116cf947fa83f3d075d07eff163e0ac96d9c37677",
+        "bytes": 602
+      },
+      "tests/test_settings.py": {
+        "sha256": "b4cc1772a42882d915850ce68b64e03f48ede4e75c65c36f646dde8851e2e93f",
+        "bytes": 1344
+      },
+      "tests/test_zendesk_freshness.py": {
+        "sha256": "dc9f7e16f6cdc071b1ba6f809ed53a7cf28a380574c653e884b9dc80131a1fa0",
+        "bytes": 4280
+      },
+      "uv.lock": {
+        "sha256": "267413a81313ad5411e8fef4f94ff9604bd2ccf34d93d297e0d1e30b83a142b0",
+        "bytes": 131879
+      }
+    },
+    "relay-release": {
+      "Dockerfile.footer-hotfix": {
+        "sha256": "d1a09ff0a7ca42762d3098d592ff1320cd538425d36ebf260d2289da5a6904e5",
+        "bytes": 275
+      }
+    },
+    "source-release": {
+      ".dockerignore": {
+        "sha256": "e8839f38450183451f6b39ef30da18e47e9f6f8fd0362d04219376471c4793cb",
+        "bytes": 50
+      },
+      ".gitignore": {
+        "sha256": "b515571f057797f431fac367b42edf1d3812bfd7d79daec9398d3f7aa7446e41",
+        "bytes": 45
+      },
+      "Dockerfile.overlay": {
+        "sha256": "bd5c30e881fb6d539f0da63744cc0b42d19daf4d70f93e15055619c379d5df1f",
+        "bytes": 242
+      },
+      "README.md": {
+        "sha256": "1ba05f63ce75026ca88c4e4049813faf5fdc6b458de922f2a2449fa67e014a72",
+        "bytes": 1425
+      },
+      "pyproject.toml": {
+        "sha256": "6a1d21ee1086f56721d891f0ea5b9691e0ddd42b8378b1830e821d4b1df1d362",
+        "bytes": 598
+      },
+      "scripts/github_askpass.sh": {
+        "sha256": "eda768e3488cad641a447bcab1043a0fefb3549fe2d08b1c2d12796c86fe51ee",
+        "bytes": 154
+      },
+      "src/source_mcp/__init__.py": {
+        "sha256": "e2dfdcaf386b2ee9befa8ca8c14331b63053cd4b56a7ba114c5db67b012f246e",
+        "bytes": 49
+      },
+      "src/source_mcp/app.py": {
+        "sha256": "78e519b4113ca1fa2c5140bfec2d1dbdca384a1c1b17c1c7a4a8c829f84a14d3",
+        "bytes": 12795
+      },
+      "src/source_mcp/errors.py": {
+        "sha256": "d07f52331d5b17176c781077305e366c17048e306cec08a5173807f2899b0aef",
+        "bytes": 177
+      },
+      "src/source_mcp/git_ops.py": {
+        "sha256": "fdc97c6752e6e92d3d0d5721d1274671745bbb0982f91024ee72332c8e37867f",
+        "bytes": 18419
+      },
+      "src/source_mcp/process_health.py": {
+        "sha256": "f5e69c9adf5c8a91040ccf6cf86db8581c0bc0bab03211c380bff981fbfb1d79",
+        "bytes": 1935
+      },
+      "src/source_mcp/runtime.py": {
+        "sha256": "08338c9c1a32312dc8627491b40e6ebb040f25531013a7acb7e75c9919d413d6",
+        "bytes": 9223
+      },
+      "src/source_mcp/settings.py": {
+        "sha256": "6878dd239133402259f3b6156634c9b9a1b834e8fb5bdcb6f50dbb402bf9bc42",
+        "bytes": 3575
+      },
+      "tests/test_app.py": {
+        "sha256": "bf9beae5b5804ddd72b3058a6712d3b5437ed4040e88c2132c96e7711d6e6950",
+        "bytes": 7029
+      },
+      "tests/test_git_ops.py": {
+        "sha256": "e8bcdaa7e23cf90d2fa1411eb51b0a1a38df5cd83624bbff406ac83debac448d",
+        "bytes": 12134
+      },
+      "tests/test_process_health.py": {
+        "sha256": "24e70615aad89d59d26c8e29af8c0488732381658f58487ec8533128c21ef019",
+        "bytes": 1738
+      },
+      "tests/test_runtime.py": {
+        "sha256": "8b012de5c8e95bb62eda84c6319e0f05fec048de6d61496c2906a1ec921f9cb6",
+        "bytes": 5906
+      },
+      "tests/test_settings.py": {
+        "sha256": "c900ad83c0049a7a89ac666106f5276888301f05e35db1812dd2dcb8ea07fc5c",
+        "bytes": 713
+      },
+      "uv.lock": {
+        "sha256": "56c9366a3f3661bfb66faa0607d5237f836c2b57f16e00dd68ea9405f0740a50",
+        "bytes": 262633
+      }
+    }
+  },
+  "metadata": {
+    "db-gateway": {
+      "image": "db-gateway:latest",
+      "image_id": "sha256:378972148a4081b135ca2fdf3870bd36dbc04940fc38a8c185048efd4465887e",
+      "container_id": "2885b9c19ee921f6f40befcd5f43716dde36235bd6e32013818674be30391bd8",
+      "started_at": "2026-09-02T20:10:04.820274826Z",
+      "runtime_source": "/app/src",
+      "installed_packages": {
+        "pyyaml": "6.0.3",
+        "yarl": "1.24.2",
+        "structlog": "26.1.0",
+        "frozenlist": "1.8.0",
+        "attrs": "26.1.0",
+        "db-gateway": "0.1.0",
+        "certifi": "2026.6.17",
+        "pyotp": "2.10.0",
+        "httpcore": "1.0.9",
+        "pydantic": "2.13.4",
+        "python-dotenv": "1.2.2",
+        "aiohttp": "3.14.1",
+        "annotated-types": "0.7.0",
+        "aiosignal": "1.4.0",
+        "anyio": "4.14.1",
+        "idna": "3.18",
+        "pydantic_core": "2.46.4",
+        "propcache": "0.5.2",
+        "pydantic-settings": "2.14.2",
+        "pexpect": "4.9.0",
+        "ptyprocess": "0.7.0",
+        "h11": "0.16.0",
+        "aiohappyeyeballs": "2.6.2",
+        "typing-inspection": "0.4.2",
+        "multidict": "6.7.1",
+        "typing_extensions": "4.15.0",
+        "httpx": "0.28.1",
+        "pytest-asyncio": "1.4.0",
+        "pygments": "2.20.0",
+        "packaging": "26.2",
+        "pluggy": "1.6.0",
+        "pytest": "9.1.1",
+        "iniconfig": "2.3.0"
+      },
+      "writable_source_changes": [
+        "C /app/src/db_gateway",
+        "C /app/src/db_gateway/app.py"
+      ]
+    },
+    "signoz-mcp": {
+      "image": "signoz-mcp:latest",
+      "image_id": "sha256:85de4f2b94af5defd28ea15363566b66fec3bf8cc550dd9c43388c642980f2a0",
+      "container_id": "5143b833ee4bbc7f1ce490acd5ca5a481cb53a34bf65fa4bee64c3f41dccc5a7",
+      "started_at": "2026-09-02T20:14:01.294188265Z",
+      "runtime_source": "/app/src",
+      "installed_packages": {
+        "signoz-mcp": "0.2.0",
+        "pip": "25.0.1",
+        "fastapi": "0.140.13",
+        "pyyaml": "6.0.3",
+        "uvicorn": "0.51.0",
+        "watchfiles": "1.2.0",
+        "websockets": "16.1.1",
+        "pydantic": "2.13.4",
+        "uvloop": "0.22.1",
+        "python-dotenv": "1.2.2",
+        "httptools": "0.8.0",
+        "idna": "3.18",
+        "annotated-doc": "0.0.5",
+        "pydantic_core": "2.46.4",
+        "typing_extensions": "4.16.0",
+        "pydantic-settings": "2.14.2",
+        "annotated-types": "0.8.0",
+        "starlette": "1.3.1",
+        "h11": "0.16.0",
+        "click": "8.4.2",
+        "anyio": "4.14.2",
+        "typing-inspection": "0.4.2",
+        "uv": "0.12.0"
+      },
+      "writable_source_changes": [
+        "C /app/src/signoz_mcp",
+        "C /app/src/signoz_mcp/app.py"
+      ]
+    },
+    "source-mcp": {
+      "image": "source-mcp:3741-20260803.2",
+      "image_id": "sha256:3a7d3fbf2845e8bd75c94d5221bdc154d07b24f90015dd7ab23422bb2a55b29a",
+      "container_id": "2284fa141f2d0533f534ad264ab5c4d36567c321b6f6b981bfcbec418b2ba721",
+      "started_at": "2026-09-03T08:59:39.055451149Z",
+      "runtime_source": "/app/src",
+      "installed_packages": {
+        "source-mcp": "0.1.0",
+        "pip": "25.0.1",
+        "fastapi": "0.140.13",
+        "pyyaml": "6.0.3",
+        "uvicorn": "0.51.0",
+        "watchfiles": "1.2.0",
+        "websockets": "16.1.1",
+        "pydantic": "2.13.4",
+        "uvloop": "0.22.1",
+        "python-dotenv": "1.2.2",
+        "httptools": "0.8.0",
+        "idna": "3.18",
+        "annotated-doc": "0.0.5",
+        "pydantic_core": "2.46.4",
+        "typing_extensions": "4.16.0",
+        "pydantic-settings": "2.14.2",
+        "annotated-types": "0.8.0",
+        "starlette": "1.3.1",
+        "h11": "0.16.0",
+        "click": "8.4.2",
+        "anyio": "4.14.2",
+        "typing-inspection": "0.4.2",
+        "uv": "0.12.0"
+      },
+      "writable_source_changes": [
+        "C /app/src/source_mcp"
+      ]
+    },
+    "github-mcp": {
+      "image": "tool-services:latest",
+      "image_id": "sha256:43da7ac7671acec3ed1c18ec8cf04a5afddf822bf77400bdb14e825c555f0453",
+      "container_id": "24480d3599c3927e9a47d0c22fced0ebecf901fbfd8d6f642cbfa08a58eaad4e",
+      "started_at": "2026-09-02T20:15:57.86018621Z",
+      "runtime_source": "/app/src",
+      "installed_packages": {
+        "tool-services": "0.1.0",
+        "pip": "25.0.1",
+        "pyyaml": "6.0.3",
+        "watchfiles": "1.2.0",
+        "fastapi": "0.141.0",
+        "websockets": "16.1.1",
+        "httpcore": "1.0.9",
+        "pydantic": "2.13.4",
+        "uvloop": "0.22.1",
+        "python-dotenv": "1.2.2",
+        "httptools": "0.8.0",
+        "idna": "3.18",
+        "annotated-doc": "0.0.5",
+        "pydantic_core": "2.46.4",
+        "typing_extensions": "4.16.0",
+        "pydantic-settings": "2.14.2",
+        "annotated-types": "0.8.0",
+        "starlette": "1.3.1",
+        "certifi": "2026.7.22",
+        "h11": "0.16.0",
+        "click": "8.4.2",
+        "anyio": "4.14.2",
+        "typing-inspection": "0.4.2",
+        "uvicorn": "0.52.0",
+        "httpx": "0.28.1",
+        "uv": "0.12.0"
+      },
+      "writable_source_changes": [
+        "C /app/src/tool_services",
+        "C /app/src/tool_services/app.py"
+      ]
+    },
+    "docs-tool-service": {
+      "image": "tool-services:latest",
+      "image_id": "sha256:293a6a806085797799cafdaa269ed0cce2b03a37471fe10ce9556dfee95d4f21",
+      "container_id": "5dd5b329fee331b47f8a8258ac8965eda84fced16388dec4b33ad543d53baceb",
+      "started_at": "2026-09-20T17:28:54.132131378Z",
+      "runtime_source": "/app/src",
+      "installed_packages": {
+        "tool-services": "0.1.0",
+        "pip": "25.0.1",
+        "pyyaml": "6.0.3",
+        "watchfiles": "1.2.0",
+        "fastapi": "0.141.1",
+        "click": "8.5.0",
+        "httpcore": "1.0.9",
+        "pydantic-settings": "2.15.0",
+        "uvloop": "0.22.1",
+        "httptools": "0.8.0",
+        "annotated-doc": "0.0.5",
+        "python-dotenv": "1.2.3",
+        "pydantic_core": "2.46.5",
+        "typing_extensions": "4.16.0",
+        "uvicorn": "0.53.0",
+        "idna": "3.20",
+        "annotated-types": "0.8.0",
+        "pydantic": "2.13.5",
+        "anyio": "4.15.1",
+        "typing-inspection": "0.4.4",
+        "certifi": "2026.7.22",
+        "h11": "0.16.0",
+        "websockets": "17.1",
+        "starlette": "1.6.0",
+        "httpx": "0.28.1",
+        "uv": "0.12.17"
+      },
+      "writable_source_changes": [
+        "C /app/src/tool_services"
+      ]
+    },
+    "notification-service": {
+      "image": "tool-services:latest",
+      "image_id": "sha256:fd4449475f9d4f5eba5a8932fbfe172d82c88d42446672210df705531d92e058",
+      "container_id": "0d0a317e8116d2681a67fdd45e819be48e416b1da50094bb7e2ffff0fb4c201f",
+      "started_at": "2026-07-29T07:46:15.608401063Z",
+      "runtime_source": "/app/src",
+      "installed_packages": {
+        "tool-services": "0.1.0",
+        "pip": "25.0.1",
+        "fastapi": "0.140.13",
+        "pyyaml": "6.0.3",
+        "uvicorn": "0.51.0",
+        "watchfiles": "1.2.0",
+        "websockets": "16.1.1",
+        "httpcore": "1.0.9",
+        "pydantic": "2.13.4",
+        "uvloop": "0.22.1",
+        "python-dotenv": "1.2.2",
+        "httptools": "0.8.0",
+        "idna": "3.18",
+        "annotated-doc": "0.0.5",
+        "pydantic_core": "2.46.4",
+        "typing_extensions": "4.16.0",
+        "pydantic-settings": "2.14.2",
+        "annotated-types": "0.8.0",
+        "starlette": "1.3.1",
+        "certifi": "2026.7.22",
+        "h11": "0.16.0",
+        "click": "8.4.2",
+        "anyio": "4.14.2",
+        "typing-inspection": "0.4.2",
+        "httpx": "0.28.1",
+        "uv": "0.12.0"
+      },
+      "writable_source_changes": [
+        "C /app/src/tool_services"
+      ]
+    },
+    "zendesk-mcp": {
+      "image": "zendesk-mcp:accept-fix-20261012",
+      "image_id": "sha256:08cf136ea5767039e6b7b7bcf3712793295f126b37817d8a2d28007088e682f3",
+      "container_id": "a53cefaceaf3df01014ca92d45719e885f702a23fb227721e21eae601c4b2d0b",
+      "started_at": "2026-10-12T06:17:42.674174677Z",
+      "runtime_source": "/app/src",
+      "installed_packages": {
+        "zendesk-mcp": "0.1.0",
+        "pip": "25.0.1",
+        "pyyaml": "6.0.3",
+        "charset-normalizer": "3.5.1",
+        "watchfiles": "1.2.0",
+        "fastapi": "0.141.1",
+        "click": "8.5.0",
+        "urllib3": "2.8.0",
+        "uvloop": "0.22.1",
+        "httptools": "0.8.0",
+        "annotated-doc": "0.0.5",
+        "python-dotenv": "1.2.3",
+        "pydantic_core": "2.46.5",
+        "typing_extensions": "4.16.0",
+        "uvicorn": "0.53.0",
+        "requests": "2.34.2",
+        "idna": "3.20",
+        "annotated-types": "0.8.0",
+        "pydantic": "2.13.5",
+        "anyio": "4.15.1",
+        "typing-inspection": "0.4.4",
+        "certifi": "2026.7.22",
+        "h11": "0.16.0",
+        "websockets": "17.1",
+        "starlette": "1.6.0",
+        "uv": "0.12.17"
+      },
+      "writable_source_changes": [
+        "C /app/src/zendesk_mcp"
+      ]
+    },
+    "zendesk-browser-relay": {
+      "image": "zendesk-browser-relay:multilingual-footer-20261003",
+      "image_id": "sha256:069bd86ab5f622691eb8ff36f2a911bcb6f73830056ffb9c8bbdf2a1ced9e991",
+      "container_id": "695e826b471b8df732c15ed2c4bbba6d44b9d417f9b42d53b3e415bf649b914e",
+      "started_at": "2026-10-03T03:28:30.783748559Z",
+      "runtime_source": "/app/src",
+      "installed_packages": {
+        "zendesk-browser-relay": "0.2.0",
+        "pip": "25.0.1",
+        "pyyaml": "6.0.3",
+        "idna": "3.19",
+        "watchfiles": "1.2.0",
+        "fastapi": "0.141.1",
+        "click": "8.5.0",
+        "pydantic": "2.13.4",
+        "pydantic-settings": "2.15.0",
+        "uvloop": "0.22.1",
+        "playwright": "1.60.0",
+        "httptools": "0.8.0",
+        "annotated-doc": "0.0.5",
+        "python-dotenv": "1.2.3",
+        "pydantic_core": "2.46.4",
+        "typing_extensions": "4.16.0",
+        "greenlet": "3.5.5",
+        "annotated-types": "0.8.0",
+        "pyee": "13.0.1",
+        "typing-inspection": "0.4.4",
+        "h11": "0.16.0",
+        "websockets": "17.1",
+        "anyio": "4.14.2",
+        "starlette": "1.6.0",
+        "uvicorn": "0.52.4"
+      },
+      "writable_source_changes": [
+        "C /app/src/zendesk_browser_relay"
+      ]
+    }
+  },
+  "local": {
+    "db-gateway": {
+      ".gitignore": {
+        "sha256": "eb2877a2ca4d448eed33dff2b89619f1cb665994a5b4765da652c6f3843372d6",
+        "bytes": 51
+      },
+      "README.md": {
+        "sha256": "c024fdfeb15e6ff938df868b95a2410671793974ee3cafe3d57bccdc05e8a38b",
+        "bytes": 957
+      },
+      "deploy/Dockerfile": {
+        "sha256": "dc7dceccdc95b4b2bd6f1487de51b5721522409ae2e488e50c92be3417b535d0",
+        "bytes": 427
+      },
+      "deploy/nginx/db-gateway.conf": {
+        "sha256": "5427810ebc4aa04b2df1cedfed2471716490ad260698e25a547f0121d6776e36",
+        "bytes": 671
+      },
+      "deploy/systemd/db-gateway.service": {
+        "sha256": "d9a0cbb380662207b763b68a08ad2cd2e2a32402870b96dd6436824944055983",
+        "bytes": 1069
+      },
+      "deploy/systemd/proxy-health.service": {
+        "sha256": "8dc4ae8c33e9ca9c1bf106c61fae2c9882a073592e344cedb9c50766bbd17758",
+        "bytes": 392
+      },
+      "deploy/systemd/proxy-health.timer": {
+        "sha256": "1073154698ef09cad2fc5869927c540ad75816e84e8a580c67f0f5f9e6ff3e7b",
+        "bytes": 351
+      },
+      "deploy/systemd/tsh-auth-watchdog.service": {
+        "sha256": "89199a5b1eb97276aa19628ea9e001643fb1422d63cace06857b308579b554f3",
+        "bytes": 912
+      },
+      "deploy/systemd/tsh-proxy-db-billing.service": {
+        "sha256": "2d1f375bcca68aad4bb8e3fb9e426a785ed3493cdc6060cb66b7b6e950b97afe",
+        "bytes": 406
+      },
+      "deploy/systemd/tsh-proxy-db-plugin.service": {
+        "sha256": "ddbbc78570e9707fad4bf875ad30f8440d57799acee6248abe6f304cb0bc58da",
+        "bytes": 426
+      },
+      "deploy/systemd/tsh-proxy-db.service": {
+        "sha256": "8bb4ac4fbc129ca9806841008d47c7c0c611e1148e824a60333837138a244966",
+        "bytes": 784
+      },
+      "pyproject.toml": {
+        "sha256": "5ee6f9b50878d099af1270a25bdc92910068c98a4e7500a446397d347606e0b5",
+        "bytes": 703
+      },
+      "scripts/auth-watchdog.py": {
+        "sha256": "80831e027eb41e81d117a24d1531e56fa48158a1950e4c8268f8f94517f006f1",
+        "bytes": 8774
+      },
+      "scripts/db_gateway_mcp.py": {
+        "sha256": "b3b0f07db6e0967d753bc0a3d825e09c803730cd1e97c7859079d6e4873f76c5",
+        "bytes": 4194
+      },
+      "scripts/dump_db_schema.py": {
+        "sha256": "0003a7d6aecc8b8701174e406473bf2f34d282725de213985524d941c3d93c16",
+        "bytes": 3760
+      },
+      "scripts/dump_db_schema.sh": {
+        "sha256": "5633ca6bf6d8080eb3ebd4ac83ff5e6c7bf60f612453fdc9ad29d3eb5f934a53",
+        "bytes": 2919
+      },
+      "scripts/proxy-health.sh": {
+        "sha256": "60f3aca79dc491f9f2eccc01c01a0f59a8fd4051e47ad08be84e898004b58bde",
+        "bytes": 1943
+      },
+      "src/db_gateway/__init__.py": {
+        "sha256": "b4e4b36884773cae500517d18cdb1bfd4bf85d27e5164ba620e37d5220095013",
+        "bytes": 38
+      },
+      "src/db_gateway/app.py": {
+        "sha256": "364adeee55dcd0a3b9ff276b24fb05a217c185ced054a84ea10a83b0a6dbc209",
+        "bytes": 4448
+      },
+      "src/db_gateway/app_context.py": {
+        "sha256": "1a569798b713b5015ab3d9695feb46986f41a2c8a611c72db8d476ff4995f3f6",
+        "bytes": 494
+      },
+      "src/db_gateway/config.py": {
+        "sha256": "8941185d824234fa0fc635027553d3400ccca9646aeb2880c2a7ab1d636314dd",
+        "bytes": 3820
+      },
+      "src/db_gateway/core.py": {
+        "sha256": "9e62ba791caebce4e5b0edb42a6da6db3268bc624235f665bf1211810553dd0c",
+        "bytes": 7738
+      },
+      "src/db_gateway/feishu.py": {
+        "sha256": "b931fe510282798e0b6d2dbfd32b5f0c76fd13af7507c841dc894ee563d34490",
+        "bytes": 1793
+      },
+      "src/db_gateway/log.py": {
+        "sha256": "208333950ded6c02e5e92e7c0e7504b6cc47a4b95c31550128a4292ecb065b03",
+        "bytes": 2734
+      },
+      "src/db_gateway/mcp.py": {
+        "sha256": "5af18cda598db49c8345ee5bb2f22bdaeeb67da3bbd2a2ecae086986985e5971",
+        "bytes": 2824
+      },
+      "src/db_gateway/mcp_schema.py": {
+        "sha256": "3f090c2a9a8295aa8305ad2c6f7150468e86181966db955fb3a2567642ade266",
+        "bytes": 991
+      },
+      "src/db_gateway/postgres.py": {
+        "sha256": "27711a470097076675ffe2d97c2a35ae4d76f0dce8e65a2c7ec0019790ace176",
+        "bytes": 5841
+      },
+      "src/db_gateway/teleport.py": {
+        "sha256": "e296aca620553d416511cfa61df55a0472e6d2d71b1fbe64682092dda6d6f3a8",
+        "bytes": 3785
+      },
+      "src/db_gateway/teleport_auth_web.py": {
+        "sha256": "28e74f41d6750f5860caea7b5cd048661afff27dccdc0824bdd176cefc935e83",
+        "bytes": 11026
+      },
+      "src/db_gateway/teleport_login.py": {
+        "sha256": "7f875406866552198a259feaf403fc987ec9f56ab688415b495d85d7606db91d",
+        "bytes": 5402
+      },
+      "src/db_gateway/teleport_tokens.py": {
+        "sha256": "dbabdc0eb27bdd7eb798f32607e3d4d047e4cffc8972271db4fba5234fb4d721",
+        "bytes": 1939
+      },
+      "tests/integrations/test_postgres_runner.py": {
+        "sha256": "412c626f1470c69a5510ab491dab96264052b3bf068a2e5b2b20a9daf45058d9",
+        "bytes": 1204
+      },
+      "tests/integrations/test_teleport.py": {
+        "sha256": "f6f5cbcd2ce98ed9fd86a339ddc1074827f0f5af637099bb7d1b8e1c90f8c1b9",
+        "bytes": 1890
+      },
+      "tests/scripts/test_db_gateway_mcp_stdio.py": {
+        "sha256": "cc9069cb31743d75aec861b328308480a64987116bd657a6a069e2fc8528325c",
+        "bytes": 1222
+      },
+      "tests/services/test_db_gateway_core.py": {
+        "sha256": "71311d0f2706438a0585c757243c2057319fb94b440cc89ad1e749b743ded9c3",
+        "bytes": 6851
+      },
+      "tests/services/test_mcp_http.py": {
+        "sha256": "59015dad864819e37e45423b097c60bac8ef7239e7ab728e3d70b3531b8fb0c9",
+        "bytes": 3995
+      },
+      "tests/services/test_teleport_auth_web.py": {
+        "sha256": "e7a395319c0f7673fba52a9d4d667094d8a5777b360a117b9df515b01a27b664",
+        "bytes": 2145
+      },
+      "tests/services/test_teleport_tokens.py": {
+        "sha256": "7f4e8b1362923db249f2997e064e7503ec26cf35d710fdb8c069953dcae8cde6",
+        "bytes": 708
+      },
+      "tests/test_auth_watchdog.py": {
+        "sha256": "03eb5da8067eab31c3d636bb776de6ee7e52373f78a19e71ccbba626fe4857ae",
+        "bytes": 8428
+      },
+      "uv.lock": {
+        "sha256": "a75faad54ef1324801263dfdfde8711d6feca07a2538c5f3ed87de43ac82c4b6",
+        "bytes": 190314
+      }
+    },
+    "signoz-mcp": {
+      ".gitignore": {
+        "sha256": "58fcc52dbe01f13fb16391acc567281c46d69f931e0cef8f43cd4d0b0ee3602f",
+        "bytes": 58
+      },
+      "README.md": {
+        "sha256": "cf68fd83cbae6d8e19d4143b8c608ca80ecb9686f055a6a04f231ff8c1f8162b",
+        "bytes": 4078
+      },
+      "deploy/systemd/signoz-mcp.service": {
+        "sha256": "99eff6bec6ad585e069fb28a6c6af9cfb14e4d342a5449417e31865e3e77d599",
+        "bytes": 353
+      },
+      "pyproject.toml": {
+        "sha256": "2da00d1e5fec007e93b4ffd7a447b887647c27ea3f98fdfcd22773e03d3ab9ec",
+        "bytes": 728
+      },
+      "scripts/README.md": {
+        "sha256": "7af2dc1cea55b017861634b5d80642b649eaa7f1919b47f077864684f43c584d",
+        "bytes": 3495
+      },
+      "scripts/sz": {
+        "sha256": "68971ff0c758b510323a9936107313a65d18801c9a3e129d9f65676d68b3bd6a",
+        "bytes": 14587
+      },
+      "src/signoz_mcp/__init__.py": {
+        "sha256": "d6c5d2c97a096bce05c4d49c4d1c0d859d51eafc414ebc3b05003843ba7b4b74",
+        "bytes": 33
+      },
+      "src/signoz_mcp/app.py": {
+        "sha256": "63ad1d561edf0a4980857ef5f16a4745bfe510e7e239b638fb5b87f348d05d37",
+        "bytes": 9388
+      },
+      "src/signoz_mcp/settings.py": {
+        "sha256": "7cc3369384033cade607c02744968977ecbbe733d393611ca652697689b4b8d2",
+        "bytes": 1712
+      },
+      "src/signoz_mcp/structured_tools.py": {
+        "sha256": "54b42632a96a4a31dfaa77980c497d7052a6b78e9e34c29e3cd1659b5acf42cb",
+        "bytes": 31591
+      },
+      "src/signoz_mcp/sz_runner.py": {
+        "sha256": "9dc893c08031f2676310d5dcdb2168cd616221f553ed63fdb81a953170ec4640",
+        "bytes": 3832
+      },
+      "tests/test_app.py": {
+        "sha256": "483ee3a72f060ca3b5b9b72d692886c5226e74917ee0c126251c068a6f6ab186",
+        "bytes": 13092
+      },
+      "tests/test_structured_tools.py": {
+        "sha256": "3614350185c37d00d7a02df2f956e9598848d3876c2a7d1eb261eab4314fe235",
+        "bytes": 6263
+      },
+      "tests/test_sz_runner.py": {
+        "sha256": "2d52e5ad743e893bf1214c8ce92d63a009ca1ec56699c6c7c147daf58c28a83a",
+        "bytes": 3084
+      },
+      "uv.lock": {
+        "sha256": "9e824322a14bd00750cf7fd90c26be087ab22bc602cfd2bc6cf43dc4f2488b5d",
+        "bytes": 257159
+      }
+    },
+    "source-mcp": {
+      "README.md": {
+        "sha256": "87ef465045a43ca67e6aa12da949abf433025cc74e9ac5e2a7d31097a0acb17c",
+        "bytes": 946
+      },
+      "pyproject.toml": {
+        "sha256": "6a1d21ee1086f56721d891f0ea5b9691e0ddd42b8378b1830e821d4b1df1d362",
+        "bytes": 598
+      },
+      "scripts/github_askpass.sh": {
+        "sha256": "eda768e3488cad641a447bcab1043a0fefb3549fe2d08b1c2d12796c86fe51ee",
+        "bytes": 154
+      },
+      "src/source_mcp/__init__.py": {
+        "sha256": "e2dfdcaf386b2ee9befa8ca8c14331b63053cd4b56a7ba114c5db67b012f246e",
+        "bytes": 49
+      },
+      "src/source_mcp/app.py": {
+        "sha256": "029015f1ea3c4bfad1bc4a5a5f7d0cc042f6dfe2f13ba3dc0c228e8ffa54170d",
+        "bytes": 12387
+      },
+      "src/source_mcp/errors.py": {
+        "sha256": "d07f52331d5b17176c781077305e366c17048e306cec08a5173807f2899b0aef",
+        "bytes": 177
+      },
+      "src/source_mcp/git_ops.py": {
+        "sha256": "4b4f0f56e7d8dfe9261ca16740ab4289a832b1de5b5d6fd7d169c55fd3a4159c",
+        "bytes": 15826
+      },
+      "src/source_mcp/runtime.py": {
+        "sha256": "08338c9c1a32312dc8627491b40e6ebb040f25531013a7acb7e75c9919d413d6",
+        "bytes": 9223
+      },
+      "src/source_mcp/settings.py": {
+        "sha256": "19f6edf353e4ac4be1494ed0d95ec766cf9276028b27e1e97afa3788b7e803c6",
+        "bytes": 3118
+      },
+      "tests/test_app.py": {
+        "sha256": "979b4c09c4885ac774bc1868eb52ca580c5d5e7a9c623bd0af5e4dca4778384c",
+        "bytes": 6205
+      },
+      "tests/test_git_ops.py": {
+        "sha256": "42cfb55b280e12a4f38fb64f883ceb70375e668f05714c405343151fe454ca62",
+        "bytes": 6000
+      },
+      "tests/test_runtime.py": {
+        "sha256": "8b012de5c8e95bb62eda84c6319e0f05fec048de6d61496c2906a1ec921f9cb6",
+        "bytes": 5906
+      },
+      "uv.lock": {
+        "sha256": "1047980179e371b600b59243e72742e0d0dc3d8ef00c55e0a80433e1487eb534",
+        "bytes": 259012
+      }
+    },
+    "github-mcp": {
+      "README.md": {
+        "sha256": "39bc9bab4638390d2517024c3705ddc3919eb7ab18e5c4f32184e18a5086a7b3",
+        "bytes": 299
+      },
+      "deploy/nginx/github-mcp.conf": {
+        "sha256": "ced240ab3af0e841baaf8dda8c535e017299edab6a90401dd81bf33b749a579b",
+        "bytes": 338
+      },
+      "deploy/systemd/github-mcp.service": {
+        "sha256": "f0e7d09c376957673759302036c62fbed4d661f6f9d413bfd64ece378b42818d",
+        "bytes": 452
+      },
+      "pyproject.toml": {
+        "sha256": "51153e7113af93e49f6a9bedac1a597f8fd1a06d70665cf1ed2953756de3c2cc",
+        "bytes": 561
+      },
+      "src/github_mcp/__init__.py": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      },
+      "src/github_mcp/app.py": {
+        "sha256": "2afd9996e43ca84919a1ef2dbfad8134ef90ac8c59db2a4724e6b72e04e2ee67",
+        "bytes": 3010
+      },
+      "src/github_mcp/mcp.py": {
+        "sha256": "c0bb446e3e264e18b317d7f024da7ccaf3835f7467590fe972334aa01f2174bb",
+        "bytes": 3396
+      },
+      "src/github_mcp/settings.py": {
+        "sha256": "f3d51752e70e4932338908cb632666b56a16d0f95459026ac7a8d57b25af8ade",
+        "bytes": 773
+      },
+      "src/github_mcp/tools.py": {
+        "sha256": "964b665b9cc815c5af43d5ba0a3569a21a209f51b8392a9578a6d9decb7d1c90",
+        "bytes": 6846
+      },
+      "tests/test_app.py": {
+        "sha256": "3b03f1d7e2db342f68d912ba7c178a82c5396f7881c9d4e5417ef995a21f6048",
+        "bytes": 2405
+      },
+      "uv.lock": {
+        "sha256": "f9704fec773ea9ddab76a1e856db0bbbdabb89037f57b3a19d27105bb0bb0e35",
+        "bytes": 253656
+      }
+    },
+    "docs-tool-service": {
+      "README.md": {
+        "sha256": "2c3e6f6df95af0c0b7ef8203ba0d2cea80cbc53368da241644856514ca92e257",
+        "bytes": 198
+      },
+      "deploy/nginx/docs-tool-service.conf": {
+        "sha256": "bf9673bc09742ca57d75962a2fc31f4ed6885b400bb0a0b0024bc26c6fd34252",
+        "bytes": 345
+      },
+      "deploy/systemd/docs-tool-service.service": {
+        "sha256": "ffa2e1cd53a4854434487e3834b569a6489d809a54b344ce64579c0c8528e4dc",
+        "bytes": 494
+      },
+      "pyproject.toml": {
+        "sha256": "6abc917d8bd7c5bcdf490129a1d7623bd897a64a8cf5c2d0c2db317d597b2d08",
+        "bytes": 598
+      },
+      "src/docs_tool_service/__init__.py": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      },
+      "src/docs_tool_service/app.py": {
+        "sha256": "88062bb0831ac45989e5e97b26409650194c431d92897d5bf7b959aa7ab73bec",
+        "bytes": 3024
+      },
+      "src/docs_tool_service/mcp.py": {
+        "sha256": "c0bb446e3e264e18b317d7f024da7ccaf3835f7467590fe972334aa01f2174bb",
+        "bytes": 3396
+      },
+      "src/docs_tool_service/settings.py": {
+        "sha256": "ef6d7e4f18facae2e27a9b195e9401d9dac477eb1d87f1e53cce94236c4b3f02",
+        "bytes": 826
+      },
+      "src/docs_tool_service/tools.py": {
+        "sha256": "9bcc3ce7fa834618cee07f9292c998de5e93c1f4d2183949930ca3c37ac963b2",
+        "bytes": 6603
+      },
+      "tests/test_app.py": {
+        "sha256": "7e3c84bc7e63212000c1b66220c7973b60ffd16fc44c12c2f14060fad1bdba08",
+        "bytes": 865
+      },
+      "uv.lock": {
+        "sha256": "385893f24863b7de0bc8e18ec8af8d57ff264d74d795afe831d93c6ba7aaa667",
+        "bytes": 253663
+      }
+    },
+    "notification-service": {
+      "README.md": {
+        "sha256": "6e27bfeeb8746d474e1049dcd11ae9d2c2b506075b612b753f03d45460407020",
+        "bytes": 182
+      },
+      "deploy/nginx/notification-service.conf": {
+        "sha256": "9a9a5cf374378ec87ed87c5b2561a40297c35790e5ec861c7fe4ad5bb5636374",
+        "bytes": 348
+      },
+      "deploy/systemd/notification-service.service": {
+        "sha256": "ea7a9cb51509fb6a23f160b4ddf71dc03afe9109763763fd6626e801261ff8d2",
+        "bytes": 508
+      },
+      "pyproject.toml": {
+        "sha256": "0bbc6cef510cb4b4bde9904d43d9dd60e7b8a8a0c053b954fb28d6f7fe659fc9",
+        "bytes": 594
+      },
+      "src/notification_service/__init__.py": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      },
+      "src/notification_service/app.py": {
+        "sha256": "4f3ee4e800281bf5b3da09c79cd80f1d66e49d1ee68a4223e17597e1ef93c13b",
+        "bytes": 3030
+      },
+      "src/notification_service/mcp.py": {
+        "sha256": "c0bb446e3e264e18b317d7f024da7ccaf3835f7467590fe972334aa01f2174bb",
+        "bytes": 3396
+      },
+      "src/notification_service/settings.py": {
+        "sha256": "4e100e5e9ca643cd76af0eb9ce0459306343ef5b12bb744095a9c3dff8be06b4",
+        "bytes": 913
+      },
+      "src/notification_service/tools.py": {
+        "sha256": "db0e66470d9eaf628336d4d019863fb79afda5ad022cf14873691848d5b32c50",
+        "bytes": 5645
+      },
+      "tests/test_app.py": {
+        "sha256": "93805589e9005c066221760093b8ecc8969031644aeb6f61b0ba33b2180ba83a",
+        "bytes": 689
+      },
+      "uv.lock": {
+        "sha256": "d032ad8e2c75ba1c4455de7fec74efbbc9e90978580c64b555eba55fdac22bb2",
+        "bytes": 253666
+      }
+    },
+    "zendesk-mcp": {
+      ".dockerignore": {
+        "sha256": "43edc3d31f137f08ee2c98bb2871be47e8c939e56e97f7aec68109a35a21826c",
+        "bytes": 49
+      },
+      "Dockerfile": {
+        "sha256": "7cecd0bb721d9db071823eb4a352254620fd2d70010236284c78ed3a639d8290",
+        "bytes": 209
+      },
+      "README.md": {
+        "sha256": "dea8f565ec79405b7dffa0238fb1d38d2e4447e2cd4a4924cfab6b12256864f5",
+        "bytes": 4963
+      },
+      "deploy/nginx/zendesk-mcp.conf": {
+        "sha256": "76960f00cbc31605067769600c70dc5c04836b8baa4cad81569dc3553fcdc7cf",
+        "bytes": 286
+      },
+      "deploy/systemd/zendesk-mcp.service": {
+        "sha256": "d8dc80a06e3bdbab7c80c6a9e975de6d14be1fefc8ec857b1622784d7d8f00e7",
+        "bytes": 448
+      },
+      "pyproject.toml": {
+        "sha256": "2644ca675f135c7098e85c98cc538d99d12f69d9fe6f3e81278f8502617d3163",
+        "bytes": 588
+      },
+      "src/zendesk_mcp/__init__.py": {
+        "sha256": "189898836f395a015bccdacd898e4f9e8a6e9aead9651042e134d1ea9ccc73e7",
+        "bytes": 57
+      },
+      "src/zendesk_mcp/app.py": {
+        "sha256": "c0cdcd99cc8ff399d0501e78097a2dc981c26d9f4ee524d64e716b032afbcfc6",
+        "bytes": 6801
+      },
+      "src/zendesk_mcp/client.py": {
+        "sha256": "9a92c2a21e6e2dfd04d1a16c84b076bb30698a6feac894bc474369525d369466",
+        "bytes": 13757
+      },
+      "src/zendesk_mcp/mcp_schema.py": {
+        "sha256": "30db1351a6e11ce79e788e185d73d7ca9f3bae7ab1fde9025faec654ce0c450d",
+        "bytes": 11637
+      },
+      "src/zendesk_mcp/settings.py": {
+        "sha256": "553f63028096e3ff5dc0d702b1027d39f7f726c114f15848ecb8091b9dd9fbd9",
+        "bytes": 3018
+      },
+      "src/zendesk_mcp/tools.py": {
+        "sha256": "46072e8a7802ed729c52d4d942d30500dc31417ca203a158519ace2467c89b0a",
+        "bytes": 33253
+      },
+      "tests/conftest.py": {
+        "sha256": "18428c8ec29def69ac66fdbe51cbcb8833b7fee536d6f0e1d0494d961271a614",
+        "bytes": 198
+      },
+      "tests/test_app.py": {
+        "sha256": "26dc2b0cb21457ed449595f37ddfd1cc2dede67f6a1e3bf194e5e505112ae76f",
+        "bytes": 33325
+      },
+      "tests/test_client.py": {
+        "sha256": "68f840e1b5c042c28803593595ef818023ed2621edf525e6c5879a67cac48f8a",
+        "bytes": 4817
+      },
+      "uv.lock": {
+        "sha256": "d685f3cdb59d8fbbb9f82d298a11eccf6f4138d0297c459b5f65b75a4e46ee9a",
+        "bytes": 286703
+      }
+    },
+    "zendesk-browser-relay": {
+      ".gitignore": {
+        "sha256": "132d58e61df4ee787e1ca911cea6632f0bc4c8a7353bf1f98b91f74083b5790e",
+        "bytes": 87
+      },
+      "Dockerfile": {
+        "sha256": "40d202c6f94a309265eba80c5124928640a1cc8bbaf99835664d13a4933a24d0",
+        "bytes": 987
+      },
+      "Dockerfile.footer-hotfix": {
+        "sha256": "d1a09ff0a7ca42762d3098d592ff1320cd538425d36ebf260d2289da5a6904e5",
+        "bytes": 275
+      },
+      "README.md": {
+        "sha256": "0cdd2c409d4928fdfcb8272f1d00ae41c55291ede72ccb66109fd47d80169673",
+        "bytes": 5660
+      },
+      "deploy/systemd/zendesk-browser-relay-session-watchdog.service": {
+        "sha256": "f54b13ae037ce1934c966a837dc9a25c81a1f6b61ece2bc7a7130de724a6b6c5",
+        "bytes": 317
+      },
+      "deploy/systemd/zendesk-browser-relay-session-watchdog.timer": {
+        "sha256": "a634e01d2481f1f8b52e489265f10efbb327969166f8c25a9118351a29e594d6",
+        "bytes": 181
+      },
+      "deploy/systemd/zendesk-browser-relay.service": {
+        "sha256": "fcc14eaef9fee7cf4e8dc5ac79f900ed5fa62145154ab39b246b4ca40afe66d6",
+        "bytes": 560
+      },
+      "pyproject.toml": {
+        "sha256": "c0839570863a1d94aa9643f2bbd80c2b0228684c32641a3fedf6d35344a1a5cf",
+        "bytes": 781
+      },
+      "scripts/deploy_footer_hotfix.py": {
+        "sha256": "214c2947a72ccf1084098ea7f2a08b90e7e062a4fc86b87687c06d13b5a1137c",
+        "bytes": 6326
+      },
+      "scripts/inspect_mfa_after_password.py": {
+        "sha256": "e24dd851fed1270c5fa60c81d7297429245c5d9fad927b33761c2c6f7708771f",
+        "bytes": 4494
+      },
+      "scripts/inspect_page.py": {
+        "sha256": "7b9079fa83b1ff02895ffa8d5a6dd0190402447d7d239bc7530958b01602ee4d",
+        "bytes": 2769
+      },
+      "scripts/login_once.py": {
+        "sha256": "8fb3b46fc415f21f2b61dcfbb8940b1898b9ba54170ae130d3a558a84212fe36",
+        "bytes": 4724
+      },
+      "scripts/login_with_mfa_once.py": {
+        "sha256": "01e87adf90dadc0cdf3caee0dcf02dc989e30a9f0b12e5b66b7e3126aee2d46f",
+        "bytes": 6304
+      },
+      "scripts/mfa_once.py": {
+        "sha256": "9730a912ffd606a012f2e645f022b2e6bfdd033a3c62e4e3c8d423151e4d5702",
+        "bytes": 4139
+      },
+      "scripts/session_watchdog.py": {
+        "sha256": "58311fef4ea3f261531cba36937e3131710f6ef4c68ce8c9ba5f3b144a1ac883",
+        "bytes": 3536
+      },
+      "scripts/verify_customer_reply.py": {
+        "sha256": "e7279bf42343c40b7e68347c0ee7120920fc98f5a8ce84605a8eef7de18f5ba8",
+        "bytes": 1051
+      },
+      "src/zendesk_browser_relay/__init__.py": {
+        "sha256": "2515233a0cdac6c5447c9dbd6b0d54c89284f191d8cb41473d89b347ee296ae7",
+        "bytes": 50
+      },
+      "src/zendesk_browser_relay/app.py": {
+        "sha256": "67cc27dec4408d17c6a6d18d9b2cc62e75e918881506c7a73e5d64ad975eea91",
+        "bytes": 3211
+      },
+      "src/zendesk_browser_relay/auth.py": {
+        "sha256": "f97e654003f1110b237bbe8d5d89bd8bfc65c2b54dc77e6506fb2bc48a78ec17",
+        "bytes": 760
+      },
+      "src/zendesk_browser_relay/browser_relay.py": {
+        "sha256": "62fece6063fddbab069f49cd6fd931e278a2025b68791a7bba49f773a43d8f7f",
+        "bytes": 27986
+      },
+      "src/zendesk_browser_relay/coordination.py": {
+        "sha256": "1f02b3ef3f488e9280af887b8aec8d1d3c2abc90fb53deb8bb7f971e88351876",
+        "bytes": 28397
+      },
+      "src/zendesk_browser_relay/customer_reply.py": {
+        "sha256": "2e1da2820d4862b71f686111b22b11b97841465f4cb263829f1448af8786ae7c",
+        "bytes": 3948
+      },
+      "src/zendesk_browser_relay/login.py": {
+        "sha256": "8a052c758ac8ac4eda695f56e5ebd3f73436567d6e8a21728d4223aa8ede5aad",
+        "bytes": 1127
+      },
+      "src/zendesk_browser_relay/login_automation.py": {
+        "sha256": "755b0741ccc1da35302ef5b805fada9350b5ac8ecc5074b95f25da922cbb389c",
+        "bytes": 851
+      },
+      "src/zendesk_browser_relay/mcp.py": {
+        "sha256": "d508c7768c112c3754393b63aaf31f49095de7fba37f2919013637b37efc6616",
+        "bytes": 16057
+      },
+      "src/zendesk_browser_relay/schemas.py": {
+        "sha256": "8f5fb5759e94d9c79ccc6b38d0c3423ba79123103673777d7a5c884a8ad56b85",
+        "bytes": 3221
+      },
+      "src/zendesk_browser_relay/settings.py": {
+        "sha256": "4bc8577401372ffeed152a7077d01f8372ce892442e9541d2b46bea6677fed2c",
+        "bytes": 2265
+      },
+      "tests/test_app.py": {
+        "sha256": "e5fd65e6cc9c2f7e5ca7ba01e43b70b6153830df92cdc1c2a50b1f3f4a251700",
+        "bytes": 2672
+      },
+      "tests/test_auth.py": {
+        "sha256": "2c4a29492e4565f342925a520ce01bd94ed6fcda309b2178844fefe294746be3",
+        "bytes": 1073
+      },
+      "tests/test_browser_relay.py": {
+        "sha256": "6b4c26dca908a0aae6fda051814b0576cdc947ea2f3f37e51ac2f2960a476038",
+        "bytes": 15851
+      },
+      "tests/test_coordination.py": {
+        "sha256": "555c70456585349b5e8dedfcb30100a82245147e99a63474ec0caa4b7b03e3c1",
+        "bytes": 17955
+      },
+      "tests/test_customer_reply.py": {
+        "sha256": "ace536496cba0dbc90800ce0725955b5f58d7beb7d53a07afbbcf04b9961408c",
+        "bytes": 4111
+      },
+      "tests/test_login_automation.py": {
+        "sha256": "dff5556885e602592578a9e4c9ac6ce020376826e65c91bbc885ffb775628c23",
+        "bytes": 416
+      },
+      "tests/test_mcp.py": {
+        "sha256": "4c20b94f01f8c77bbc27fe51c19fc1fc223074a6a243c2f4a8ab044674d95ee6",
+        "bytes": 17242
+      },
+      "tests/test_settings.py": {
+        "sha256": "d368e5014bf77a5db9f8ba018b75ae4df9c4aefdf6989bea2cbac76288e7ba52",
+        "bytes": 813
+      },
+      "uv.lock": {
+        "sha256": "af17761136760859ccaf147469b5573288da785b0a9d88944029d38a7392705a",
+        "bytes": 302121
+      }
+    },
+    "tool-services": {
+      "deploy/nginx/tool-services.conf": {
+        "sha256": "ad866f6c3f505a0a1eab4a9d22bc21e7038381f3c7f35df5b996129debe6d6b0",
+        "bytes": 1464
+      },
+      "deploy/systemd/docs-tool-service.service": {
+        "sha256": "4deca1310c557c260bb908a612541602dc7a3a5279f7975eda2eed31472c8fc8",
+        "bytes": 456
+      },
+      "deploy/systemd/github-mcp.service": {
+        "sha256": "46d0b8adee9267c10942b883bc83721a5a44acc6c550fbcc897c4a17c48ba0b0",
+        "bytes": 435
+      },
+      "deploy/systemd/notification-service.service": {
+        "sha256": "194102e4e1b8972cc07aa4e1402aab326f8834e7f7b866c9772d3e907f880dde",
+        "bytes": 461
+      },
+      "deploy/systemd/sandbox-worker.service": {
+        "sha256": "717920803545cd366c19811f73890f72162d90df62134007670a039b4eb80b4d",
+        "bytes": 498
+      },
+      "pyproject.toml": {
+        "sha256": "7eb2d3548dde91ce87c1e3e3ee86209ce18d3b5b792340e5adaf43413432d9cf",
+        "bytes": 769
+      },
+      "src/tool_services/__init__.py": {
+        "sha256": "4c4bbc323fcd5bba8bc63afa31daa98aa708bae1bb7f93420326d878dbc56607",
+        "bytes": 46
+      },
+      "src/tool_services/app.py": {
+        "sha256": "54c28a69a1bab3eb6ce00945606a4794f306e5b39575e9d78f2d88da2b59ff03",
+        "bytes": 5810
+      },
+      "src/tool_services/docs_tools.py": {
+        "sha256": "6b94e366d5cff823b16f1134461420e340bb64489e06776a4fe02a64e5566af6",
+        "bytes": 29806
+      },
+      "src/tool_services/github_tools.py": {
+        "sha256": "964b665b9cc815c5af43d5ba0a3569a21a209f51b8392a9578a6d9decb7d1c90",
+        "bytes": 6846
+      },
+      "src/tool_services/mcp.py": {
+        "sha256": "c0bb446e3e264e18b317d7f024da7ccaf3835f7467590fe972334aa01f2174bb",
+        "bytes": 3396
+      },
+      "src/tool_services/notification_tools.py": {
+        "sha256": "db0e66470d9eaf628336d4d019863fb79afda5ad022cf14873691848d5b32c50",
+        "bytes": 5645
+      },
+      "src/tool_services/sandbox_tools.py": {
+        "sha256": "9681ef7b42bf253351582f0290d3626655585eda89a3b20eec677ac8e088c3f9",
+        "bytes": 16780
+      },
+      "src/tool_services/settings.py": {
+        "sha256": "a2068c0a3c452df08f056b743e2736f367de60058ce1dde1f7a26ee32fa65333",
+        "bytes": 2633
+      },
+      "tests/test_apps.py": {
+        "sha256": "12345d7efe6dcb685cc2986db7caf1c6625bb46f271510966e31954ca22d3823",
+        "bytes": 9785
+      },
+      "uv.lock": {
+        "sha256": "618a3a93762e25159ad28c7466299c1dd63f624f363a43a082a7bccdcfb08f90",
+        "bytes": 253659
+      }
+    }
+  },
+  "withheld": [],
+  "verification": {
+    "stable_during_audit": true,
+    "changes": []
+  }
+}

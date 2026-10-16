@@ -1,0 +1,29 @@
+{
+  "verification": {
+    "business_and_protocol_helpers": "byte-identical to runtime snapshot",
+    "transport_and_auth_functions": "AST-identical to runtime snapshot",
+    "packaging": "independent namespace, one service definition and its settings"
+  },
+  "files": [
+    {
+      "path": "src/notification_service/tools.py",
+      "sha256": "db0e66470d9eaf628336d4d019863fb79afda5ad022cf14873691848d5b32c50"
+    },
+    {
+      "path": "src/notification_service/__init__.py",
+      "sha256": "4c4bbc323fcd5bba8bc63afa31daa98aa708bae1bb7f93420326d878dbc56607"
+    },
+    {
+      "path": "src/notification_service/mcp.py",
+      "sha256": "c0bb446e3e264e18b317d7f024da7ccaf3835f7467590fe972334aa01f2174bb"
+    },
+    {
+      "path": "src/notification_service/settings.py",
+      "sha256": "c54a70821c1bcf1dc746817eaaa32a4287c5e17d872aa5beb12d97d652dd620e"
+    },
+    {
+      "path": "src/notification_service/app.py",
+      "sha256": "0ae4575766629fbb7bb06912e24b1ad77fe374e2241cda2494f8d8af5f04309d"
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+FROM zendesk-mcp:rollback-accept-20261012
+COPY src/zendesk_mcp/client.py /app/src/zendesk_mcp/client.py
+LABEL org.opencontainers.image.version="accept-fix-20261012"

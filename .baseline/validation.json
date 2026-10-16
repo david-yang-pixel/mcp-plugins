@@ -1,0 +1,49 @@
+{
+  "python": "3.12",
+  "platform": "macOS arm64",
+  "services": {
+    "db-gateway": {
+      "tests_passed": 44,
+      "locked_install": true,
+      "wheel_build": true
+    },
+    "docs-tool-service": {
+      "tests_passed": 10,
+      "locked_install": true,
+      "wheel_build": true
+    },
+    "github-mcp": {
+      "tests_passed": 5,
+      "locked_install": true,
+      "wheel_build": true
+    },
+    "notification-service": {
+      "tests_passed": 3,
+      "locked_install": true,
+      "wheel_build": true
+    },
+    "signoz-mcp": {
+      "tests_passed": 35,
+      "locked_install": true,
+      "wheel_build": true
+    },
+    "source-mcp": {
+      "tests_passed": 30,
+      "locked_install": true,
+      "wheel_build": true
+    },
+    "zendesk-browser-relay": {
+      "tests_passed": 111,
+      "locked_install": true,
+      "wheel_build": true
+    },
+    "zendesk-mcp": {
+      "tests_passed": 32,
+      "locked_install": true,
+      "wheel_build": true
+    }
+  },
+  "total_tests_passed": 270,
+  "docker_images_built": false,
+  "production_changed": false
+}

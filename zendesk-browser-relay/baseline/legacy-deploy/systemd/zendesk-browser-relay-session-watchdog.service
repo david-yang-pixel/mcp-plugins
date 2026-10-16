@@ -1,0 +1,9 @@
+[Unit]
+Description=Zendesk Browser Relay session watchdog
+After=zendesk-browser-relay.service
+Wants=zendesk-browser-relay.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/zendesk-browser-relay
+ExecStart=/opt/zendesk-browser-relay/.venv/bin/python /opt/zendesk-browser-relay/scripts/session_watchdog.py --restart

@@ -1,0 +1,73 @@
+{
+  "source": {
+    "scope": "server",
+    "name": "tool-services"
+  },
+  "runtime_files": {
+    "deploy/nginx/tool-services.conf": {
+      "sha256": "ad866f6c3f505a0a1eab4a9d22bc21e7038381f3c7f35df5b996129debe6d6b0",
+      "bytes": 1464
+    },
+    "deploy/systemd/docs-tool-service.service": {
+      "sha256": "9c83ceaf32a3457c081f78ab20930f5c28917a0d87bc0e813a475bf6c0dc487b",
+      "bytes": 503
+    },
+    "deploy/systemd/github-mcp.service": {
+      "sha256": "e286039cac093aeebbbf172bcb4e43f41b2fc2c88e5a9db4925302f88c81673a",
+      "bytes": 493
+    },
+    "deploy/systemd/notification-service.service": {
+      "sha256": "c0839655698998cb963eff8fad262e0ec5720c0e5c332b0d6f6f9dd0eea03f4c",
+      "bytes": 521
+    },
+    "deploy/systemd/sandbox-worker.service": {
+      "sha256": "7f4d8ccea91f5b205061f776b6ee2b9f5665f87141171304fc8a23bfde69ab8d",
+      "bytes": 554
+    },
+    "pyproject.toml": {
+      "sha256": "7eb2d3548dde91ce87c1e3e3ee86209ce18d3b5b792340e5adaf43413432d9cf",
+      "bytes": 769
+    },
+    "src/tool_services/__init__.py": {
+      "sha256": "4c4bbc323fcd5bba8bc63afa31daa98aa708bae1bb7f93420326d878dbc56607",
+      "bytes": 46
+    },
+    "src/tool_services/app.py": {
+      "sha256": "55e28814e252f0aac36aea7d1046958e9c1fe6959da58d3542928d601c33cdda",
+      "bytes": 6456
+    },
+    "src/tool_services/docs_tools.py": {
+      "sha256": "6b94e366d5cff823b16f1134461420e340bb64489e06776a4fe02a64e5566af6",
+      "bytes": 29806
+    },
+    "src/tool_services/github_tools.py": {
+      "sha256": "964b665b9cc815c5af43d5ba0a3569a21a209f51b8392a9578a6d9decb7d1c90",
+      "bytes": 6846
+    },
+    "src/tool_services/mcp.py": {
+      "sha256": "c0bb446e3e264e18b317d7f024da7ccaf3835f7467590fe972334aa01f2174bb",
+      "bytes": 3396
+    },
+    "src/tool_services/notification_tools.py": {
+      "sha256": "db0e66470d9eaf628336d4d019863fb79afda5ad022cf14873691848d5b32c50",
+      "bytes": 5645
+    },
+    "src/tool_services/sandbox_tools.py": {
+      "sha256": "9681ef7b42bf253351582f0290d3626655585eda89a3b20eec677ac8e088c3f9",
+      "bytes": 16780
+    },
+    "src/tool_services/settings.py": {
+      "sha256": "a2068c0a3c452df08f056b743e2736f367de60058ce1dde1f7a26ee32fa65333",
+      "bytes": 2633
+    },
+    "tests/test_apps.py": {
+      "sha256": "12345d7efe6dcb685cc2986db7caf1c6625bb46f271510966e31954ca22d3823",
+      "bytes": 9785
+    },
+    "uv.lock": {
+      "sha256": "618a3a93762e25159ad28c7466299c1dd63f624f363a43a082a7bccdcfb08f90",
+      "bytes": 253659
+    }
+  },
+  "assembly": "standalone service package; transport and tool implementations preserved"
+}

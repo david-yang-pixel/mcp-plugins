@@ -1,0 +1,25 @@
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+**/.pytest_cache/
+**/.ruff_cache/
+**/build/
+**/dist/
+**/.env
+**/.env.*
+!**/.env.example
+**/config.yaml
+**/*.pem
+**/*.key
+**/*.log
+**/*.sqlite*
+**/*.db
+**/.tsh/
+**/profile/
+**/state/
+**/data/
+.DS_Store
+
+# Machine-local recovery information
+.baseline/local-backup.json

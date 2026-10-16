@@ -1,0 +1,17 @@
+[Unit]
+Description=Remote SigNoz MCP service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/signoz-mcp/code
+EnvironmentFile=/etc/signoz-mcp/env
+ExecStart=/opt/signoz-mcp/code/.venv/bin/signoz-mcp
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

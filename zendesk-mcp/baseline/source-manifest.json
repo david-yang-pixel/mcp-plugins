@@ -1,0 +1,61 @@
+{
+  "source": {
+    "scope": "server",
+    "name": "zendesk-mcp"
+  },
+  "runtime_files": {
+    ".dockerignore": {
+      "sha256": "43edc3d31f137f08ee2c98bb2871be47e8c939e56e97f7aec68109a35a21826c",
+      "bytes": 49
+    },
+    "Dockerfile": {
+      "sha256": "7cecd0bb721d9db071823eb4a352254620fd2d70010236284c78ed3a639d8290",
+      "bytes": 209
+    },
+    "README.md": {
+      "sha256": "f258fe6888501e27fd9ee60966c9780a245add001cdb72ed392b345312356755",
+      "bytes": 4788
+    },
+    "deploy/nginx/zendesk-mcp.conf": {
+      "sha256": "76960f00cbc31605067769600c70dc5c04836b8baa4cad81569dc3553fcdc7cf",
+      "bytes": 286
+    },
+    "deploy/systemd/zendesk-mcp.service": {
+      "sha256": "d8dc80a06e3bdbab7c80c6a9e975de6d14be1fefc8ec857b1622784d7d8f00e7",
+      "bytes": 448
+    },
+    "pyproject.toml": {
+      "sha256": "2644ca675f135c7098e85c98cc538d99d12f69d9fe6f3e81278f8502617d3163",
+      "bytes": 588
+    },
+    "src/zendesk_mcp/__init__.py": {
+      "sha256": "189898836f395a015bccdacd898e4f9e8a6e9aead9651042e134d1ea9ccc73e7",
+      "bytes": 57
+    },
+    "src/zendesk_mcp/app.py": {
+      "sha256": "a38800ab144747ccf9b0e630ec80d0e12f921c3e3f5b653628fd719f43dcf94c",
+      "bytes": 7343
+    },
+    "src/zendesk_mcp/client.py": {
+      "sha256": "cf891af0c3bb162d89f889df2ee41d3c9134d7de4f0c8d80511e6ad82e429398",
+      "bytes": 13892
+    },
+    "src/zendesk_mcp/mcp_schema.py": {
+      "sha256": "30db1351a6e11ce79e788e185d73d7ca9f3bae7ab1fde9025faec654ce0c450d",
+      "bytes": 11637
+    },
+    "src/zendesk_mcp/settings.py": {
+      "sha256": "553f63028096e3ff5dc0d702b1027d39f7f726c114f15848ecb8091b9dd9fbd9",
+      "bytes": 3018
+    },
+    "src/zendesk_mcp/tools.py": {
+      "sha256": "46072e8a7802ed729c52d4d942d30500dc31417ca203a158519ace2467c89b0a",
+      "bytes": 33253
+    },
+    "uv.lock": {
+      "sha256": "d685f3cdb59d8fbbb9f82d298a11eccf6f4138d0297c459b5f65b75a4e46ee9a",
+      "bytes": 286703
+    }
+  },
+  "assembly": "runtime source bytes preserved"
+}

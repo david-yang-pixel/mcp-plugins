@@ -1,0 +1,27 @@
+{
+  "verification": {
+    "application_source": "byte-identical to runtime snapshot"
+  },
+  "files": [
+    {
+      "path": "src/signoz_mcp/sz_runner.py",
+      "sha256": "9dc893c08031f2676310d5dcdb2168cd616221f553ed63fdb81a953170ec4640"
+    },
+    {
+      "path": "src/signoz_mcp/__init__.py",
+      "sha256": "d6c5d2c97a096bce05c4d49c4d1c0d859d51eafc414ebc3b05003843ba7b4b74"
+    },
+    {
+      "path": "src/signoz_mcp/settings.py",
+      "sha256": "7cc3369384033cade607c02744968977ecbbe733d393611ca652697689b4b8d2"
+    },
+    {
+      "path": "src/signoz_mcp/app.py",
+      "sha256": "c6314650d1e930cb79080cd54596fd84c81964df70b974a1a4e4a13a974fb59a"
+    },
+    {
+      "path": "src/signoz_mcp/structured_tools.py",
+      "sha256": "54b42632a96a4a31dfaa77980c497d7052a6b78e9e34c29e3cd1659b5acf42cb"
+    }
+  ]
+}

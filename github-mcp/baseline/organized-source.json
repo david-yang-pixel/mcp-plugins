@@ -1,0 +1,29 @@
+{
+  "verification": {
+    "business_and_protocol_helpers": "byte-identical to runtime snapshot",
+    "transport_and_auth_functions": "AST-identical to runtime snapshot",
+    "packaging": "independent namespace, one service definition and its settings"
+  },
+  "files": [
+    {
+      "path": "src/github_mcp/tools.py",
+      "sha256": "964b665b9cc815c5af43d5ba0a3569a21a209f51b8392a9578a6d9decb7d1c90"
+    },
+    {
+      "path": "src/github_mcp/__init__.py",
+      "sha256": "4c4bbc323fcd5bba8bc63afa31daa98aa708bae1bb7f93420326d878dbc56607"
+    },
+    {
+      "path": "src/github_mcp/mcp.py",
+      "sha256": "c0bb446e3e264e18b317d7f024da7ccaf3835f7467590fe972334aa01f2174bb"
+    },
+    {
+      "path": "src/github_mcp/settings.py",
+      "sha256": "fbe49ea47e0cbb56fb622c7321e79e3f2d5b1ef6ecaf8d11e3a9a4faaeaebbaa"
+    },
+    {
+      "path": "src/github_mcp/app.py",
+      "sha256": "8788ab334cca0f9096bf5218c9d47b2e1084d0cca23f9ad124bb160737859648"
+    }
+  ]
+}

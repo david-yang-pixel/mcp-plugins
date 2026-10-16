@@ -1,0 +1,10 @@
+ARG BASE_IMAGE=source-mcp:latest
+FROM ${BASE_IMAGE}
+
+COPY . /app
+WORKDIR /app
+RUN find /app -type d -name __pycache__ -prune -exec rm -rf {} + \
+    && rm -rf /app/.pytest_cache
+
+ENV PYTHONPATH=/app/src
+CMD ["python", "-m", "source_mcp.app"]

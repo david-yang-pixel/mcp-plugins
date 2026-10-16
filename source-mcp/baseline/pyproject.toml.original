@@ -1,0 +1,30 @@
+[project]
+name = "source-mcp"
+version = "0.1.0"
+description = "Remote MCP service for querying Dify SaaS source code at runtime refs."
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi>=0.115",
+    "pydantic-settings>=2.0",
+    "uvicorn[standard]>=0.30",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx>=0.28",
+    "httpx2>=0.28",
+    "pytest>=8.0",
+]
+
+[project.scripts]
+source-mcp = "source_mcp.app:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

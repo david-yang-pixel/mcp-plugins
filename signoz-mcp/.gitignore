@@ -1,0 +1,25 @@
+# Local credentials and runtime data
+.env
+.env.*
+!.env.example
+config.yaml
+*.pem
+*.key
+.tsh/
+profile/
+state/
+data/
+logs/
+*.log
+*.sqlite*
+*.db
+# Python and editor artifacts
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+.DS_Store

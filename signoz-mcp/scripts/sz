@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+"""
+sz — SigNoz CLI (zero-dependency, agent-friendly).
+
+Bypasses the broken signoz-mcp-server <-> SigNoz EE compatibility by talking
+directly to SigNoz v4 query_range API with raw ClickHouse SQL.
+
+Config (env vars; both have sensible defaults for Dify SaaS):
+    SIGNOZ_URL       default https://signoz.example.com
+    SIGNOZ_API_KEY   required
+
+Subcommands:
+    errors      — search ERROR logs by tenant_id / body substring / service
+    traceback   — pull the full Python stack trace (attributes_string['exception.stacktrace'])
+    query       — run an arbitrary ClickHouse SQL against signoz_logs.*
+    schema      — describe a table (default: distributed_logs_v2)
+    services    — list active k8s deployments in a time window
+
+Every subcommand accepts:
+    --hours N       lookback window in hours (default: 1; max: 168)
+    --limit N       row cap (default: 30; max: 1000)
+    --env E         deployment.environment filter (production / staging)
+    --json          emit raw JSON; otherwise prints aligned human-readable text
+    -q / --quiet    suppress meta lines on stderr
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+
+
+# ---- config -----------------------------------------------------------------
+
+DEFAULT_URL = "https://signoz.example.com"
+LOGS_TABLE = "signoz_logs.distributed_logs_v2"
+
+
+def cfg():
+    key = os.environ.get("SIGNOZ_API_KEY", "").strip()
+    if not key:
+        die("SIGNOZ_API_KEY env is required")
+    return (os.environ.get("SIGNOZ_URL", DEFAULT_URL).rstrip("/"), key)
+
+
+# ---- HTTP --------------------------------------------------------------------
+
+def post_query(sql: str, start_ms: int, end_ms: int, panel_type: str = "list") -> dict:
+    """Run a ClickHouse SQL via SigNoz v4 query_range. Returns parsed JSON."""
+    url_root, key = cfg()
+    body = {
+        "start": start_ms,
+        "end": end_ms,
+        "step": 60,
+        "compositeQuery": {
+            "queryType": "clickhouse_sql",
+            "panelType": panel_type,
+            "chQueries": {
+                "A": {"name": "A", "query": sql, "disabled": False},
+            },
+        },
+    }
+    req = urllib.request.Request(
+        f"{url_root}/api/v4/query_range",
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "SIGNOZ-API-KEY": key,
+            # Some deployments may reject Python-urllib's
+            # default UA with HTTP 403 code 1010. Curl works because of its UA.
+            "User-Agent": "sz-cli/1.0 (curl-compatible)",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            payload = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")[:2000]
+        die(f"HTTP {e.code} from SigNoz: {err_body}")
+    except urllib.error.URLError as e:
+        die(f"Cannot reach {url_root}: {e.reason}")
+
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        die(f"SigNoz returned non-JSON (first 500 chars): {payload[:500]}")
+
+    if data.get("status") == "error":
+        msg = data.get("error") or json.dumps(data.get("data") or data)
+        die(f"SigNoz query error: {msg[:1500]}")
+
+    return data
+
+
+def rows(data: dict) -> list:
+    """Extract the row list from a query_range list response."""
+    results = (data.get("data") or {}).get("result") or []
+    if not results:
+        return []
+    return results[0].get("list") or []
+
+
+# ---- time helpers ------------------------------------------------------------
+
+def time_window(hours: float):
+    """Return (start_ns, end_ns, start_ms, end_ms) for last N hours."""
+    end_s = int(time.time())
+    start_s = end_s - int(hours * 3600)
+    return (start_s * 1_000_000_000, end_s * 1_000_000_000,
+            start_s * 1000, end_s * 1000)
+
+
+def fmt_ts_ns(ns: int) -> str:
+    if not ns:
+        return "?"
+    return datetime.fromtimestamp(ns / 1e9, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ---- helpers -----------------------------------------------------------------
+
+def die(msg: str, code: int = 2):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def info(msg: str, args):
+    if not getattr(args, "quiet", False):
+        print(msg, file=sys.stderr)
+
+
+def esc(s: str) -> str:
+    """Escape a string for safe embedding in ClickHouse SQL single-quoted literal."""
+    return s.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def emit(rows_list, args, columns=None):
+    """Print rows in either JSON or aligned text."""
+    if getattr(args, "json", False):
+        # rows_list is a list of dicts (data field unwrapped)
+        json.dump(rows_list, sys.stdout, ensure_ascii=False, indent=2, default=str)
+        sys.stdout.write("\n")
+        return
+    if not rows_list:
+        info("(no rows)", args)
+        return
+    cols = columns or list(rows_list[0].keys())
+    # compute widths
+    widths = {c: max(len(str(c)), max((len(str(r.get(c, "")).splitlines()[0] if r.get(c) else "")) for r in rows_list)) for c in cols}
+    for c in cols:
+        widths[c] = min(widths[c], 80)
+    # header
+    print("  ".join(str(c).ljust(widths[c]) for c in cols))
+    print("  ".join("-" * widths[c] for c in cols))
+    for r in rows_list:
+        line_parts = []
+        for c in cols:
+            v = r.get(c, "")
+            if v is None:
+                v = ""
+            s = str(v)
+            # collapse newlines so the table stays one-line-per-row
+            s = s.splitlines()[0] if "\n" in s else s
+            if len(s) > widths[c]:
+                s = s[: widths[c] - 1] + "…"
+            line_parts.append(s.ljust(widths[c]))
+        print("  ".join(line_parts))
+
+
+# ---- subcommands -------------------------------------------------------------
+
+def cmd_errors(args):
+    start_ns, end_ns, start_ms, end_ms = time_window(args.hours)
+
+    where = [f"timestamp >= {start_ns}", f"timestamp <= {end_ns}",
+             f"severity_text IN ('ERROR','FATAL')"]
+    if args.env:
+        where.append(f"resources_string['deployment.environment'] = '{esc(args.env)}'")
+    if args.deployment:
+        where.append(f"resources_string['k8s.deployment.name'] = '{esc(args.deployment)}'")
+    if args.tenant:
+        # tenant_id is set as a structured log attribute by Dify backend,
+        # not embedded in the body. attributes_string is exact-match (Map column).
+        where.append(f"attributes_string['tenant_id'] = '{esc(args.tenant)}'")
+    if args.grep:
+        where.append(f"body LIKE '%{esc(args.grep)}%'")
+
+    sql = (
+        "SELECT id, "
+        "toString(toDateTime(intDiv(timestamp,1000000000))) AS ts, "
+        "severity_text AS sev, "
+        "resources_string['k8s.deployment.name'] AS dep, "
+        "attributes_string['tenant_id'] AS tenant, "
+        "substring(body, 1, 300) AS body "
+        f"FROM {LOGS_TABLE} "
+        f"WHERE {' AND '.join(where)} "
+        f"ORDER BY timestamp DESC LIMIT {args.limit}"
+    )
+
+    info(f"[sz] {args.hours}h window | {len(where)} filters | limit={args.limit}", args)
+    data = post_query(sql, start_ms, end_ms)
+    out = [r.get("data", {}) for r in rows(data)]
+    emit(out, args, columns=["ts", "sev", "dep", "id", "body"])
+
+
+def cmd_traceback(args):
+    start_ns, end_ns, start_ms, end_ms = time_window(args.hours)
+
+    where = [f"timestamp >= {start_ns}", f"timestamp <= {end_ns}",
+             "severity_text = 'ERROR'"]
+    if args.id:
+        where.append(f"id = '{esc(args.id)}'")
+    else:
+        if args.env:
+            where.append(f"resources_string['deployment.environment'] = '{esc(args.env)}'")
+        if args.tenant:
+            where.append(f"attributes_string['tenant_id'] = '{esc(args.tenant)}'")
+        if args.grep:
+            where.append(f"body LIKE '%{esc(args.grep)}%'")
+
+    sql = (
+        "SELECT id, "
+        "toString(toDateTime(intDiv(timestamp,1000000000))) AS ts, "
+        "body, "
+        "attributes_string['exception.stacktrace'] AS stacktrace, "
+        "attributes_string['exception.type'] AS etype, "
+        "attributes_string['exception.message'] AS emsg, "
+        "attributes_string['tenant_id'] AS tenant_id "
+        f"FROM {LOGS_TABLE} "
+        f"WHERE {' AND '.join(where)} "
+        f"ORDER BY timestamp DESC LIMIT {args.limit}"
+    )
+
+    info(f"[sz] traceback search | {args.hours}h window | limit={args.limit}", args)
+    data = post_query(sql, start_ms, end_ms)
+    out = [r.get("data", {}) for r in rows(data)]
+
+    if args.json:
+        emit(out, args)
+        return
+
+    if not out:
+        info("(no rows)", args)
+        return
+
+    for r in out:
+        print("=" * 80)
+        print(f"id:        {r.get('id')}")
+        print(f"ts:        {r.get('ts')} UTC")
+        print(f"tenant_id: {r.get('tenant_id') or '-'}")
+        print(f"body:      {r.get('body')}")
+        if r.get("etype") or r.get("emsg"):
+            print(f"exc.type:  {r.get('etype') or '-'}")
+            print(f"exc.msg:   {r.get('emsg') or '-'}")
+        print("-" * 80)
+        print(r.get("stacktrace") or "(no stacktrace attribute)")
+
+
+def cmd_query(args):
+    start_ns, end_ns, start_ms, end_ms = time_window(args.hours)
+    sql = args.sql
+    # Allow user to template {start_ns} / {end_ns} into their SQL
+    sql = sql.replace("{start_ns}", str(start_ns)).replace("{end_ns}", str(end_ns))
+
+    info(f"[sz] running raw SQL | {args.hours}h window vars: start_ns={start_ns} end_ns={end_ns}", args)
+    data = post_query(sql, start_ms, end_ms, panel_type=args.panel)
+    out = [r.get("data", {}) for r in rows(data)]
+    emit(out, args)
+
+
+def cmd_schema(args):
+    start_ns, end_ns, start_ms, end_ms = time_window(0.05)  # 3 min window (DESCRIBE doesn't care)
+    table = args.table
+    if "." not in table:
+        table = f"signoz_logs.{table}"
+    sql = f"DESCRIBE TABLE {table}"
+    data = post_query(sql, start_ms, end_ms)
+    out = [r.get("data", {}) for r in rows(data)]
+    emit(out, args, columns=["name", "type", "default_type", "default_expression"])
+
+
+def cmd_services(args):
+    start_ns, end_ns, start_ms, end_ms = time_window(args.hours)
+    where = [f"timestamp >= {start_ns}", f"timestamp <= {end_ns}"]
+    if args.env:
+        where.append(f"resources_string['deployment.environment'] = '{esc(args.env)}'")
+    sql = (
+        "SELECT resources_string['k8s.deployment.name'] AS deployment, "
+        "resources_string['service.name'] AS service, "
+        "resources_string['deployment.environment'] AS environment, "
+        "count(*) AS log_count "
+        f"FROM {LOGS_TABLE} "
+        f"WHERE {' AND '.join(where)} "
+        "GROUP BY deployment, service, environment "
+        "ORDER BY log_count DESC "
+        f"LIMIT {args.limit}"
+    )
+    data = post_query(sql, start_ms, end_ms)
+    out = [r.get("data", {}) for r in rows(data)]
+    emit(out, args, columns=["environment", "service", "deployment", "log_count"])
+
+
+# ---- argparse ----------------------------------------------------------------
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="sz",
+        description="SigNoz CLI (zero-dep). Talks directly to SigNoz v4 query_range API.",
+    )
+    # 公共 flag 父 parser：--json / -q 挂到每个子命令（放在子命令之后传），
+    # 避免顶层-only 导致 `sz query "..." --json` 报 unrecognized arguments。
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--json", action="store_true", help="emit raw JSON")
+    common.add_argument("-q", "--quiet", action="store_true", help="suppress meta lines")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    # errors
+    pe = sub.add_parser("errors", parents=[common], help="search ERROR/FATAL logs")
+    pe.add_argument("--tenant", help="filter by tenant_id appearing in body")
+    pe.add_argument("--grep", help="generic body substring filter")
+    pe.add_argument("--env", help="deployment.environment filter (e.g. production, staging). Omit = no filter.")
+    pe.add_argument("--deployment", help="k8s.deployment.name (e.g. dify-api-oltp)")
+    pe.add_argument("--hours", type=float, default=1.0, help="lookback hours (default: 1)")
+    pe.add_argument("--limit", type=int, default=30, help="row limit (default: 30)")
+    pe.set_defaults(func=cmd_errors)
+
+    # traceback
+    pt = sub.add_parser("traceback", parents=[common], help="pull exception.stacktrace from logs")
+    pt.add_argument("--id", help="exact log id (most precise)")
+    pt.add_argument("--tenant", help="filter by tenant_id substring in body")
+    pt.add_argument("--grep", help="generic body substring filter")
+    pt.add_argument("--env", help="deployment.environment filter (omit = no filter)")
+    pt.add_argument("--hours", type=float, default=24.0, help="lookback hours (default: 24)")
+    pt.add_argument("--limit", type=int, default=5, help="row limit (default: 5)")
+    pt.set_defaults(func=cmd_traceback)
+
+    # query
+    pq = sub.add_parser("query", parents=[common], help="run a raw ClickHouse SQL")
+    pq.add_argument("sql", help="ClickHouse SQL. Use {start_ns}/{end_ns} placeholders if you want auto window.")
+    pq.add_argument("--hours", type=float, default=1.0, help="lookback hours window (for {start_ns}/{end_ns})")
+    pq.add_argument("--panel", default="list", choices=["list", "table", "graph"], help="panel type")
+    pq.set_defaults(func=cmd_query)
+
+    # schema
+    ps = sub.add_parser("schema", parents=[common], help="describe a SigNoz ClickHouse table")
+    ps.add_argument("table", nargs="?", default="distributed_logs_v2",
+                    help="table name (will prefix signoz_logs. if missing); default: distributed_logs_v2")
+    ps.set_defaults(func=cmd_schema)
+
+    # services
+    psv = sub.add_parser("services", parents=[common], help="list active services / deployments")
+    psv.add_argument("--env", help="deployment.environment filter")
+    psv.add_argument("--hours", type=float, default=1.0, help="lookback hours (default: 1)")
+    psv.add_argument("--limit", type=int, default=30, help="row limit (default: 30)")
+    psv.set_defaults(func=cmd_services)
+
+    return p
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+    # clamp safety bounds
+    if hasattr(args, "hours"):
+        args.hours = max(0.01, min(args.hours, 168.0))
+    if hasattr(args, "limit"):
+        args.limit = max(1, min(args.limit, 1000))
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

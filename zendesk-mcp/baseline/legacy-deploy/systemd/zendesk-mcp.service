@@ -1,0 +1,18 @@
+[Unit]
+Description=Remote Zendesk MCP service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/zendesk-mcp/code
+EnvironmentFile=/etc/zendesk-mcp/env
+Environment=PYTHONPATH=/opt/zendesk-mcp/code/src
+ExecStart=/opt/zendesk-mcp/code/.venv/bin/python -c 'from zendesk_mcp.app import main; main()'
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,69 @@
+{
+  "source": {
+    "scope": "server",
+    "name": "signoz-mcp"
+  },
+  "runtime_files": {
+    ".gitignore": {
+      "sha256": "58fcc52dbe01f13fb16391acc567281c46d69f931e0cef8f43cd4d0b0ee3602f",
+      "bytes": 58
+    },
+    "README.md": {
+      "sha256": "cf68fd83cbae6d8e19d4143b8c608ca80ecb9686f055a6a04f231ff8c1f8162b",
+      "bytes": 4078
+    },
+    "deploy/systemd/signoz-mcp.service": {
+      "sha256": "99eff6bec6ad585e069fb28a6c6af9cfb14e4d342a5449417e31865e3e77d599",
+      "bytes": 353
+    },
+    "pyproject.toml": {
+      "sha256": "2da00d1e5fec007e93b4ffd7a447b887647c27ea3f98fdfcd22773e03d3ab9ec",
+      "bytes": 728
+    },
+    "scripts/README.md": {
+      "sha256": "7af2dc1cea55b017861634b5d80642b649eaa7f1919b47f077864684f43c584d",
+      "bytes": 3495
+    },
+    "scripts/sz": {
+      "sha256": "68971ff0c758b510323a9936107313a65d18801c9a3e129d9f65676d68b3bd6a",
+      "bytes": 14587
+    },
+    "src/signoz_mcp/__init__.py": {
+      "sha256": "d6c5d2c97a096bce05c4d49c4d1c0d859d51eafc414ebc3b05003843ba7b4b74",
+      "bytes": 33
+    },
+    "src/signoz_mcp/app.py": {
+      "sha256": "c6314650d1e930cb79080cd54596fd84c81964df70b974a1a4e4a13a974fb59a",
+      "bytes": 9914
+    },
+    "src/signoz_mcp/settings.py": {
+      "sha256": "7cc3369384033cade607c02744968977ecbbe733d393611ca652697689b4b8d2",
+      "bytes": 1712
+    },
+    "src/signoz_mcp/structured_tools.py": {
+      "sha256": "54b42632a96a4a31dfaa77980c497d7052a6b78e9e34c29e3cd1659b5acf42cb",
+      "bytes": 31591
+    },
+    "src/signoz_mcp/sz_runner.py": {
+      "sha256": "9dc893c08031f2676310d5dcdb2168cd616221f553ed63fdb81a953170ec4640",
+      "bytes": 3832
+    },
+    "tests/test_app.py": {
+      "sha256": "483ee3a72f060ca3b5b9b72d692886c5226e74917ee0c126251c068a6f6ab186",
+      "bytes": 13092
+    },
+    "tests/test_structured_tools.py": {
+      "sha256": "3614350185c37d00d7a02df2f956e9598848d3876c2a7d1eb261eab4314fe235",
+      "bytes": 6263
+    },
+    "tests/test_sz_runner.py": {
+      "sha256": "2d52e5ad743e893bf1214c8ce92d63a009ca1ec56699c6c7c147daf58c28a83a",
+      "bytes": 3084
+    },
+    "uv.lock": {
+      "sha256": "9e824322a14bd00750cf7fd90c26be087ab22bc602cfd2bc6cf43dc4f2488b5d",
+      "bytes": 257159
+    }
+  },
+  "assembly": "runtime source bytes preserved"
+}

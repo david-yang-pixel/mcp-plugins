@@ -1,0 +1,63 @@
+{
+  "verification": {
+    "application_source": "byte-identical to runtime snapshot"
+  },
+  "files": [
+    {
+      "path": "src/db_gateway/mcp_schema.py",
+      "sha256": "3f090c2a9a8295aa8305ad2c6f7150468e86181966db955fb3a2567642ade266"
+    },
+    {
+      "path": "src/db_gateway/config.py",
+      "sha256": "8941185d824234fa0fc635027553d3400ccca9646aeb2880c2a7ab1d636314dd"
+    },
+    {
+      "path": "src/db_gateway/teleport.py",
+      "sha256": "e296aca620553d416511cfa61df55a0472e6d2d71b1fbe64682092dda6d6f3a8"
+    },
+    {
+      "path": "src/db_gateway/log.py",
+      "sha256": "208333950ded6c02e5e92e7c0e7504b6cc47a4b95c31550128a4292ecb065b03"
+    },
+    {
+      "path": "src/db_gateway/__init__.py",
+      "sha256": "b4e4b36884773cae500517d18cdb1bfd4bf85d27e5164ba620e37d5220095013"
+    },
+    {
+      "path": "src/db_gateway/core.py",
+      "sha256": "9e62ba791caebce4e5b0edb42a6da6db3268bc624235f665bf1211810553dd0c"
+    },
+    {
+      "path": "src/db_gateway/mcp.py",
+      "sha256": "5af18cda598db49c8345ee5bb2f22bdaeeb67da3bbd2a2ecae086986985e5971"
+    },
+    {
+      "path": "src/db_gateway/postgres.py",
+      "sha256": "27711a470097076675ffe2d97c2a35ae4d76f0dce8e65a2c7ec0019790ace176"
+    },
+    {
+      "path": "src/db_gateway/app.py",
+      "sha256": "5bb1c6aaca2881c5be7c357623d62cf2a22cf8f0a2cfb25434f62756ab30f769"
+    },
+    {
+      "path": "src/db_gateway/feishu.py",
+      "sha256": "b931fe510282798e0b6d2dbfd32b5f0c76fd13af7507c841dc894ee563d34490"
+    },
+    {
+      "path": "src/db_gateway/teleport_login.py",
+      "sha256": "7f875406866552198a259feaf403fc987ec9f56ab688415b495d85d7606db91d"
+    },
+    {
+      "path": "src/db_gateway/app_context.py",
+      "sha256": "1a569798b713b5015ab3d9695feb46986f41a2c8a611c72db8d476ff4995f3f6"
+    },
+    {
+      "path": "src/db_gateway/teleport_tokens.py",
+      "sha256": "dbabdc0eb27bdd7eb798f32607e3d4d047e4cffc8972271db4fba5234fb4d721"
+    },
+    {
+      "path": "src/db_gateway/teleport_auth_web.py",
+      "sha256": "28e74f41d6750f5860caea7b5cd048661afff27dccdc0824bdd176cefc935e83"
+    }
+  ]
+}

@@ -1,0 +1,693 @@
+{
+  "db-gateway": {
+    "runtime_vs_server": {
+      "source": {
+        "same": 14,
+        "changed": [],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 14,
+        "changed": [],
+        "only_a": [
+          "README.md",
+          "pyproject.toml",
+          "scripts/auth-watchdog.py",
+          "scripts/db_gateway_mcp.py",
+          "scripts/dump_db_schema.py",
+          "scripts/dump_db_schema.sh",
+          "scripts/proxy-health.sh",
+          "uv.lock"
+        ],
+        "only_b": [
+          "scripts/tsh-init.py"
+        ]
+      }
+    },
+    "runtime_vs_local": {
+      "source": {
+        "same": 13,
+        "changed": [
+          "src/db_gateway/app.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 20,
+        "changed": [
+          "src/db_gateway/app.py",
+          "uv.lock"
+        ],
+        "only_a": [],
+        "only_b": [
+          ".gitignore",
+          "deploy/Dockerfile",
+          "deploy/nginx/db-gateway.conf",
+          "deploy/systemd/db-gateway.service",
+          "deploy/systemd/proxy-health.service",
+          "deploy/systemd/proxy-health.timer",
+          "deploy/systemd/tsh-auth-watchdog.service",
+          "deploy/systemd/tsh-proxy-db-billing.service",
+          "deploy/systemd/tsh-proxy-db-plugin.service",
+          "deploy/systemd/tsh-proxy-db.service",
+          "tests/integrations/test_postgres_runner.py",
+          "tests/integrations/test_teleport.py",
+          "tests/scripts/test_db_gateway_mcp_stdio.py",
+          "tests/services/test_db_gateway_core.py",
+          "tests/services/test_mcp_http.py",
+          "tests/services/test_teleport_auth_web.py",
+          "tests/services/test_teleport_tokens.py",
+          "tests/test_auth_watchdog.py"
+        ]
+      }
+    },
+    "server_vs_local": {
+      "source": {
+        "same": 13,
+        "changed": [
+          "src/db_gateway/app.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 13,
+        "changed": [
+          "src/db_gateway/app.py"
+        ],
+        "only_a": [
+          "scripts/tsh-init.py"
+        ],
+        "only_b": [
+          ".gitignore",
+          "README.md",
+          "deploy/Dockerfile",
+          "deploy/nginx/db-gateway.conf",
+          "deploy/systemd/db-gateway.service",
+          "deploy/systemd/proxy-health.service",
+          "deploy/systemd/proxy-health.timer",
+          "deploy/systemd/tsh-auth-watchdog.service",
+          "deploy/systemd/tsh-proxy-db-billing.service",
+          "deploy/systemd/tsh-proxy-db-plugin.service",
+          "deploy/systemd/tsh-proxy-db.service",
+          "pyproject.toml",
+          "scripts/auth-watchdog.py",
+          "scripts/db_gateway_mcp.py",
+          "scripts/dump_db_schema.py",
+          "scripts/dump_db_schema.sh",
+          "scripts/proxy-health.sh",
+          "tests/integrations/test_postgres_runner.py",
+          "tests/integrations/test_teleport.py",
+          "tests/scripts/test_db_gateway_mcp_stdio.py",
+          "tests/services/test_db_gateway_core.py",
+          "tests/services/test_mcp_http.py",
+          "tests/services/test_teleport_auth_web.py",
+          "tests/services/test_teleport_tokens.py",
+          "tests/test_auth_watchdog.py",
+          "uv.lock"
+        ]
+      }
+    }
+  },
+  "signoz-mcp": {
+    "runtime_vs_server": {
+      "source": {
+        "same": 5,
+        "changed": [],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 15,
+        "changed": [],
+        "only_a": [],
+        "only_b": []
+      }
+    },
+    "runtime_vs_local": {
+      "source": {
+        "same": 4,
+        "changed": [
+          "src/signoz_mcp/app.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 14,
+        "changed": [
+          "src/signoz_mcp/app.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      }
+    },
+    "server_vs_local": {
+      "source": {
+        "same": 4,
+        "changed": [
+          "src/signoz_mcp/app.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 14,
+        "changed": [
+          "src/signoz_mcp/app.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      }
+    }
+  },
+  "source-mcp": {
+    "runtime_vs_server": {
+      "source": {
+        "same": 3,
+        "changed": [
+          "src/source_mcp/app.py",
+          "src/source_mcp/git_ops.py",
+          "src/source_mcp/settings.py"
+        ],
+        "only_a": [
+          "src/source_mcp/process_health.py"
+        ],
+        "only_b": []
+      },
+      "all": {
+        "same": 7,
+        "changed": [
+          "README.md",
+          "src/source_mcp/app.py",
+          "src/source_mcp/git_ops.py",
+          "src/source_mcp/settings.py",
+          "tests/test_app.py",
+          "tests/test_git_ops.py"
+        ],
+        "only_a": [
+          ".dockerignore",
+          ".gitignore",
+          "Dockerfile.overlay",
+          "src/source_mcp/process_health.py",
+          "tests/test_process_health.py",
+          "tests/test_settings.py"
+        ],
+        "only_b": []
+      }
+    },
+    "runtime_vs_local": {
+      "source": {
+        "same": 3,
+        "changed": [
+          "src/source_mcp/app.py",
+          "src/source_mcp/git_ops.py",
+          "src/source_mcp/settings.py"
+        ],
+        "only_a": [
+          "src/source_mcp/process_health.py"
+        ],
+        "only_b": []
+      },
+      "all": {
+        "same": 6,
+        "changed": [
+          "README.md",
+          "src/source_mcp/app.py",
+          "src/source_mcp/git_ops.py",
+          "src/source_mcp/settings.py",
+          "tests/test_app.py",
+          "tests/test_git_ops.py",
+          "uv.lock"
+        ],
+        "only_a": [
+          ".dockerignore",
+          ".gitignore",
+          "Dockerfile.overlay",
+          "src/source_mcp/process_health.py",
+          "tests/test_process_health.py",
+          "tests/test_settings.py"
+        ],
+        "only_b": []
+      }
+    },
+    "server_vs_local": {
+      "source": {
+        "same": 5,
+        "changed": [
+          "src/source_mcp/app.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 11,
+        "changed": [
+          "src/source_mcp/app.py",
+          "uv.lock"
+        ],
+        "only_a": [],
+        "only_b": []
+      }
+    }
+  },
+  "github-mcp": {
+    "runtime_vs_server": {
+      "source": {
+        "same": 7,
+        "changed": [
+          "src/tool_services/docs_tools.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 14,
+        "changed": [
+          "src/tool_services/docs_tools.py",
+          "tests/test_apps.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      }
+    },
+    "runtime_vs_local": {
+      "source": {
+        "same": 6,
+        "changed": [
+          "src/tool_services/app.py",
+          "src/tool_services/docs_tools.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 9,
+        "changed": [
+          "deploy/systemd/docs-tool-service.service",
+          "deploy/systemd/github-mcp.service",
+          "deploy/systemd/notification-service.service",
+          "deploy/systemd/sandbox-worker.service",
+          "src/tool_services/app.py",
+          "src/tool_services/docs_tools.py",
+          "tests/test_apps.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      }
+    },
+    "server_vs_local": {
+      "source": {
+        "same": 7,
+        "changed": [
+          "src/tool_services/app.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 11,
+        "changed": [
+          "deploy/systemd/docs-tool-service.service",
+          "deploy/systemd/github-mcp.service",
+          "deploy/systemd/notification-service.service",
+          "deploy/systemd/sandbox-worker.service",
+          "src/tool_services/app.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      }
+    }
+  },
+  "docs-tool-service": {
+    "runtime_vs_server": {
+      "source": {
+        "same": 8,
+        "changed": [],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 16,
+        "changed": [],
+        "only_a": [],
+        "only_b": []
+      }
+    },
+    "runtime_vs_local": {
+      "source": {
+        "same": 7,
+        "changed": [
+          "src/tool_services/app.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 11,
+        "changed": [
+          "deploy/systemd/docs-tool-service.service",
+          "deploy/systemd/github-mcp.service",
+          "deploy/systemd/notification-service.service",
+          "deploy/systemd/sandbox-worker.service",
+          "src/tool_services/app.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      }
+    },
+    "server_vs_local": {
+      "source": {
+        "same": 7,
+        "changed": [
+          "src/tool_services/app.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 11,
+        "changed": [
+          "deploy/systemd/docs-tool-service.service",
+          "deploy/systemd/github-mcp.service",
+          "deploy/systemd/notification-service.service",
+          "deploy/systemd/sandbox-worker.service",
+          "src/tool_services/app.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      }
+    }
+  },
+  "notification-service": {
+    "runtime_vs_server": {
+      "source": {
+        "same": 5,
+        "changed": [
+          "src/tool_services/app.py",
+          "src/tool_services/docs_tools.py",
+          "src/tool_services/github_tools.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 12,
+        "changed": [
+          "src/tool_services/app.py",
+          "src/tool_services/docs_tools.py",
+          "src/tool_services/github_tools.py",
+          "tests/test_apps.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      }
+    },
+    "runtime_vs_local": {
+      "source": {
+        "same": 6,
+        "changed": [
+          "src/tool_services/docs_tools.py",
+          "src/tool_services/github_tools.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 9,
+        "changed": [
+          "deploy/systemd/docs-tool-service.service",
+          "deploy/systemd/github-mcp.service",
+          "deploy/systemd/notification-service.service",
+          "deploy/systemd/sandbox-worker.service",
+          "src/tool_services/docs_tools.py",
+          "src/tool_services/github_tools.py",
+          "tests/test_apps.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      }
+    },
+    "server_vs_local": {
+      "source": {
+        "same": 7,
+        "changed": [
+          "src/tool_services/app.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 11,
+        "changed": [
+          "deploy/systemd/docs-tool-service.service",
+          "deploy/systemd/github-mcp.service",
+          "deploy/systemd/notification-service.service",
+          "deploy/systemd/sandbox-worker.service",
+          "src/tool_services/app.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      }
+    }
+  },
+  "zendesk-mcp": {
+    "runtime_vs_server": {
+      "source": {
+        "same": 6,
+        "changed": [],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 13,
+        "changed": [],
+        "only_a": [],
+        "only_b": [
+          "Dockerfile.accept-fix",
+          "tests/conftest.py",
+          "tests/test_app.py",
+          "tests/test_attachment_accept.py",
+          "tests/test_client.py"
+        ]
+      }
+    },
+    "runtime_vs_local": {
+      "source": {
+        "same": 4,
+        "changed": [
+          "src/zendesk_mcp/app.py",
+          "src/zendesk_mcp/client.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 10,
+        "changed": [
+          "README.md",
+          "src/zendesk_mcp/app.py",
+          "src/zendesk_mcp/client.py"
+        ],
+        "only_a": [],
+        "only_b": [
+          "tests/conftest.py",
+          "tests/test_app.py",
+          "tests/test_client.py"
+        ]
+      }
+    },
+    "server_vs_local": {
+      "source": {
+        "same": 4,
+        "changed": [
+          "src/zendesk_mcp/app.py",
+          "src/zendesk_mcp/client.py"
+        ],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 12,
+        "changed": [
+          "README.md",
+          "src/zendesk_mcp/app.py",
+          "src/zendesk_mcp/client.py",
+          "tests/test_app.py"
+        ],
+        "only_a": [
+          "Dockerfile.accept-fix",
+          "tests/test_attachment_accept.py"
+        ],
+        "only_b": []
+      }
+    }
+  },
+  "zendesk-browser-relay": {
+    "runtime_vs_server": {
+      "source": {
+        "same": 15,
+        "changed": [],
+        "only_a": [],
+        "only_b": []
+      },
+      "all": {
+        "same": 17,
+        "changed": [],
+        "only_a": [],
+        "only_b": [
+          ".gitignore",
+          "Dockerfile",
+          "Dockerfile.overlay",
+          "deploy/systemd/zendesk-browser-relay-session-watchdog.service",
+          "deploy/systemd/zendesk-browser-relay-session-watchdog.timer",
+          "deploy/systemd/zendesk-browser-relay.service",
+          "scripts/inspect_mfa_after_password.py",
+          "scripts/inspect_page.py",
+          "scripts/login_once.py",
+          "scripts/login_with_mfa_once.py",
+          "scripts/mfa_once.py",
+          "scripts/session_watchdog.py",
+          "tests/test_app.py",
+          "tests/test_auth.py",
+          "tests/test_browser_relay.py",
+          "tests/test_coordination.py",
+          "tests/test_customer_reply.py",
+          "tests/test_feishu_notifications.py",
+          "tests/test_login_automation.py",
+          "tests/test_mcp.py",
+          "tests/test_result_dispatch.py",
+          "tests/test_session_supervisor.py",
+          "tests/test_settings.py",
+          "tests/test_zendesk_freshness.py",
+          "uv.lock"
+        ]
+      }
+    },
+    "runtime_vs_local": {
+      "source": {
+        "same": 4,
+        "changed": [
+          "src/zendesk_browser_relay/app.py",
+          "src/zendesk_browser_relay/auth.py",
+          "src/zendesk_browser_relay/browser_relay.py",
+          "src/zendesk_browser_relay/coordination.py",
+          "src/zendesk_browser_relay/mcp.py",
+          "src/zendesk_browser_relay/schemas.py",
+          "src/zendesk_browser_relay/settings.py"
+        ],
+        "only_a": [
+          "src/zendesk_browser_relay/feishu_notifications.py",
+          "src/zendesk_browser_relay/result_dispatch.py",
+          "src/zendesk_browser_relay/session_supervisor.py",
+          "src/zendesk_browser_relay/zendesk_freshness.py"
+        ],
+        "only_b": []
+      },
+      "all": {
+        "same": 4,
+        "changed": [
+          "README.md",
+          "pyproject.toml",
+          "src/zendesk_browser_relay/app.py",
+          "src/zendesk_browser_relay/auth.py",
+          "src/zendesk_browser_relay/browser_relay.py",
+          "src/zendesk_browser_relay/coordination.py",
+          "src/zendesk_browser_relay/mcp.py",
+          "src/zendesk_browser_relay/schemas.py",
+          "src/zendesk_browser_relay/settings.py"
+        ],
+        "only_a": [
+          "src/zendesk_browser_relay/feishu_notifications.py",
+          "src/zendesk_browser_relay/result_dispatch.py",
+          "src/zendesk_browser_relay/session_supervisor.py",
+          "src/zendesk_browser_relay/zendesk_freshness.py"
+        ],
+        "only_b": [
+          ".gitignore",
+          "Dockerfile",
+          "Dockerfile.footer-hotfix",
+          "deploy/systemd/zendesk-browser-relay-session-watchdog.service",
+          "deploy/systemd/zendesk-browser-relay-session-watchdog.timer",
+          "deploy/systemd/zendesk-browser-relay.service",
+          "scripts/deploy_footer_hotfix.py",
+          "scripts/inspect_mfa_after_password.py",
+          "scripts/inspect_page.py",
+          "scripts/login_once.py",
+          "scripts/login_with_mfa_once.py",
+          "scripts/mfa_once.py",
+          "scripts/session_watchdog.py",
+          "scripts/verify_customer_reply.py",
+          "tests/test_app.py",
+          "tests/test_auth.py",
+          "tests/test_browser_relay.py",
+          "tests/test_coordination.py",
+          "tests/test_customer_reply.py",
+          "tests/test_login_automation.py",
+          "tests/test_mcp.py",
+          "tests/test_settings.py",
+          "uv.lock"
+        ]
+      }
+    },
+    "server_vs_local": {
+      "source": {
+        "same": 4,
+        "changed": [
+          "src/zendesk_browser_relay/app.py",
+          "src/zendesk_browser_relay/auth.py",
+          "src/zendesk_browser_relay/browser_relay.py",
+          "src/zendesk_browser_relay/coordination.py",
+          "src/zendesk_browser_relay/mcp.py",
+          "src/zendesk_browser_relay/schemas.py",
+          "src/zendesk_browser_relay/settings.py"
+        ],
+        "only_a": [
+          "src/zendesk_browser_relay/feishu_notifications.py",
+          "src/zendesk_browser_relay/result_dispatch.py",
+          "src/zendesk_browser_relay/session_supervisor.py",
+          "src/zendesk_browser_relay/zendesk_freshness.py"
+        ],
+        "only_b": []
+      },
+      "all": {
+        "same": 18,
+        "changed": [
+          "README.md",
+          "pyproject.toml",
+          "src/zendesk_browser_relay/app.py",
+          "src/zendesk_browser_relay/auth.py",
+          "src/zendesk_browser_relay/browser_relay.py",
+          "src/zendesk_browser_relay/coordination.py",
+          "src/zendesk_browser_relay/mcp.py",
+          "src/zendesk_browser_relay/schemas.py",
+          "src/zendesk_browser_relay/settings.py",
+          "tests/test_app.py",
+          "tests/test_browser_relay.py",
+          "tests/test_coordination.py",
+          "tests/test_mcp.py",
+          "tests/test_settings.py",
+          "uv.lock"
+        ],
+        "only_a": [
+          "Dockerfile.overlay",
+          "src/zendesk_browser_relay/feishu_notifications.py",
+          "src/zendesk_browser_relay/result_dispatch.py",
+          "src/zendesk_browser_relay/session_supervisor.py",
+          "src/zendesk_browser_relay/zendesk_freshness.py",
+          "tests/test_feishu_notifications.py",
+          "tests/test_result_dispatch.py",
+          "tests/test_session_supervisor.py",
+          "tests/test_zendesk_freshness.py"
+        ],
+        "only_b": [
+          "Dockerfile.footer-hotfix",
+          "scripts/deploy_footer_hotfix.py",
+          "scripts/verify_customer_reply.py"
+        ]
+      }
+    }
+  }
+}

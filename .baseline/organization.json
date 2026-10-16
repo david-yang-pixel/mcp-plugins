@@ -1,0 +1,27 @@
+{
+  "services": [
+    "db-gateway",
+    "signoz-mcp",
+    "source-mcp",
+    "github-mcp",
+    "docs-tool-service",
+    "notification-service",
+    "zendesk-mcp",
+    "zendesk-browser-relay"
+  ],
+  "date": "2026-10-16",
+  "source": "running containers on zendesk-agent-server",
+  "unchanged_application_source": [
+    "db-gateway",
+    "signoz-mcp",
+    "source-mcp",
+    "zendesk-mcp",
+    "zendesk-browser-relay"
+  ],
+  "isolated_packages": [
+    "github-mcp",
+    "docs-tool-service",
+    "notification-service"
+  ],
+  "production_changed": false
+}
