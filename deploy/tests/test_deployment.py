@@ -22,7 +22,7 @@ DIGEST = "sha256:" + "b" * 64
 
 
 def fixture(service="docs-tool-service"):
-    target = json.loads((catalog.ROOT / "deploy/targets.json").read_text())[service]
+    target = catalog.target(service)
     plan = catalog.spec(service)
     env = {"SECRET_" + k: "test-placeholder-value" for k in plan["secrets"] | plan["secret_files"]}
     env.update(REGISTRY_USER="test-user", REGISTRY_TOKEN="test-registry-placeholder")
@@ -30,7 +30,7 @@ def fixture(service="docs-tool-service"):
 
 
 class ContractTests(unittest.TestCase):
-    def test_all_eight_service_payloads_validate(self):
+    def test_all_discovered_service_payloads_validate(self):
         for service in catalog.SERVICES:
             with self.subTest(service=service):
                 target, payload = fixture(service)
