@@ -1,0 +1,28 @@
+{
+  "deployment": {
+    "container_port": 8000,
+    "auth_key": "ZENDESK_KG_MCP_API_KEY",
+    "health_path": "/health"
+  },
+  "environment": {
+    "ZENDESK_KG_MCP_HOST": "0.0.0.0",
+    "ZENDESK_KG_MCP_PORT": "8000",
+    "ZENDESK_KG_MCP_TIMEOUT_SECONDS": "45"
+  },
+  "smoke_environment": {
+    "ZENDESK_KG_MCP_HOST": "0.0.0.0",
+    "ZENDESK_KG_MCP_PORT": "8000",
+    "ZENDESK_KG_MCP_UPSTREAM_API_KEY": "synthetic-upstream-not-used-by-smoke-tests"
+  },
+  "secrets": {
+    "ZENDESK_KG_MCP_API_KEY": {
+      "name": "MCP_ZENDESK_KG_MCP__ZENDESK_KG_MCP_API_KEY",
+      "required": true
+    },
+    "ZENDESK_KG_MCP_UPSTREAM_API_KEY": {
+      "name": "MCP_ZENDESK_KG_MCP__ZENDESK_KG_MCP_UPSTREAM_API_KEY",
+      "required": true
+    }
+  },
+  "secret_files": {}
+}

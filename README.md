@@ -1,6 +1,6 @@
 # MCP 服务仓库
 
-每个一级项目目录对应一个独立 MCP 服务，包含该服务全部业务源码、测试、配置示例、依赖锁文件、Dockerfile 和版本来源记录。基线来自 2026-10-16 核对的腾讯云运行容器。
+每个一级项目目录对应一个独立 MCP 服务，包含该服务全部业务源码、测试、配置示例、依赖锁文件和 Dockerfile。最初 8 个服务的基线来自 2026-10-16 核对的腾讯云运行容器；`zendesk-kg-mcp` 是之后新增的历史工单知识库检索服务。
 
 ```text
 mcp-plugins/
@@ -11,7 +11,8 @@ mcp-plugins/
 ├── docs-tool-service/
 ├── notification-service/
 ├── zendesk-mcp/
-└── zendesk-browser-relay/
+├── zendesk-browser-relay/
+└── zendesk-kg-mcp/
 ```
 
 GitHub、文档、通知原先共用 tool_services 包，这里按各自线上版本拆为三个完整项目，不依赖共享目录或兄弟项目。sandbox-worker 不在本仓库维护范围。
@@ -26,7 +27,7 @@ GitHub、文档、通知原先共用 tool_services 包，这里按各自线上�
 - `pyproject.toml`、`uv.lock`：独立的项目定义与依赖锁定。
 - `requirements.runtime.txt`：线上实际运行依赖的固定版本。
 - `.env.example`、`Dockerfile`：配置示例与独立构建入口。
-- `baseline/`：容器来源、原始源码哈希、原始锁文件和历史部署材料；历史材料不作为当前部署入口。
+- `baseline/`（最初 8 个服务）：容器来源、原始源码哈希、原始锁文件和历史部署材料；历史材料不作为当前部署入口。
 
 ## 基线与边界
 
@@ -44,7 +45,7 @@ GitHub、文档、通知原先共用 tool_services 包，这里按各自线上�
 
 ## 密钥与 CI/CD
 
-8 个 MCP 的密钥在 GitHub Actions Secrets 中按服务前缀管理，普通配置在各服务 `deploy/runtime.json`。新增服务通过自身 `deploy/runtime.json` 自动发现并首次部署，无需修改中央名单或工作流。推送 `main` 只测试、构建并部署新增或有改动的服务，注册新服务不会重部署其他 MCP；仅更新密钥时，在 Actions 选择服务并运行部署工作流。
+各 MCP 的密钥在 GitHub Actions Secrets 中按服务前缀管理，普通配置在各服务 `deploy/runtime.json`。新增服务通过自身 `deploy/runtime.json` 自动发现并首次部署，无需修改中央名单或工作流。推送 `main` 只测试、构建并部署新增或有改动的服务，注册新服务不会重部署其他 MCP；仅更新密钥时，在 Actions 选择服务并运行部署工作流。
 
 新增 MCP 只需声明容器内监听端口，首次部署自动分配并保存空闲主机端口，生成 `https://zendesk.smlershou.top/<服务名>/mcp` 的 Nginx 路由，并验证公开 HTTPS 工具发现与鉴权。更新复用原端口，只修改对应 MCP；既有服务路由与别名保持兼容。
 
