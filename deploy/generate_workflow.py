@@ -3,9 +3,9 @@
 from catalog import ROOT, SERVICES, spec
 
 CHECKOUT = "d23441a48e516b6c34aea4fa41551a30e30af803"
-UV = "37802adc94f370d6bfd71619e3f0bf239e1f3b78"
-BUILDX = "8d2750c68a42422c14e847fe6c8ac0403b4cbd6f"
-BUILD = "10e90e3645eae34f1e60eeb005ba3a3d33f178e8"
+UV = "1c37ad07a6a961277cf70c0d37d6f313000f5884"  # setup-uv v10.3.0, Node 24
+BUILDX = "f87e5991a6d7451dcb8d9637bfbc97413f497069"  # setup-buildx v4.4.1
+BUILD = "c3c9e263c25d99ce0380d002d59b67737d91b0dc"  # build-push v7.4.0
 
 
 def render():
@@ -36,7 +36,7 @@ concurrency:
 
 jobs:
   plan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: read
@@ -54,7 +54,7 @@ jobs:
         run: python3 deploy/select_services.py
 
   verify-deployer:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@CHECKOUT
         with:
@@ -69,7 +69,7 @@ jobs:
   build:
     needs: [plan, verify-deployer]
     if: needs.plan.outputs.changed == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -125,7 +125,7 @@ jobs:
   deploy:
     needs: [plan, build]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.plan.outputs.changed == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
