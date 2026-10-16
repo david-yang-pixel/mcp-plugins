@@ -40,4 +40,10 @@ GitHub、文档、通知原先共用 tool_services 包，这里按各自线上�
 
 ## 本次验证
 
-8 个项目均通过独立锁定安装和 wheel 构建，共 270 项测试通过；源码一致性记录见 [.baseline/source-integrity.json](.baseline/source-integrity.json)。未构建 Docker 镜像或变更线上服务。
+初始基线的 8 个项目通过独立锁定安装和 wheel 构建，共 270 项测试；源码一致性记录见 [.baseline/source-integrity.json](.baseline/source-integrity.json)。该记录描述整理代码时的验证，后续 CI/CD 结果以 GitHub Actions 和服务器部署状态为准。
+
+## 密钥与 CI/CD
+
+8 个 MCP 的密钥在 GitHub Actions Secrets 中按服务前缀管理，普通配置在各服务 `deploy/runtime.json`。推送 `main` 自动测试、构建并部署受影响服务；仅更新密钥时，在 Actions 选择服务并运行部署工作流。
+
+部署保留数据挂载和旧容器，检查失败自动恢复。密钥清单、操作步骤、服务器路径及恢复方法见 [部署说明](deploy/README.md)。

@@ -1,0 +1,237 @@
+{
+  "db-gateway": {
+    "port": 18081,
+    "auth_key": "DB_GATEWAY_API_KEY",
+    "health_path": "/healthz",
+    "init": false,
+    "mounts": [
+      {
+        "source": "/opt/dify-db/.tsh",
+        "destination": "/opt/zd-agent/.tsh",
+        "readonly": false
+      },
+      {
+        "source": "@env",
+        "destination": "/app/.env",
+        "readonly": true
+      },
+      {
+        "source": "@settings",
+        "destination": "/app/config.yaml",
+        "readonly": true
+      },
+      {
+        "source": "/usr/local/bin/tsh",
+        "destination": "/usr/local/bin/tsh",
+        "readonly": true
+      }
+    ],
+    "command": [],
+    "env_keys": [
+      "DB_GATEWAY_API_KEY",
+      "DB_GATEWAY_LISTEN_HOST",
+      "DB_GATEWAY_LISTEN_PORT",
+      "FEISHU_WEBHOOK_SECRET",
+      "FEISHU_WEBHOOK_URL",
+      "HOST_TSH_GID",
+      "HOST_TSH_UID",
+      "INTERNAL_SHARED_SECRET",
+      "PG_PASSWORD",
+      "TELEPORT_PASSWORD",
+      "TELEPORT_PUBLIC_BASE_URL",
+      "TELEPORT_TOTP_SECRET",
+      "TELEPORT_USER"
+    ],
+    "secret_file_paths": {}
+  },
+  "signoz-mcp": {
+    "port": 8098,
+    "auth_key": "SIGNOZ_MCP_API_KEY",
+    "health_path": "/health",
+    "init": false,
+    "mounts": [],
+    "command": [],
+    "env_keys": [
+      "SIGNOZ_API_KEY",
+      "SIGNOZ_MCP_API_KEY",
+      "SIGNOZ_MCP_CACHEABLE_COMMANDS",
+      "SIGNOZ_MCP_CACHE_MAX_ENTRIES",
+      "SIGNOZ_MCP_CACHE_TTL_SECONDS",
+      "SIGNOZ_MCP_HOST",
+      "SIGNOZ_MCP_MAX_CONCURRENT_RUNS",
+      "SIGNOZ_MCP_PORT",
+      "SIGNOZ_MCP_SINGLEFLIGHT_ENABLED",
+      "SIGNOZ_MCP_SZ_PATH",
+      "SIGNOZ_MCP_TIMEOUT_SECONDS",
+      "SIGNOZ_URL"
+    ],
+    "secret_file_paths": {}
+  },
+  "source-mcp": {
+    "port": 8099,
+    "auth_key": "SOURCE_MCP_API_KEY",
+    "health_path": "/health",
+    "init": true,
+    "mounts": [
+      {
+        "source": "/opt/dify-db/repos",
+        "destination": "/opt/source-mcp/repos",
+        "readonly": false
+      }
+    ],
+    "command": [],
+    "env_keys": [
+      "SOURCE_MCP_API_KEY",
+      "SOURCE_MCP_FETCH_TTL_SECONDS",
+      "SOURCE_MCP_FULL_REPO_SEARCH_CONCURRENCY",
+      "SOURCE_MCP_GITHUB_TOKEN",
+      "SOURCE_MCP_GIT_TIMEOUT_SECONDS",
+      "SOURCE_MCP_HOST",
+      "SOURCE_MCP_PORT",
+      "SOURCE_MCP_REPOS",
+      "SOURCE_MCP_REPOS_BASE_DIR",
+      "SOURCE_MCP_REPO_URLS",
+      "SOURCE_MCP_RUNTIME_DEPLOYMENTS",
+      "SOURCE_MCP_RUNTIME_ENVIRONMENT",
+      "SOURCE_MCP_RUNTIME_HOURS",
+      "SOURCE_MCP_SIGNOZ_MCP_API_KEY",
+      "SOURCE_MCP_SIGNOZ_MCP_TIMEOUT_SECONDS",
+      "SOURCE_MCP_SIGNOZ_MCP_URL"
+    ],
+    "secret_file_paths": {}
+  },
+  "github-mcp": {
+    "port": 8111,
+    "auth_key": "GITHUB_MCP_API_KEY",
+    "health_path": "/health",
+    "init": false,
+    "mounts": [],
+    "command": [],
+    "env_keys": [
+      "GITHUB_MCP_API_KEY",
+      "GITHUB_MCP_GITHUB_TOKEN",
+      "GITHUB_MCP_HOST",
+      "GITHUB_MCP_PORT",
+      "GITHUB_MCP_TIMEOUT_SECONDS"
+    ],
+    "secret_file_paths": {}
+  },
+  "docs-tool-service": {
+    "port": 8112,
+    "auth_key": "DOCS_TOOL_SERVICE_API_KEY",
+    "health_path": "/health",
+    "init": false,
+    "mounts": [],
+    "command": [],
+    "env_keys": [
+      "DOCS_TOOL_SERVICE_API_KEY",
+      "DOCS_TOOL_SERVICE_CACHE_TTL_SECONDS",
+      "DOCS_TOOL_SERVICE_HOST",
+      "DOCS_TOOL_SERVICE_PORT",
+      "DOCS_TOOL_SERVICE_TIMEOUT_SECONDS"
+    ],
+    "secret_file_paths": {}
+  },
+  "notification-service": {
+    "port": 8113,
+    "auth_key": "NOTIFICATION_SERVICE_API_KEY",
+    "health_path": "/health",
+    "init": false,
+    "mounts": [],
+    "command": [],
+    "env_keys": [
+      "FEISHU_WEBHOOK_SECRET",
+      "FEISHU_WEBHOOK_URL",
+      "NOTIFICATION_SERVICE_API_KEY",
+      "NOTIFICATION_SERVICE_HOST",
+      "NOTIFICATION_SERVICE_PORT",
+      "NOTIFICATION_SERVICE_TIMEOUT_SECONDS"
+    ],
+    "secret_file_paths": {}
+  },
+  "zendesk-mcp": {
+    "port": 8100,
+    "auth_key": "ZENDESK_MCP_API_KEY",
+    "health_path": "/health",
+    "init": false,
+    "mounts": [],
+    "command": [],
+    "env_keys": [
+      "ZENDESK_API_TOKEN",
+      "ZENDESK_EMAIL",
+      "ZENDESK_MCP_ALLOWED_CUSTOM_FIELD_IDS",
+      "ZENDESK_MCP_API_KEY",
+      "ZENDESK_MCP_AUDIT_LOG",
+      "ZENDESK_MCP_CACHE_MAX_ENTRIES",
+      "ZENDESK_MCP_CACHE_TTL_SECONDS",
+      "ZENDESK_MCP_CONNECT_TIMEOUT_SECONDS",
+      "ZENDESK_MCP_HOST",
+      "ZENDESK_MCP_MAX_RETRIES",
+      "ZENDESK_MCP_PORT",
+      "ZENDESK_MCP_READ_TIMEOUT_SECONDS",
+      "ZENDESK_MCP_REQUEST_TIMEOUT_SECONDS",
+      "ZENDESK_MCP_WORKERS",
+      "ZENDESK_SUBDOMAIN"
+    ],
+    "secret_file_paths": {}
+  },
+  "zendesk-browser-relay": {
+    "port": 8097,
+    "auth_key": "RELAY_API_KEY",
+    "health_path": "/health",
+    "init": false,
+    "mounts": [
+      {
+        "source": "/opt/dify-db/browser-relay-state",
+        "destination": "/var/lib/zendesk-browser-relay/state",
+        "readonly": false
+      },
+      {
+        "source": "/opt/zendesk-browser-relay/ms-playwright",
+        "destination": "/opt/zendesk-browser-relay/ms-playwright",
+        "readonly": false
+      },
+      {
+        "source": "/opt/dify-db/browser-profile",
+        "destination": "/var/lib/zendesk-browser-relay/profile",
+        "readonly": false
+      }
+    ],
+    "command": [
+      "uvicorn",
+      "zendesk_browser_relay.app:app",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8097"
+    ],
+    "env_keys": [
+      "CODEX_COMPLETION_API_KEY",
+      "CODEX_RUNNER_API_KEY",
+      "CODEX_RUNNER_CREATE_URL",
+      "DIFY_RESULT_WORKFLOW_API_KEY",
+      "DIFY_RESULT_WORKFLOW_URL",
+      "DIFY_RESULT_WORKFLOW_USER",
+      "PLAYWRIGHT_BROWSERS_PATH",
+      "RELAY_API_KEY",
+      "TICKET_AUTOMATION_ALLOWLIST",
+      "TICKET_RUN_COALESCE_ACTIVE_MESSAGES",
+      "TICKET_RUN_DB_PATH",
+      "ZENDESK_COMPOSER_SELECTOR",
+      "ZENDESK_HEADLESS",
+      "ZENDESK_LOGIN_EMAIL",
+      "ZENDESK_LOGIN_PASSWORD",
+      "ZENDESK_MCP_AUTHORIZATION",
+      "ZENDESK_MCP_URL",
+      "ZENDESK_NAVIGATION_TIMEOUT_MS",
+      "ZENDESK_PROFILE_DIR",
+      "ZENDESK_PROXY_SERVER",
+      "ZENDESK_SEND_SELECTOR",
+      "ZENDESK_SUBDOMAIN",
+      "ZENDESK_TOTP_SECRET"
+    ],
+    "secret_file_paths": {
+      "FEISHU_NOTIFICATION_WEBHOOK_URL": "/var/lib/zendesk-browser-relay/state/feishu_webhook_url"
+    }
+  }
+}

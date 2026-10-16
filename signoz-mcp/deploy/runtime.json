@@ -1,0 +1,25 @@
+{
+  "environment": {
+    "SIGNOZ_MCP_CACHEABLE_COMMANDS": "services,schema",
+    "SIGNOZ_MCP_CACHE_MAX_ENTRIES": "128",
+    "SIGNOZ_MCP_CACHE_TTL_SECONDS": "300",
+    "SIGNOZ_MCP_HOST": "127.0.0.1",
+    "SIGNOZ_MCP_MAX_CONCURRENT_RUNS": "4",
+    "SIGNOZ_MCP_PORT": "8098",
+    "SIGNOZ_MCP_SINGLEFLIGHT_ENABLED": "true",
+    "SIGNOZ_MCP_SZ_PATH": "/app/scripts/sz",
+    "SIGNOZ_MCP_TIMEOUT_SECONDS": "60",
+    "SIGNOZ_URL": "https://signoz.dify.dev"
+  },
+  "secrets": {
+    "SIGNOZ_API_KEY": {
+      "name": "MCP_SIGNOZ_MCP__SIGNOZ_API_KEY",
+      "required": true
+    },
+    "SIGNOZ_MCP_API_KEY": {
+      "name": "MCP_SIGNOZ_MCP__SIGNOZ_MCP_API_KEY",
+      "required": true
+    }
+  },
+  "secret_files": {}
+}

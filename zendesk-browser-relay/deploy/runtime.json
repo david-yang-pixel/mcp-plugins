@@ -1,0 +1,60 @@
+{
+  "environment": {
+    "CODEX_RUNNER_CREATE_URL": "http://127.0.0.1:18087/v1/ticket-analyses",
+    "DIFY_RESULT_WORKFLOW_URL": "https://api.dify.ai/v1/workflows/run",
+    "DIFY_RESULT_WORKFLOW_USER": "zendesk-ticket-actor",
+    "PLAYWRIGHT_BROWSERS_PATH": "/ms-playwright",
+    "TICKET_AUTOMATION_ALLOWLIST": "",
+    "TICKET_RUN_COALESCE_ACTIVE_MESSAGES": "true",
+    "TICKET_RUN_DB_PATH": "/var/lib/zendesk-browser-relay/state/ticket-runs.sqlite3",
+    "ZENDESK_COMPOSER_SELECTOR": "",
+    "ZENDESK_HEADLESS": "true",
+    "ZENDESK_MCP_URL": "https://zendesk.smlershou.top/zendesk-mcp/mcp",
+    "ZENDESK_NAVIGATION_TIMEOUT_MS": "60000",
+    "ZENDESK_PROFILE_DIR": "/var/lib/zendesk-browser-relay/profile",
+    "ZENDESK_PROXY_SERVER": "",
+    "ZENDESK_SEND_SELECTOR": "",
+    "ZENDESK_SUBDOMAIN": "langgenius"
+  },
+  "secrets": {
+    "CODEX_COMPLETION_API_KEY": {
+      "name": "MCP_ZENDESK_BROWSER_RELAY__CODEX_COMPLETION_API_KEY",
+      "required": true
+    },
+    "CODEX_RUNNER_API_KEY": {
+      "name": "MCP_ZENDESK_BROWSER_RELAY__CODEX_RUNNER_API_KEY",
+      "required": true
+    },
+    "DIFY_RESULT_WORKFLOW_API_KEY": {
+      "name": "MCP_ZENDESK_BROWSER_RELAY__DIFY_RESULT_WORKFLOW_API_KEY",
+      "required": true
+    },
+    "RELAY_API_KEY": {
+      "name": "MCP_ZENDESK_BROWSER_RELAY__RELAY_API_KEY",
+      "required": true
+    },
+    "ZENDESK_LOGIN_EMAIL": {
+      "name": "MCP_ZENDESK_BROWSER_RELAY__ZENDESK_LOGIN_EMAIL",
+      "required": true
+    },
+    "ZENDESK_LOGIN_PASSWORD": {
+      "name": "MCP_ZENDESK_BROWSER_RELAY__ZENDESK_LOGIN_PASSWORD",
+      "required": true
+    },
+    "ZENDESK_MCP_AUTHORIZATION": {
+      "name": "MCP_ZENDESK_BROWSER_RELAY__ZENDESK_MCP_AUTHORIZATION",
+      "required": true
+    },
+    "ZENDESK_TOTP_SECRET": {
+      "name": "MCP_ZENDESK_BROWSER_RELAY__ZENDESK_TOTP_SECRET",
+      "required": true
+    }
+  },
+  "secret_files": {
+    "FEISHU_NOTIFICATION_WEBHOOK_URL": {
+      "name": "MCP_ZENDESK_BROWSER_RELAY__FEISHU_NOTIFICATION_WEBHOOK_URL",
+      "required": true,
+      "destination": "/var/lib/zendesk-browser-relay/state/feishu_webhook_url"
+    }
+  }
+}

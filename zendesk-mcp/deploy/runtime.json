@@ -1,0 +1,31 @@
+{
+  "environment": {
+    "ZENDESK_MCP_ALLOWED_CUSTOM_FIELD_IDS": "",
+    "ZENDESK_MCP_AUDIT_LOG": "/opt/zendesk-mcp/logs/audit.jsonl",
+    "ZENDESK_MCP_CACHE_MAX_ENTRIES": "256",
+    "ZENDESK_MCP_CACHE_TTL_SECONDS": "300",
+    "ZENDESK_MCP_CONNECT_TIMEOUT_SECONDS": "3",
+    "ZENDESK_MCP_HOST": "127.0.0.1",
+    "ZENDESK_MCP_MAX_RETRIES": "1",
+    "ZENDESK_MCP_PORT": "8100",
+    "ZENDESK_MCP_READ_TIMEOUT_SECONDS": "20",
+    "ZENDESK_MCP_REQUEST_TIMEOUT_SECONDS": "30",
+    "ZENDESK_MCP_WORKERS": "1",
+    "ZENDESK_SUBDOMAIN": "langgenius"
+  },
+  "secrets": {
+    "ZENDESK_API_TOKEN": {
+      "name": "MCP_ZENDESK_MCP__ZENDESK_API_TOKEN",
+      "required": true
+    },
+    "ZENDESK_EMAIL": {
+      "name": "MCP_ZENDESK_MCP__ZENDESK_EMAIL",
+      "required": true
+    },
+    "ZENDESK_MCP_API_KEY": {
+      "name": "MCP_ZENDESK_MCP__ZENDESK_MCP_API_KEY",
+      "required": true
+    }
+  },
+  "secret_files": {}
+}

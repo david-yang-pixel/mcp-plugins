@@ -1,0 +1,15 @@
+{
+  "environment": {
+    "DOCS_TOOL_SERVICE_CACHE_TTL_SECONDS": "900",
+    "DOCS_TOOL_SERVICE_HOST": "127.0.0.1",
+    "DOCS_TOOL_SERVICE_PORT": "8112",
+    "DOCS_TOOL_SERVICE_TIMEOUT_SECONDS": "20"
+  },
+  "secrets": {
+    "DOCS_TOOL_SERVICE_API_KEY": {
+      "name": "MCP_DOCS_TOOL_SERVICE__DOCS_TOOL_SERVICE_API_KEY",
+      "required": true
+    }
+  },
+  "secret_files": {}
+}

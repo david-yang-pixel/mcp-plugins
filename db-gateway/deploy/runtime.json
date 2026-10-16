@@ -1,0 +1,80 @@
+{
+  "environment": {
+    "DB_GATEWAY_LISTEN_HOST": "127.0.0.1",
+    "DB_GATEWAY_LISTEN_PORT": "18081",
+    "HOST_TSH_GID": "0",
+    "HOST_TSH_UID": "0",
+    "TELEPORT_PUBLIC_BASE_URL": "https://zendesk.smlershou.top"
+  },
+  "secrets": {
+    "DB_GATEWAY_API_KEY": {
+      "name": "MCP_DB_GATEWAY__DB_GATEWAY_API_KEY",
+      "required": true
+    },
+    "FEISHU_WEBHOOK_SECRET": {
+      "name": "MCP_DB_GATEWAY__FEISHU_WEBHOOK_SECRET",
+      "required": false
+    },
+    "FEISHU_WEBHOOK_URL": {
+      "name": "MCP_DB_GATEWAY__FEISHU_WEBHOOK_URL",
+      "required": true
+    },
+    "INTERNAL_SHARED_SECRET": {
+      "name": "MCP_DB_GATEWAY__INTERNAL_SHARED_SECRET",
+      "required": true
+    },
+    "PG_PASSWORD": {
+      "name": "MCP_DB_GATEWAY__PG_PASSWORD",
+      "required": false
+    },
+    "TELEPORT_PASSWORD": {
+      "name": "MCP_DB_GATEWAY__TELEPORT_PASSWORD",
+      "required": true
+    },
+    "TELEPORT_TOTP_SECRET": {
+      "name": "MCP_DB_GATEWAY__TELEPORT_TOTP_SECRET",
+      "required": true
+    },
+    "TELEPORT_USER": {
+      "name": "MCP_DB_GATEWAY__TELEPORT_USER",
+      "required": true
+    }
+  },
+  "secret_files": {},
+  "settings": {
+    "resources": {
+      "base_dir": "/opt/zd-agent/resources",
+      "state_dir": ".state"
+    },
+    "postgres": {
+      "host": "localhost",
+      "port": 56061,
+      "user": "pro_ops_teleport_read",
+      "db_prod": "langgenius",
+      "db_billing": "billing",
+      "db_plugin": "dify_plugin_daemon",
+      "port_prod": 56061,
+      "port_billing": 56062,
+      "port_plugin": 56063,
+      "query_timeout_seconds": 30,
+      "max_rows": 1000,
+      "max_concurrent_queries": 3,
+      "teleport_retry_attempts": 1,
+      "teleport_retry_delay_seconds": 0.25,
+      "singleflight_enabled": true
+    },
+    "db_gateway": {
+      "listen_host": "127.0.0.1",
+      "listen_port": 18081,
+      "request_timeout_seconds": 35
+    },
+    "teleport": {
+      "proxy": "teleport.dify.dev:443",
+      "auth_home": "/opt/zd-agent/.tsh",
+      "warn_threshold_minutes": 30,
+      "check_interval_seconds": 300,
+      "notify_interval_seconds": 3600
+    },
+    "feishu": {}
+  }
+}

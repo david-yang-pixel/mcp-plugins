@@ -1,0 +1,32 @@
+{
+  "environment": {
+    "SOURCE_MCP_FETCH_TTL_SECONDS": "900",
+    "SOURCE_MCP_FULL_REPO_SEARCH_CONCURRENCY": "2",
+    "SOURCE_MCP_GIT_TIMEOUT_SECONDS": "60",
+    "SOURCE_MCP_HOST": "127.0.0.1",
+    "SOURCE_MCP_PORT": "8099",
+    "SOURCE_MCP_REPOS": "dify,dify-marketplace-backend,dify-marketplace-frontend,dify-plugin-daemon,saas-deploy,dify-enterprise,dify-enterprise-frontend,dify-sandbox,dify-helm,dify-ee-terraform,dify-ee-helm-chart-values-generator,dify-official-plugins,dify-plugin-sdks",
+    "SOURCE_MCP_REPOS_BASE_DIR": "/opt/source-mcp/repos",
+    "SOURCE_MCP_REPO_URLS": "{}",
+    "SOURCE_MCP_RUNTIME_DEPLOYMENTS": "{\"dify\":\"dify-api-oltp\",\"dify-plugin-daemon\":\"dify-plugindaemon,dify-plugin-daemon\"}",
+    "SOURCE_MCP_RUNTIME_ENVIRONMENT": "production",
+    "SOURCE_MCP_RUNTIME_HOURS": "3",
+    "SOURCE_MCP_SIGNOZ_MCP_TIMEOUT_SECONDS": "35",
+    "SOURCE_MCP_SIGNOZ_MCP_URL": "http://127.0.0.1:8098/mcp"
+  },
+  "secrets": {
+    "SOURCE_MCP_API_KEY": {
+      "name": "MCP_SOURCE_MCP__SOURCE_MCP_API_KEY",
+      "required": true
+    },
+    "SOURCE_MCP_GITHUB_TOKEN": {
+      "name": "MCP_SOURCE_MCP__SOURCE_MCP_GITHUB_TOKEN",
+      "required": true
+    },
+    "SOURCE_MCP_SIGNOZ_MCP_API_KEY": {
+      "name": "MCP_SOURCE_MCP__SOURCE_MCP_SIGNOZ_MCP_API_KEY",
+      "required": true
+    }
+  },
+  "secret_files": {}
+}

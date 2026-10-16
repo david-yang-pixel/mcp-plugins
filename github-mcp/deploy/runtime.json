@@ -1,0 +1,18 @@
+{
+  "environment": {
+    "GITHUB_MCP_HOST": "127.0.0.1",
+    "GITHUB_MCP_PORT": "8111",
+    "GITHUB_MCP_TIMEOUT_SECONDS": "30"
+  },
+  "secrets": {
+    "GITHUB_MCP_API_KEY": {
+      "name": "MCP_GITHUB_MCP__GITHUB_MCP_API_KEY",
+      "required": true
+    },
+    "GITHUB_MCP_GITHUB_TOKEN": {
+      "name": "MCP_GITHUB_MCP__GITHUB_MCP_GITHUB_TOKEN",
+      "required": true
+    }
+  },
+  "secret_files": {}
+}

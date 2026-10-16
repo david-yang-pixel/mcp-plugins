@@ -1,0 +1,22 @@
+{
+  "environment": {
+    "NOTIFICATION_SERVICE_HOST": "127.0.0.1",
+    "NOTIFICATION_SERVICE_PORT": "8113",
+    "NOTIFICATION_SERVICE_TIMEOUT_SECONDS": "20"
+  },
+  "secrets": {
+    "FEISHU_WEBHOOK_SECRET": {
+      "name": "MCP_NOTIFICATION_SERVICE__FEISHU_WEBHOOK_SECRET",
+      "required": false
+    },
+    "FEISHU_WEBHOOK_URL": {
+      "name": "MCP_NOTIFICATION_SERVICE__FEISHU_WEBHOOK_URL",
+      "required": true
+    },
+    "NOTIFICATION_SERVICE_API_KEY": {
+      "name": "MCP_NOTIFICATION_SERVICE__NOTIFICATION_SERVICE_API_KEY",
+      "required": true
+    }
+  },
+  "secret_files": {}
+}
