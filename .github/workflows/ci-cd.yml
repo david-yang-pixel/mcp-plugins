@@ -10,18 +10,8 @@ on:
       service:
         description: Service to rebuild and deploy with current Secrets
         required: true
-        type: choice
+        type: string
         default: all
-        options:
-          - all
-          - db-gateway
-          - signoz-mcp
-          - source-mcp
-          - github-mcp
-          - docs-tool-service
-          - notification-service
-          - zendesk-mcp
-          - zendesk-browser-relay
 
 permissions:
   contents: read
@@ -56,12 +46,15 @@ jobs:
           persist-credentials: false
       - name: Test deployment validation and rollback
         run: python3 -m unittest discover -s deploy/tests -v
+      - name: Exercise first deployment and rollback with real containers
+        run: python3 deploy/tests/integration_docker.py
       - name: Check generated workflow is current
         run: |
           python3 deploy/generate_workflow.py
           git diff --exit-code -- .github/workflows/ci-cd.yml
 
   build:
+    name: Build ${{ matrix.entry.service }}
     needs: [plan, verify-deployer]
     if: needs.plan.outputs.changed == 'true'
     runs-on: ubuntu-24.04
@@ -73,10 +66,10 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        service: ${{ fromJSON(needs.plan.outputs.services) }}
+        entry: ${{ fromJSON(needs.plan.outputs.services) }}
     env:
-      SERVICE: ${{ matrix.service }}
-      IMAGE: ghcr.io/david-yang-pixel/mcp-plugins/${{ matrix.service }}:${{ github.sha }}
+      SERVICE: ${{ matrix.entry.service }}
+      IMAGE: ghcr.io/david-yang-pixel/mcp-plugins/${{ matrix.entry.service }}:${{ github.sha }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -86,9 +79,9 @@ jobs:
           version: '0.10.7'
           python-version: '3.12'
           enable-cache: true
-          cache-suffix: ${{ matrix.service }}
+          cache-suffix: ${{ matrix.entry.service }}
       - name: Locked dependencies and service tests
-        working-directory: ${{ matrix.service }}
+        working-directory: ${{ matrix.entry.service }}
         run: |
           uv sync --locked --all-extras --all-groups
           uv run --locked pytest -q
@@ -96,15 +89,15 @@ jobs:
       - name: Build image without production credentials
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         with:
-          context: ./${{ matrix.service }}
+          context: ./${{ matrix.entry.service }}
           load: true
           platforms: linux/amd64
           tags: ${{ env.IMAGE }}
           labels: |
             org.opencontainers.image.source=https://github.com/david-yang-pixel/mcp-plugins
             org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          cache-from: type=gha,scope=${{ matrix.entry.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.entry.service }}
       - name: Verify packaged service and authentication
         run: python3 deploy/smoke_image.py "$SERVICE" "$IMAGE"
       - name: Publish private image
@@ -118,6 +111,7 @@ jobs:
           docker logout ghcr.io
 
   deploy:
+    name: Deploy ${{ matrix.entry.service }}
     needs: [plan, build]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.plan.outputs.changed == 'true'
     runs-on: ubuntu-24.04
@@ -129,9 +123,9 @@ jobs:
       fail-fast: true
       max-parallel: 1
       matrix:
-        service: ${{ fromJSON(needs.plan.outputs.services) }}
+        entry: ${{ fromJSON(needs.plan.outputs.services) }}
     env:
-      SERVICE: ${{ matrix.service }}
+      SERVICE: ${{ matrix.entry.service }}
       REVISION: ${{ github.sha }}
       DEPLOY_HOST: ${{ vars.MCP_DEPLOY_HOST }}
       SSH_PRIVATE_KEY: ${{ secrets.MCP_DEPLOY_SSH_KEY }}
@@ -146,68 +140,40 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
       - name: Authenticate to private image registry
         run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$REGISTRY_USER" --password-stdin
-      - name: Deploy db-gateway and verify
-        if: matrix.service == 'db-gateway'
+      - name: Deploy selected service and verify
         env:
-          SECRET_DB_GATEWAY_API_KEY: ${{ secrets.MCP_DB_GATEWAY__DB_GATEWAY_API_KEY }}
-          SECRET_FEISHU_WEBHOOK_SECRET: ${{ secrets.MCP_DB_GATEWAY__FEISHU_WEBHOOK_SECRET }}
-          SECRET_FEISHU_WEBHOOK_URL: ${{ secrets.MCP_DB_GATEWAY__FEISHU_WEBHOOK_URL }}
-          SECRET_INTERNAL_SHARED_SECRET: ${{ secrets.MCP_DB_GATEWAY__INTERNAL_SHARED_SECRET }}
-          SECRET_PG_PASSWORD: ${{ secrets.MCP_DB_GATEWAY__PG_PASSWORD }}
-          SECRET_TELEPORT_PASSWORD: ${{ secrets.MCP_DB_GATEWAY__TELEPORT_PASSWORD }}
-          SECRET_TELEPORT_TOTP_SECRET: ${{ secrets.MCP_DB_GATEWAY__TELEPORT_TOTP_SECRET }}
-          SECRET_TELEPORT_USER: ${{ secrets.MCP_DB_GATEWAY__TELEPORT_USER }}
-        run: python3 deploy/client.py
-      - name: Deploy signoz-mcp and verify
-        if: matrix.service == 'signoz-mcp'
-        env:
-          SECRET_SIGNOZ_API_KEY: ${{ secrets.MCP_SIGNOZ_MCP__SIGNOZ_API_KEY }}
-          SECRET_SIGNOZ_MCP_API_KEY: ${{ secrets.MCP_SIGNOZ_MCP__SIGNOZ_MCP_API_KEY }}
-        run: python3 deploy/client.py
-      - name: Deploy source-mcp and verify
-        if: matrix.service == 'source-mcp'
-        env:
-          SECRET_SOURCE_MCP_API_KEY: ${{ secrets.MCP_SOURCE_MCP__SOURCE_MCP_API_KEY }}
-          SECRET_SOURCE_MCP_GITHUB_TOKEN: ${{ secrets.MCP_SOURCE_MCP__SOURCE_MCP_GITHUB_TOKEN }}
-          SECRET_SOURCE_MCP_SIGNOZ_MCP_API_KEY: ${{ secrets.MCP_SOURCE_MCP__SOURCE_MCP_SIGNOZ_MCP_API_KEY }}
-        run: python3 deploy/client.py
-      - name: Deploy github-mcp and verify
-        if: matrix.service == 'github-mcp'
-        env:
-          SECRET_GITHUB_MCP_API_KEY: ${{ secrets.MCP_GITHUB_MCP__GITHUB_MCP_API_KEY }}
-          SECRET_GITHUB_MCP_GITHUB_TOKEN: ${{ secrets.MCP_GITHUB_MCP__GITHUB_MCP_GITHUB_TOKEN }}
-        run: python3 deploy/client.py
-      - name: Deploy docs-tool-service and verify
-        if: matrix.service == 'docs-tool-service'
-        env:
-          SECRET_DOCS_TOOL_SERVICE_API_KEY: ${{ secrets.MCP_DOCS_TOOL_SERVICE__DOCS_TOOL_SERVICE_API_KEY }}
-        run: python3 deploy/client.py
-      - name: Deploy notification-service and verify
-        if: matrix.service == 'notification-service'
-        env:
-          SECRET_FEISHU_WEBHOOK_SECRET: ${{ secrets.MCP_NOTIFICATION_SERVICE__FEISHU_WEBHOOK_SECRET }}
-          SECRET_FEISHU_WEBHOOK_URL: ${{ secrets.MCP_NOTIFICATION_SERVICE__FEISHU_WEBHOOK_URL }}
-          SECRET_NOTIFICATION_SERVICE_API_KEY: ${{ secrets.MCP_NOTIFICATION_SERVICE__NOTIFICATION_SERVICE_API_KEY }}
-        run: python3 deploy/client.py
-      - name: Deploy zendesk-mcp and verify
-        if: matrix.service == 'zendesk-mcp'
-        env:
-          SECRET_ZENDESK_API_TOKEN: ${{ secrets.MCP_ZENDESK_MCP__ZENDESK_API_TOKEN }}
-          SECRET_ZENDESK_EMAIL: ${{ secrets.MCP_ZENDESK_MCP__ZENDESK_EMAIL }}
-          SECRET_ZENDESK_MCP_API_KEY: ${{ secrets.MCP_ZENDESK_MCP__ZENDESK_MCP_API_KEY }}
-        run: python3 deploy/client.py
-      - name: Deploy zendesk-browser-relay and verify
-        if: matrix.service == 'zendesk-browser-relay'
-        env:
-          SECRET_CODEX_COMPLETION_API_KEY: ${{ secrets.MCP_ZENDESK_BROWSER_RELAY__CODEX_COMPLETION_API_KEY }}
-          SECRET_CODEX_RUNNER_API_KEY: ${{ secrets.MCP_ZENDESK_BROWSER_RELAY__CODEX_RUNNER_API_KEY }}
-          SECRET_DIFY_RESULT_WORKFLOW_API_KEY: ${{ secrets.MCP_ZENDESK_BROWSER_RELAY__DIFY_RESULT_WORKFLOW_API_KEY }}
-          SECRET_RELAY_API_KEY: ${{ secrets.MCP_ZENDESK_BROWSER_RELAY__RELAY_API_KEY }}
-          SECRET_ZENDESK_LOGIN_EMAIL: ${{ secrets.MCP_ZENDESK_BROWSER_RELAY__ZENDESK_LOGIN_EMAIL }}
-          SECRET_ZENDESK_LOGIN_PASSWORD: ${{ secrets.MCP_ZENDESK_BROWSER_RELAY__ZENDESK_LOGIN_PASSWORD }}
-          SECRET_ZENDESK_MCP_AUTHORIZATION: ${{ secrets.MCP_ZENDESK_BROWSER_RELAY__ZENDESK_MCP_AUTHORIZATION }}
-          SECRET_ZENDESK_TOTP_SECRET: ${{ secrets.MCP_ZENDESK_BROWSER_RELAY__ZENDESK_TOTP_SECRET }}
-          SECRET_FEISHU_NOTIFICATION_WEBHOOK_URL: ${{ secrets.MCP_ZENDESK_BROWSER_RELAY__FEISHU_NOTIFICATION_WEBHOOK_URL }}
+          MCP_SECRET_0: ${{ secrets[matrix.entry.secret_names[0]] }}
+          MCP_SECRET_1: ${{ secrets[matrix.entry.secret_names[1]] }}
+          MCP_SECRET_2: ${{ secrets[matrix.entry.secret_names[2]] }}
+          MCP_SECRET_3: ${{ secrets[matrix.entry.secret_names[3]] }}
+          MCP_SECRET_4: ${{ secrets[matrix.entry.secret_names[4]] }}
+          MCP_SECRET_5: ${{ secrets[matrix.entry.secret_names[5]] }}
+          MCP_SECRET_6: ${{ secrets[matrix.entry.secret_names[6]] }}
+          MCP_SECRET_7: ${{ secrets[matrix.entry.secret_names[7]] }}
+          MCP_SECRET_8: ${{ secrets[matrix.entry.secret_names[8]] }}
+          MCP_SECRET_9: ${{ secrets[matrix.entry.secret_names[9]] }}
+          MCP_SECRET_10: ${{ secrets[matrix.entry.secret_names[10]] }}
+          MCP_SECRET_11: ${{ secrets[matrix.entry.secret_names[11]] }}
+          MCP_SECRET_12: ${{ secrets[matrix.entry.secret_names[12]] }}
+          MCP_SECRET_13: ${{ secrets[matrix.entry.secret_names[13]] }}
+          MCP_SECRET_14: ${{ secrets[matrix.entry.secret_names[14]] }}
+          MCP_SECRET_15: ${{ secrets[matrix.entry.secret_names[15]] }}
+          MCP_SECRET_16: ${{ secrets[matrix.entry.secret_names[16]] }}
+          MCP_SECRET_17: ${{ secrets[matrix.entry.secret_names[17]] }}
+          MCP_SECRET_18: ${{ secrets[matrix.entry.secret_names[18]] }}
+          MCP_SECRET_19: ${{ secrets[matrix.entry.secret_names[19]] }}
+          MCP_SECRET_20: ${{ secrets[matrix.entry.secret_names[20]] }}
+          MCP_SECRET_21: ${{ secrets[matrix.entry.secret_names[21]] }}
+          MCP_SECRET_22: ${{ secrets[matrix.entry.secret_names[22]] }}
+          MCP_SECRET_23: ${{ secrets[matrix.entry.secret_names[23]] }}
+          MCP_SECRET_24: ${{ secrets[matrix.entry.secret_names[24]] }}
+          MCP_SECRET_25: ${{ secrets[matrix.entry.secret_names[25]] }}
+          MCP_SECRET_26: ${{ secrets[matrix.entry.secret_names[26]] }}
+          MCP_SECRET_27: ${{ secrets[matrix.entry.secret_names[27]] }}
+          MCP_SECRET_28: ${{ secrets[matrix.entry.secret_names[28]] }}
+          MCP_SECRET_29: ${{ secrets[matrix.entry.secret_names[29]] }}
+          MCP_SECRET_30: ${{ secrets[matrix.entry.secret_names[30]] }}
+          MCP_SECRET_31: ${{ secrets[matrix.entry.secret_names[31]] }}
         run: python3 deploy/client.py
       - name: Remove registry login
         if: always()

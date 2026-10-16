@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Restricted SSH entrypoint for this repository's eight production services.
+"""Restricted SSH entrypoint for existing and newly discovered MCP services.
 
 Install root-owned at /usr/local/sbin/mcp-plugins-deploy. It accepts a pinned
 image and runtime values on stdin, never shell commands, scripts or mount paths.
@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -24,10 +25,74 @@ TARGETS = Path("/etc/mcp-plugins/targets.json")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 MAX_PAYLOAD = 1024 * 1024
+SERVICE = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z")
+ENV_KEY = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 
 
 class DeployError(Exception):
     """An intentionally non-sensitive error."""
+
+
+def validate_service_name(service):
+    if not isinstance(service, str) or len(service) > 63 or not SERVICE.fullmatch(service):
+        raise DeployError("Invalid service name")
+
+
+def normalize_target(target):
+    if not isinstance(target, dict):
+        raise DeployError("Invalid deployment contract")
+    result = {"init": False, "mounts": [], "command": [], "network": "bridge", **target}
+    if set(result) != {"port", "auth_key", "health_path", "init", "mounts", "command", "network", "env_keys", "secret_file_paths"}:
+        raise DeployError("Unexpected deployment contract fields")
+    if type(result["port"]) is not int or not 1024 <= result["port"] <= 65535:
+        raise DeployError("Invalid service port")
+    if not isinstance(result["auth_key"], str) or not ENV_KEY.fullmatch(result["auth_key"]):
+        raise DeployError("Invalid authentication key")
+    if not isinstance(result["health_path"], str) or not re.fullmatch(r"/[a-zA-Z0-9/_-]*", result["health_path"]):
+        raise DeployError("Invalid health path")
+    if type(result["init"]) is not bool or result["network"] not in ("host", "bridge"):
+        raise DeployError("Invalid process configuration")
+    if not isinstance(result["command"], list) or any(not isinstance(v, str) or "\0" in v for v in result["command"]):
+        raise DeployError("Invalid container command")
+    keys = result["env_keys"]
+    if not isinstance(keys, list) or any(not isinstance(k, str) or not ENV_KEY.fullmatch(k) for k in keys) or len(keys) != len(set(keys)) or result["auth_key"] not in keys:
+        raise DeployError("Invalid environment key contract")
+    files = result["secret_file_paths"]
+    if not isinstance(files, dict) or any(not ENV_KEY.fullmatch(k) or not isinstance(v, str) for k, v in files.items()):
+        raise DeployError("Invalid secret file contract")
+    if not isinstance(result["mounts"], list):
+        raise DeployError("Invalid mount contract")
+    destinations = []
+    for m in result["mounts"]:
+        if not isinstance(m, dict) or set(m) != {"source", "destination", "readonly"} or not isinstance(m["source"], str) or not isinstance(m["destination"], str) or type(m["readonly"]) is not bool:
+            raise DeployError("Invalid mount contract")
+        destinations.append(m["destination"])
+    destinations += list(files.values())
+    if len(destinations) != len(set(destinations)):
+        raise DeployError("Duplicate mount destination")
+    if any(not p.startswith('/') or '..' in Path(p).parts or any(c in p for c in ',\n\r\0') for p in destinations):
+        raise DeployError("Invalid mount destination")
+    return result
+
+
+def resolve_target(service, declared, installed):
+    """Existing privileged mounts stay administrator-owned; new services are isolated."""
+    validate_service_name(service)
+    target = normalize_target(declared)
+    if service in installed:
+        trusted = normalize_target({"network": "host", **installed[service]})
+        for key in trusted:
+            if key != "env_keys" and target[key] != trusted[key]:
+                raise DeployError("Legacy infrastructure contract requires administrator update")
+    else:
+        if target["network"] != "bridge":
+            raise DeployError("New services must use isolated bridge networking")
+        for m in target["mounts"]:
+            if not re.fullmatch(r"@data/[a-z][a-z0-9-]{0,40}", m["source"]) or not m["destination"].startswith('/var/lib/mcp/'):
+                raise DeployError("New services may only mount their own managed data directories")
+        if any(not p.startswith('/run/mcp-secrets/') for p in target["secret_file_paths"].values()):
+            raise DeployError("New secret files must be under /run/mcp-secrets/")
+    return target
 
 
 def command(args, *, stdin=None, timeout=120):
@@ -45,12 +110,19 @@ def inspect(name):
     return json.loads(command(["docker", "inspect", name]))[0]
 
 
+def inspect_optional(name):
+    # A daemon/permission error is not evidence that the container is absent.
+    ids = command(["docker", "container", "ls", "--all", "--filter", "name=^/" + name + "$", "--format", "{{.ID}}"])
+    return inspect(name) if ids.strip() else None
+
+
 def validate_request(service, revision, payload, target):
+    validate_service_name(service)
     if not SHA.fullmatch(revision):
         raise DeployError("Invalid revision")
     if not DIGEST.fullmatch(payload.get("digest", "")):
         raise DeployError("An immutable image digest is required")
-    if set(payload) != {"digest", "environment", "files", "settings", "registry_user", "registry_token", "deployer_sha256"}:
+    if set(payload) != {"digest", "environment", "files", "settings", "registry_user", "registry_token", "deployer_sha256", "target"}:
         raise DeployError("Unexpected payload fields")
     if payload["deployer_sha256"] != hashlib.sha256(Path(__file__).read_bytes()).hexdigest():
         raise DeployError("Installed deploy helper differs from this commit; update it through admin SSH first")
@@ -80,8 +152,12 @@ def validate_request(service, revision, payload, target):
 
 def validate_current(current, target, service):
     host = current["HostConfig"]
-    if host["NetworkMode"] != "host" or host.get("Privileged"):
+    if host["NetworkMode"] != target.get("network", "host") or host.get("Privileged"):
         raise DeployError("Live network/privilege configuration drifted")
+    if target.get("network") == "bridge":
+        expected = {str(target['port']) + '/tcp': [{"HostIp": "127.0.0.1", "HostPort": str(target['port'])}]}
+        if host.get('PortBindings') != expected:
+            raise DeployError("Live published port drifted")
     allowed = {m["destination"]: m for m in target["mounts"]}
     generated = set(target["secret_file_paths"].values())
     actual = {m["Destination"]: m for m in current["Mounts"]}
@@ -91,14 +167,14 @@ def validate_current(current, target, service):
         source = entry["Source"]
         if entry["Type"] != "bind":
             raise DeployError("Unexpected live mount type")
-        if destination in generated or allowed[destination]["source"].startswith("@"):
+        if destination in generated or allowed[destination]["source"] in ("@env", "@settings"):
             # Initial DB mount paths and subsequent immutable release files.
             initial = {"/app/.env": "/opt/dify-db/.env", "/app/config.yaml": "/opt/dify-db/config.yaml"}
             if source != initial.get(destination) and not source.startswith(str(ROOT / "releases" / service) + "/"):
                 raise DeployError("Generated mount source drifted")
-        elif source != allowed[destination]["source"]:
+        elif source != mount_source(service, allowed[destination]["source"]):
             raise DeployError("Live mount source drifted")
-    if bool(host.get("Init")) != target["init"] or current["Config"].get("User", ""):
+    if bool(host.get("Init")) != target["init"] or (target.get("network", "host") == "host" and current["Config"].get("User", "")):
         raise DeployError("Live process configuration drifted")
 
 
@@ -137,8 +213,20 @@ def verify_service(target, env, *, require_ready=False):
 
 
 def secure_write(path, content):
-    path.write_text(content)
-    path.chmod(0o600)
+    fd, name = tempfile.mkstemp(prefix=".pending-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as output:
+            output.write(content)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def mount_source(service, source):
+    if source.startswith('@data/'):
+        return str(ROOT / 'data' / service / source.split('/', 1)[1])
+    return source
 
 
 def pull_image(image, revision, payload):
@@ -154,13 +242,19 @@ def pull_image(image, revision, payload):
 
 
 def run_arguments(service, image, revision, target, release):
-    args = ["docker", "run", "-d", "--name", service, "--network", "host", "--restart", "always",
+    network = target.get("network", "host")
+    args = ["docker", "run", "-d", "--name", service, "--network", network, "--restart", "always",
             "--label", "io.mcp-plugins.managed=true", "--label", "io.mcp-plugins.revision=" + revision,
             "--env-file", str(release / "runtime.env")]
+    if network == "bridge":
+        args += ["--publish", f"127.0.0.1:{target['port']}:{target['port']}",
+                 "--cap-drop=ALL", "--security-opt=no-new-privileges:true"]
     if target["init"]:
         args.append("--init")
     for mount in target["mounts"]:
-        source = {"@env": str(release / "runtime.env"), "@settings": str(release / "config.yaml")}.get(mount["source"], mount["source"])
+        source = {"@env": str(release / "runtime.env"), "@settings": str(release / "config.yaml")}.get(mount["source"], mount_source(service, mount["source"]))
+        if mount["source"].startswith('@data/'):
+            Path(source).mkdir(parents=True, exist_ok=True, mode=0o700)
         if not Path(source).exists():
             raise DeployError("Required mount source does not exist")
         definition = f"type=bind,source={source},target={mount['destination']}"
@@ -172,8 +266,8 @@ def run_arguments(service, image, revision, target, release):
     return args + [image] + target["command"]
 
 
-def wait_healthy(service, target, env, ready):
-    deadline = time.monotonic() + (180 if ready else 75)
+def wait_healthy(service, target, env, ready, timeout=None):
+    deadline = time.monotonic() + (timeout if timeout is not None else (180 if ready else 75))
     while time.monotonic() < deadline:
         try:
             state = inspect(service)["State"]
@@ -185,7 +279,45 @@ def wait_healthy(service, target, env, ready):
     raise DeployError("Health/authentication/readiness verification timed out")
 
 
-def replace_container(service, revision, image, target, payload, release, expected_image=None):
+def verify_readback(service, expected_image, environment):
+    deployed = inspect(service)
+    if expected_image and deployed["Image"] != expected_image:
+        raise DeployError("Unexpected final image identity")
+    actual = dict(x.split("=", 1) for x in deployed["Config"]["Env"])
+    if any(actual.get(k) != v for k, v in environment.items()):
+        raise DeployError("Runtime environment readback mismatch")
+    return deployed
+
+
+def remove_candidate(service, revision, expected_image):
+    candidate = inspect_optional(service)
+    if candidate is not None:
+        labels = candidate["Config"].get("Labels", {})
+        if labels.get("io.mcp-plugins.revision") != revision or labels.get("io.mcp-plugins.managed") != "true" or (expected_image and candidate['Image'] != expected_image):
+            raise DeployError("Cleanup stopped: unexpected container owns the service name")
+        command(["docker", "rm", "-f", service])
+
+
+def create_container(service, revision, image, target, payload, release, expected_image=None, persist=None):
+    if inspect_optional(service) is not None:
+        raise DeployError("First deployment refused: container name is already in use")
+    args = run_arguments(service, image, revision, target, release)
+    try:
+        command(args)
+        count = wait_healthy(service, target, payload['environment'], False)
+        deployed = verify_readback(service, expected_image, payload['environment'])
+        record = {"service": service, "revision": revision, "image": image, "container": deployed['Id'],
+                  "previous_container": None, "release": str(release), "target": target}
+        if persist:
+            persist(record)
+    except BaseException:
+        remove_candidate(service, revision, expected_image)
+        raise DeployError("First deployment failed; only this attempt's container was removed") from None
+    print(json.dumps({"service": service, "revision": revision, "status": "created", "tools": count}), flush=True)
+    return record
+
+
+def replace_container(service, revision, image, target, payload, release, expected_image=None, persist=None):
     current = inspect(service)
     validate_current(current, target, service)
     old_env = dict(value.split("=", 1) for value in current["Config"]["Env"])
@@ -208,24 +340,18 @@ def replace_container(service, revision, image, target, payload, release, expect
         command(["docker", "update", "--restart=no", backup])
         command(args)
         count = wait_healthy(service, target, payload["environment"], ready)
-        deployed = inspect(service)
-        if expected_image and deployed["Image"] != expected_image:
-            raise DeployError("Unexpected final image identity")
-        actual_env = dict(x.split("=", 1) for x in deployed["Config"]["Env"])
-        if any(actual_env.get(k) != v for k, v in payload["environment"].items()):
-            raise DeployError("Runtime environment readback mismatch")
+        deployed = verify_readback(service, expected_image, payload['environment'])
+        record = {"service": service, "revision": revision, "image": image, "container": deployed["Id"],
+                  "previous_container": backup, "release": str(release), "target": target}
+        if persist:
+            persist(record)
         print(json.dumps({"service": service, "revision": revision, "status": "deployed", "tools": count, "rollback_container": backup}), flush=True)
-        return {"service": service, "revision": revision, "image": image, "container": deployed["Id"], "previous_container": backup, "release": str(release)}
+        return record
     except BaseException:
         # Only remove a container created by this transaction. Original services/data
         # and historical backups are retained; their writable layers stay intact.
         if renamed:
-            p = subprocess.run(["docker", "inspect", service], capture_output=True)
-            if p.returncode == 0:
-                candidate = json.loads(p.stdout)[0]
-                if candidate["Config"].get("Labels", {}).get("io.mcp-plugins.revision") != revision:
-                    raise DeployError("Rollback stopped: unexpected container owns the service name") from None
-                command(["docker", "rm", "-f", service])
+            remove_candidate(service, revision, expected_image)
             command(["docker", "rename", backup, service])
             command(["docker", "update", "--restart=" + restart, service])
         if stopped:
@@ -234,10 +360,40 @@ def replace_container(service, revision, image, target, payload, release, expect
         raise DeployError("Deployment failed; previous container restored and verified") from None
 
 
-def deploy(service, revision, payload, target):
+def preflight(service, target, installed, current):
+    state_path = ROOT / 'state' / (service + '.json')
+    previous = json.loads(state_path.read_text()) if state_path.exists() else None
+    if current:
+        labels = current['Config'].get('Labels') or {}
+        if not previous or previous.get('container') != current['Id'] or labels.get('io.mcp-plugins.managed') != 'true':
+            raise DeployError("Container is not owned by this service's deployment record")
+        old_target = previous.get('target', installed.get(service))
+        if old_target is None:
+            raise DeployError("Missing previous service contract")
+        # Port/mount/network changes need an explicit migration, not an implicit replacement.
+        old_target = normalize_target({'network': 'host' if service in installed else 'bridge', **old_target})
+        if any(old_target[k] != target[k] for k in ('port', 'network', 'mounts', 'secret_file_paths', 'init', 'command')):
+            raise DeployError("Existing infrastructure changed; an explicit migration is required")
+        validate_current(current, old_target, service)
+    reservations = {name: item['port'] for name, item in installed.items()}
+    for path in (ROOT / 'state').glob('*.json'):
+        item = json.loads(path.read_text())
+        if item.get('target'):
+            reservations[path.stem] = item['target']['port']
+    if any(name != service and port == target['port'] for name, port in reservations.items()):
+        raise DeployError("Service port is already reserved by another MCP")
+    if current is None:
+        try:
+            with socket.socket() as listener:
+                listener.bind(('127.0.0.1', target['port']))
+        except OSError:
+            raise DeployError("Service port is already in use") from None
+
+
+def deploy(service, revision, payload, target, installed=None):
     image = validate_request(service, revision, payload, target)
-    current = inspect(service)
-    validate_current(current, target, service)
+    current = inspect_optional(service)
+    preflight(service, target, installed or {}, current)
     print(json.dumps({"service": service, "stage": "pulling", "revision": revision}), flush=True)
     expected_image = pull_image(image, revision, payload)
     base = ROOT / "releases" / service
@@ -248,10 +404,12 @@ def deploy(service, revision, payload, target):
         secure_write(release / "config.yaml", json.dumps(payload["settings"], ensure_ascii=False))
     for key, value in payload["files"].items():
         secure_write(release / key, value)
-    record = replace_container(service, revision, image, target, payload, release, expected_image)
     state = ROOT / "state"
     state.mkdir(mode=0o700, exist_ok=True)
-    secure_write(state / (service + ".json"), json.dumps(record, indent=2))
+    def persist(record):
+        secure_write(state / (service + '.json'), json.dumps(record, indent=2))
+    operation = replace_container if current else create_container
+    operation(service, revision, image, target, payload, release, expected_image, persist)
 
 
 def main():
@@ -262,8 +420,8 @@ def main():
     signal.signal(signal.SIGHUP, interrupted)
     request = os.environ.get("SSH_ORIGINAL_COMMAND", "").split()
     targets = json.loads(TARGETS.read_text())
-    if len(request) != 3 or request[0] != "deploy" or request[1] not in targets or not SHA.fullmatch(request[2]):
-        raise DeployError("Only deployment of an allowlisted service and commit is permitted")
+    if len(request) != 3 or request[0] != "deploy" or not SERVICE.fullmatch(request[1]) or len(request[1]) > 63 or not SHA.fullmatch(request[2]):
+        raise DeployError("Only deployment of a valid service and commit is permitted")
     raw = sys.stdin.buffer.read(MAX_PAYLOAD + 1)
     if len(raw) > MAX_PAYLOAD:
         raise DeployError("Payload is too large")
@@ -271,9 +429,10 @@ def main():
         payload = json.loads(raw)
     except ValueError:
         raise DeployError("Invalid JSON payload") from None
+    target = resolve_target(request[1], payload.get('target'), targets)
     with open("/run/lock/mcp-plugins-deploy.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        deploy(request[1], request[2], payload, targets[request[1]])
+        deploy(request[1], request[2], payload, target, targets)
 
 
 if __name__ == "__main__":

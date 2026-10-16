@@ -83,12 +83,12 @@ class ContractTests(unittest.TestCase):
     def test_changed_service_selection(self):
         self.assertEqual(select(["github-mcp/src/github_mcp/tools.py"]), ["github-mcp"])
         self.assertEqual(select(["README.md"]), [])
-        self.assertEqual(select(["deploy/server.py"]), list(catalog.SERVICES))
+        self.assertEqual(select(["deploy/server.py"]), [])
 
     def test_ssh_shell_command_refused(self):
         with patch.object(server, "TARGETS", catalog.ROOT / "deploy/targets.json"):
             with patch.dict(os.environ, {"SSH_ORIGINAL_COMMAND": "sh -c id"}):
-                with self.assertRaisesRegex(server.DeployError, "allowlisted"):
+                with self.assertRaisesRegex(server.DeployError, "valid service"):
                     server.main()
 
     def test_command_failure_does_not_print_sensitive_stderr(self):
@@ -123,7 +123,7 @@ class TransactionTests(unittest.TestCase):
                     "Mounts": []}
         self.new = copy.deepcopy(self.old)
         self.new.update(Id="new-container", Image="new-image")
-        self.new["Config"]["Labels"] = {"io.mcp-plugins.revision": REVISION}
+        self.new["Config"]["Labels"] = {"io.mcp-plugins.revision": REVISION, "io.mcp-plugins.managed": "true"}
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.release = Path(self.directory.name)
@@ -131,6 +131,7 @@ class TransactionTests(unittest.TestCase):
 
     def execute(self, wait_effect=None, current=None, new=None):
         with patch.object(server, "inspect", side_effect=[current or self.old, new or self.new]), \
+             patch.object(server, "inspect_optional", return_value=new or self.new), \
              patch.object(server, "verify_service", return_value=5), \
              patch.object(server, "wait_healthy", side_effect=wait_effect) as wait, \
              patch.object(server, "command", return_value=b"ok") as command, \

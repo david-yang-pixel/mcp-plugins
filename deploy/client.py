@@ -8,11 +8,16 @@ import re
 import subprocess
 import sys
 import tempfile
-from catalog import SERVICES, spec
+from catalog import SERVICES, spec, target, secret_items
 
 
 def payload(service, digest, env=os.environ):
     plan = spec(service)
+    # The workflow supplies only this matrix entry's secrets, never the whole context.
+    env = dict(env)
+    for i, (key, _) in enumerate(secret_items(service)):
+        if 'MCP_SECRET_' + str(i) in env:
+            env['SECRET_' + key] = env['MCP_SECRET_' + str(i)]
     values = dict(plan["environment"])
     files = {}
     for key, item in plan["secrets"].items():
@@ -25,7 +30,7 @@ def payload(service, digest, env=os.environ):
         if not value:
             raise ValueError("Missing GitHub Secret: " + item["name"])
         files[key] = value
-    return {"digest": digest, "environment": values, "files": files,
+    return {"digest": digest, "environment": values, "files": files, "target": target(service),
             "settings": plan.get("settings"), "registry_user": env["REGISTRY_USER"],
             "registry_token": env["REGISTRY_TOKEN"],
             "deployer_sha256": hashlib.sha256(Path(__file__).with_name("server.py").read_bytes()).hexdigest()}

@@ -64,7 +64,7 @@ print(json.dumps({'host_key':pathlib.Path('/etc/ssh/ssh_host_ed25519_key.pub').r
             known = Path(folder) / "known_hosts"
             known.write_text(args.address + " " + " ".join(result["host_key"].split()[:2]) + "\n")
             result_probe = run(["ssh", "-T", "-i", str(key), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + str(known), "root@" + args.address, "id"], okay=(1,))
-            if b"Only deployment of an allowlisted service" not in result_probe.stderr:
+            if b"Only deployment of a valid service" not in result_probe.stderr:
                 raise RuntimeError("Restricted SSH refusal was not verified")
             run(["gh", "secret", "set", "MCP_DEPLOY_SSH_KEY", "--repo", args.repo], input=key.read_bytes())
             run(["gh", "variable", "set", "MCP_DEPLOY_HOST", "--repo", args.repo, "--body", args.address])

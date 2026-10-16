@@ -44,6 +44,6 @@ GitHub、文档、通知原先共用 tool_services 包，这里按各自线上�
 
 ## 密钥与 CI/CD
 
-8 个 MCP 的密钥在 GitHub Actions Secrets 中按服务前缀管理，普通配置在各服务 `deploy/runtime.json`。推送 `main` 自动测试、构建并部署受影响服务；仅更新密钥时，在 Actions 选择服务并运行部署工作流。
+8 个 MCP 的密钥在 GitHub Actions Secrets 中按服务前缀管理，普通配置在各服务 `deploy/runtime.json`。新增服务通过自身 `deploy/runtime.json` 自动发现并首次部署，无需修改中央名单或工作流。推送 `main` 只测试、构建并部署新增或有改动的服务，注册新服务不会重部署其他 MCP；仅更新密钥时，在 Actions 选择服务并运行部署工作流。
 
 部署保留数据挂载和旧容器，检查失败自动恢复。密钥清单、操作步骤、服务器路径及恢复方法见 [部署说明](deploy/README.md)。

@@ -5,7 +5,7 @@ import secrets
 import subprocess
 import sys
 import time
-from catalog import SERVICES, PORTS, AUTH_KEYS
+from catalog import SERVICES, spec, target as service_target
 from server import verify_service
 
 
@@ -15,12 +15,14 @@ def main():
         raise ValueError("Unknown service")
     name = "mcp-ci-" + service
     key = secrets.token_urlsafe(32)
-    env = {AUTH_KEYS[service]: key}
+    target = service_target(service)
+    env = dict(spec(service).get('smoke_environment', {}))
+    env[target['auth_key']] = key
     if service == "zendesk-browser-relay":
         env["ZENDESK_SESSION_SUPERVISOR_ENABLED"] = "false"
-    target = {"auth_key": AUTH_KEYS[service], "port": PORTS[service],
-              "health_path": "/healthz" if service == "db-gateway" else "/health"}
-    args = ["docker", "run", "-d", "--name", name, "--network", "host"]
+    args = ["docker", "run", "-d", "--name", name, "--network", target['network']]
+    if target['network'] == 'bridge':
+        args += ['--publish', f"127.0.0.1:{target['port']}:{target['port']}"]
     for k, v in env.items():
         args += ["-e", k + "=" + v]
     subprocess.run(args + [image], check=True, capture_output=True)

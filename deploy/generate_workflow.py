@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Generate explicit per-service secret references; never serialize all secrets."""
-from catalog import ROOT, SERVICES, spec
+"""Generate a service-independent workflow with narrowly scoped secret slots."""
+from catalog import ROOT, MAX_SECRETS
 
 CHECKOUT = "d23441a48e516b6c34aea4fa41551a30e30af803"
 UV = "1c37ad07a6a961277cf70c0d37d6f313000f5884"  # setup-uv v10.3.0, Node 24
@@ -21,12 +21,9 @@ on:
       service:
         description: Service to rebuild and deploy with current Secrets
         required: true
-        type: choice
+        type: string
         default: all
-        options:
-          - all
 '''
-    workflow += "".join("          - " + s + "\n" for s in SERVICES)
     workflow += '''
 permissions:
   contents: read
@@ -61,12 +58,15 @@ jobs:
           persist-credentials: false
       - name: Test deployment validation and rollback
         run: python3 -m unittest discover -s deploy/tests -v
+      - name: Exercise first deployment and rollback with real containers
+        run: python3 deploy/tests/integration_docker.py
       - name: Check generated workflow is current
         run: |
           python3 deploy/generate_workflow.py
           git diff --exit-code -- .github/workflows/ci-cd.yml
 
   build:
+    name: Build ${{ matrix.entry.service }}
     needs: [plan, verify-deployer]
     if: needs.plan.outputs.changed == 'true'
     runs-on: ubuntu-24.04
@@ -78,10 +78,10 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        service: ${{ fromJSON(needs.plan.outputs.services) }}
+        entry: ${{ fromJSON(needs.plan.outputs.services) }}
     env:
-      SERVICE: ${{ matrix.service }}
-      IMAGE: ghcr.io/david-yang-pixel/mcp-plugins/${{ matrix.service }}:${{ github.sha }}
+      SERVICE: ${{ matrix.entry.service }}
+      IMAGE: ghcr.io/david-yang-pixel/mcp-plugins/${{ matrix.entry.service }}:${{ github.sha }}
     steps:
       - uses: actions/checkout@CHECKOUT
         with:
@@ -91,9 +91,9 @@ jobs:
           version: '0.10.7'
           python-version: '3.12'
           enable-cache: true
-          cache-suffix: ${{ matrix.service }}
+          cache-suffix: ${{ matrix.entry.service }}
       - name: Locked dependencies and service tests
-        working-directory: ${{ matrix.service }}
+        working-directory: ${{ matrix.entry.service }}
         run: |
           uv sync --locked --all-extras --all-groups
           uv run --locked pytest -q
@@ -101,15 +101,15 @@ jobs:
       - name: Build image without production credentials
         uses: docker/build-push-action@BUILD
         with:
-          context: ./${{ matrix.service }}
+          context: ./${{ matrix.entry.service }}
           load: true
           platforms: linux/amd64
           tags: ${{ env.IMAGE }}
           labels: |
             org.opencontainers.image.source=https://github.com/david-yang-pixel/mcp-plugins
             org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          cache-from: type=gha,scope=${{ matrix.entry.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.entry.service }}
       - name: Verify packaged service and authentication
         run: python3 deploy/smoke_image.py "$SERVICE" "$IMAGE"
       - name: Publish private image
@@ -123,6 +123,7 @@ jobs:
           docker logout ghcr.io
 
   deploy:
+    name: Deploy ${{ matrix.entry.service }}
     needs: [plan, build]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.plan.outputs.changed == 'true'
     runs-on: ubuntu-24.04
@@ -134,9 +135,9 @@ jobs:
       fail-fast: true
       max-parallel: 1
       matrix:
-        service: ${{ fromJSON(needs.plan.outputs.services) }}
+        entry: ${{ fromJSON(needs.plan.outputs.services) }}
     env:
-      SERVICE: ${{ matrix.service }}
+      SERVICE: ${{ matrix.entry.service }}
       REVISION: ${{ github.sha }}
       DEPLOY_HOST: ${{ vars.MCP_DEPLOY_HOST }}
       SSH_PRIVATE_KEY: ${{ secrets.MCP_DEPLOY_SSH_KEY }}
@@ -152,12 +153,10 @@ jobs:
       - name: Authenticate to private image registry
         run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$REGISTRY_USER" --password-stdin
 '''
-    for s in SERVICES:
-        workflow += f"      - name: Deploy {s} and verify\n        if: matrix.service == '{s}'\n        env:\n"
-        plan = spec(s)
-        for key, item in (plan["secrets"] | plan["secret_files"]).items():
-            workflow += f"          SECRET_{key}: ${{{{ secrets.{item['name']} }}}}\n"
-        workflow += "        run: python3 deploy/client.py\n"
+    workflow += "      - name: Deploy selected service and verify\n        env:\n"
+    for i in range(MAX_SECRETS):
+        workflow += f"          MCP_SECRET_{i}: ${{{{ secrets[matrix.entry.secret_names[{i}]] }}}}\n"
+    workflow += "        run: python3 deploy/client.py\n"
     workflow += "      - name: Remove registry login\n        if: always()\n        run: docker logout ghcr.io\n"
     for name, value in [("CHECKOUT", CHECKOUT), ("BUILDX", BUILDX), ("BUILD", BUILD), ("UV", UV)]:
         workflow = workflow.replace("@" + name, "@" + value)
