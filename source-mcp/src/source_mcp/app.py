@@ -8,6 +8,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .git_ops import (
+    DIFF_MODES,
+    SEARCH_MODES,
     SourceError,
     list_repo_tags,
     read_source,
@@ -24,6 +26,17 @@ from .settings import Settings, get_settings
 
 
 PROTOCOL_VERSION = "2025-03-26"
+RUNTIME_REF = "runtime"
+_REF_DESCRIPTION = (
+    "Git branch, tag or commit SHA. Omitted means 'runtime', the code currently running "
+    "in Dify SaaS production. For Enterprise or self-hosted investigations always pass the "
+    "customer's version tag or pinned commit; never rely on the default."
+)
+_DEFAULT_REF_WARNING = (
+    "ref was not specified, so the Dify SaaS production runtime code was used. "
+    "This is NOT the code of an Enterprise or self-hosted deployment; pass the "
+    "customer's version tag or pinned commit as ref for those."
+)
 
 
 def create_app() -> FastAPI:
@@ -136,14 +149,34 @@ def _tools_list() -> list[dict[str, Any]]:
         },
         {
             "name": "source_search",
-            "description": "Search source code. Defaults ref to runtime, meaning the online running code.",
+            "description": (
+                "Search source code with git grep. mode=auto (default) uses extended regex, "
+                "so 'foo|bar' alternation works, and switches to Perl regex for lookaround, "
+                "\\d or inline groups; a leading (?i) is honoured. The result reports the "
+                "effective mode; 'no matches' only means no match under that mode. "
+                "Omitting ref searches Dify SaaS production runtime code."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "repo": {"type": "string"},
                     "pattern": {"type": "string"},
-                    "ref": {"type": "string", "default": "runtime"},
-                    "glob": {"type": "string"},
+                    "ref": {"type": "string", "description": _REF_DESCRIPTION},
+                    "glob": {"type": "string", "description": "Pathspec such as 'api/**/*.py'."},
+                    "mode": {
+                        "type": "string",
+                        "enum": list(SEARCH_MODES),
+                        "default": "auto",
+                        "description": "fixed=literal string, regex=POSIX extended, perl=PCRE.",
+                    },
+                    "case_sensitive": {"type": "boolean", "default": False},
+                    "context": {
+                        "type": "integer",
+                        "default": 0,
+                        "minimum": 0,
+                        "maximum": 10,
+                        "description": "Context lines before and after each match.",
+                    },
                     "limit": {"type": "integer", "default": 30},
                 },
                 "required": ["repo", "pattern"],
@@ -151,25 +184,34 @@ def _tools_list() -> list[dict[str, Any]]:
         },
         {
             "name": "source_read",
-            "description": "Read a file from source code. Defaults ref to runtime.",
+            "description": (
+                "Read a file from source code, optionally a 1-based inclusive line range. "
+                "Returns total_lines and truncated; continue with start_line when truncated. "
+                "Omitting ref reads Dify SaaS production runtime code."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "repo": {"type": "string"},
                     "filepath": {"type": "string"},
-                    "ref": {"type": "string", "default": "runtime"},
+                    "ref": {"type": "string", "description": _REF_DESCRIPTION},
+                    "start_line": {"type": "integer", "minimum": 1},
+                    "end_line": {"type": "integer", "minimum": 1},
                 },
                 "required": ["repo", "filepath"],
             },
         },
         {
             "name": "source_log",
-            "description": "Show git log for a repository or file. Defaults ref to runtime.",
+            "description": (
+                "Show git log for a repository or file. Reports shallow=true when history is "
+                "truncated by a shallow clone. Omitting ref uses Dify SaaS production runtime code."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "repo": {"type": "string"},
-                    "ref": {"type": "string", "default": "runtime"},
+                    "ref": {"type": "string", "description": _REF_DESCRIPTION},
                     "filepath": {"type": "string"},
                     "n": {"type": "integer", "default": 20},
                 },
@@ -178,21 +220,29 @@ def _tools_list() -> list[dict[str, Any]]:
         },
         {
             "name": "source_diff",
-            "description": "Show diff/stat between two refs. Use ref runtime to compare online code.",
+            "description": (
+                "Diff two refs. mode=stat lists changed files with line counts, name-status "
+                "lists files with A/M/D status, patch returns the full diff. Default is stat, "
+                "or patch when filepath is given. Use ref runtime to compare online code."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "repo": {"type": "string"},
                     "ref1": {"type": "string"},
                     "ref2": {"type": "string"},
-                    "filepath": {"type": "string"},
+                    "filepath": {"type": "string", "description": "File or directory to limit the diff."},
+                    "mode": {"type": "string", "enum": list(DIFF_MODES)},
                 },
                 "required": ["repo", "ref1", "ref2"],
             },
         },
         {
             "name": "repo_status",
-            "description": "Show local clone/fetch status for configured source repositories.",
+            "description": (
+                "Show local clone/fetch status for configured source repositories, "
+                "including whether each clone is shallow."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {"repo": {"type": "string"}},
@@ -200,11 +250,25 @@ def _tools_list() -> list[dict[str, Any]]:
         },
         {
             "name": "refresh_repos",
-            "description": "Fetch or clone configured source repositories.",
+            "description": (
+                "Fetch or clone configured source repositories. Reports changed and changes "
+                "(refs added/updated/removed, history_changed), shallow and warnings so an "
+                "ineffective fetch is visible. With exactly one repo: refs fetches specific "
+                "branches, tags or full commit SHAs; deepen=N adds N commits of history; "
+                "unshallow=true fetches full history (slow for large repos)."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "repos": {"type": "array", "items": {"type": "string"}},
+                    "refs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 20,
+                        "description": "Branches, tags or full 40-character commit SHAs to fetch.",
+                    },
+                    "deepen": {"type": "integer", "minimum": 1},
+                    "unshallow": {"type": "boolean", "default": False},
                 },
             },
         },
@@ -240,34 +304,45 @@ async def _handle_tool_call(
                 )
             )
         if name == "source_search":
-            return _success(
+            ref = _optional_str(arguments, "ref")
+            return _success_for_ref(
                 await search_source(
                     repo=_required_str(arguments, "repo"),
-                    ref=_optional_str(arguments, "ref") or "runtime",
-                    pattern=_required_str(arguments, "pattern"),
+                    ref=ref or RUNTIME_REF,
+                    pattern=_required_str(arguments, "pattern", strip=False),
                     glob=_optional_str(arguments, "glob"),
                     limit=_optional_int(arguments, "limit", 30),
+                    mode=_optional_str(arguments, "mode") or "auto",
+                    case_sensitive=_optional_bool(arguments, "case_sensitive", False),
+                    context=_optional_int(arguments, "context", 0),
                     settings=settings,
-                )
+                ),
+                ref_defaulted=ref is None,
             )
         if name == "source_read":
-            return _success(
+            ref = _optional_str(arguments, "ref")
+            return _success_for_ref(
                 await read_source(
                     repo=_required_str(arguments, "repo"),
-                    ref=_optional_str(arguments, "ref") or "runtime",
+                    ref=ref or RUNTIME_REF,
                     filepath=_required_str(arguments, "filepath"),
+                    start_line=_optional_int_or_none(arguments, "start_line"),
+                    end_line=_optional_int_or_none(arguments, "end_line"),
                     settings=settings,
-                )
+                ),
+                ref_defaulted=ref is None,
             )
         if name == "source_log":
-            return _success(
+            ref = _optional_str(arguments, "ref")
+            return _success_for_ref(
                 await source_log(
                     repo=_required_str(arguments, "repo"),
-                    ref=_optional_str(arguments, "ref") or "runtime",
+                    ref=ref or RUNTIME_REF,
                     filepath=_optional_str(arguments, "filepath"),
                     n=_optional_int(arguments, "n", 20),
                     settings=settings,
-                )
+                ),
+                ref_defaulted=ref is None,
             )
         if name == "source_diff":
             return _success(
@@ -276,6 +351,7 @@ async def _handle_tool_call(
                     ref1=_required_str(arguments, "ref1"),
                     ref2=_required_str(arguments, "ref2"),
                     filepath=_optional_str(arguments, "filepath"),
+                    mode=_optional_str(arguments, "mode"),
                     settings=settings,
                 )
             )
@@ -285,10 +361,15 @@ async def _handle_tool_call(
                 return _success(await status_for_repo(repo, settings))
             return _success([await status_for_repo(repo_name, settings) for repo_name in settings.repo_names])
         if name == "refresh_repos":
-            repos = arguments.get("repos")
-            if repos is not None and not isinstance(repos, list):
-                raise SourceError("BAD_ARGUMENT", "repos must be a string array")
-            return _success(await refresh_repos(settings, repos=repos))
+            return _success(
+                await refresh_repos(
+                    settings,
+                    repos=_optional_str_list(arguments, "repos"),
+                    refs=_optional_str_list(arguments, "refs"),
+                    deepen=_optional_int_or_none(arguments, "deepen"),
+                    unshallow=_optional_bool(arguments, "unshallow", False),
+                )
+            )
         if name == "list_repo_tags":
             return _success(
                 await list_repo_tags(
@@ -306,11 +387,11 @@ async def _handle_tool_call(
         return _failure("INTERNAL_ERROR", str(e))
 
 
-def _required_str(arguments: dict[str, Any], name: str) -> str:
+def _required_str(arguments: dict[str, Any], name: str, *, strip: bool = True) -> str:
     value = arguments.get(name)
     if not isinstance(value, str) or not value.strip():
         raise SourceError("BAD_ARGUMENT", f"{name} is required")
-    return value.strip()
+    return value.strip() if strip else value
 
 
 def _optional_str(arguments: dict[str, Any], name: str) -> Optional[str]:
@@ -330,8 +411,38 @@ def _optional_int(arguments: dict[str, Any], name: str, default: int) -> int:
         raise SourceError("BAD_ARGUMENT", f"{name} must be an integer") from None
 
 
+def _optional_int_or_none(arguments: dict[str, Any], name: str) -> Optional[int]:
+    if arguments.get(name) is None:
+        return None
+    return _optional_int(arguments, name, 0)
+
+
+def _optional_bool(arguments: dict[str, Any], name: str, default: bool) -> bool:
+    value = arguments.get(name, default)
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise SourceError("BAD_ARGUMENT", f"{name} must be a boolean")
+    return value
+
+
+def _optional_str_list(arguments: dict[str, Any], name: str) -> Optional[list[str]]:
+    value = arguments.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+        raise SourceError("BAD_ARGUMENT", f"{name} must be a string array")
+    return [item.strip() for item in value]
+
+
 def _success(data: Any) -> dict[str, Any]:
     return {"success": True, "data": data}
+
+
+def _success_for_ref(data: dict[str, Any], *, ref_defaulted: bool) -> dict[str, Any]:
+    if ref_defaulted:
+        data = {**data, "ref_defaulted": True, "ref_warning": _DEFAULT_REF_WARNING}
+    return _success(data)
 
 
 def _failure(code: str, error: str) -> dict[str, Any]:

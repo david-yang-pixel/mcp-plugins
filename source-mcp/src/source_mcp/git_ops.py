@@ -14,8 +14,17 @@ from .settings import Settings
 
 
 _SSH_URL_RE = re.compile(r"^git@github\.com:(.+)$")
-_COMPLEX_RE_PATTERN = re.compile(r"(\(\?[!=<]|\\[bBdDwWsS]|\{[\d,]+\}|[|()]{3,})")
 _TAG_LIKE_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-_].*)?$")
+_COMMIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+_FULL_COMMIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_PERL_ONLY_RE_PATTERN = re.compile(r"(\(\?|\\[dD]|[*+?}]\?)")
+_INLINE_CASE_FLAG = "(?i)"
+SEARCH_MODES = ("auto", "fixed", "regex", "perl")
+DIFF_MODES = ("stat", "name-status", "patch")
+_MAX_SEARCH_CONTEXT = 10
+_MAX_READ_BYTES = 120_000
+_MAX_REFRESH_REFS = 20
+_MAX_CHANGED_REF_SAMPLE = 20
 _GREP_PATTERN_ERROR_MARKERS = (
     "fatal: -e option",
     "invalid regular expression",
@@ -25,6 +34,16 @@ _GREP_PATTERN_ERROR_MARKERS = (
 _MISSING_BLOB_ERROR_MARKERS = (
     "lazy fetching disabled",
     "promisor remote",
+)
+_PCRE_UNAVAILABLE_MARKERS = (
+    "perl-compatible regexes",
+    "use_libpcre",
+)
+_MISSING_REMOTE_COMMIT_MARKERS = (
+    "not our ref",
+    "couldn't find remote ref",
+    "no such remote ref",
+    "unadvertised object",
 )
 _FULL_REPO_SEARCH_SEMAPHORE: asyncio.Semaphore | None = None
 _FULL_REPO_SEARCH_SEMAPHORE_LIMIT: int | None = None
@@ -122,30 +141,94 @@ async def ensure_repo(repo: str, settings: Settings) -> Path:
     return path
 
 
-async def refresh_repo(repo: str, settings: Settings) -> dict[str, Any]:
+async def refresh_repo(
+    repo: str,
+    settings: Settings,
+    *,
+    refs: Optional[list[str]] = None,
+    deepen: Optional[int] = None,
+    unshallow: bool = False,
+) -> dict[str, Any]:
     path = repo_path(settings, repo)
     if not is_git_repo(path):
         await _clone_repo(path, repo, settings)
         message = "cloned"
+    elif await _can_auto_fetch(path, repo, settings):
+        message = "fetched"
+    elif refs or deepen or unshallow:
+        raise SourceError(
+            "GIT_FETCH_UNAVAILABLE",
+            f"{repo} has no fetchable origin; refs/deepen/unshallow cannot be applied",
+        )
     else:
-        if not await _can_auto_fetch(path, repo, settings):
-            message = "local-only"
-        else:
-            await _configure_origin(path, repo, settings)
-            code, _, err = await run_git(
-                path, "fetch", "--all", "--prune", "--tags", "--force",
-                settings=settings,
-                max_output=8000,
-            )
-            if code != 0:
-                raise SourceError("GIT_FETCH_FAILED", err.strip())
-            message = "fetched"
-    return await status_for_repo(repo, settings, message=message)
+        return await status_for_repo(repo, settings, message="local-only")
+
+    await _configure_origin(path, repo, settings)
+    before = await _repo_snapshot(path, settings)
+    shallow_before = await is_shallow_repo(path, settings)
+    history_args: list[str] = []
+    if shallow_before and unshallow:
+        history_args = ["--unshallow"]
+    elif shallow_before and deepen:
+        history_args = [f"--deepen={deepen}"]
+    if message == "fetched" or history_args:
+        code, _, err = await run_git(
+            path, "fetch", "--all", "--prune", "--tags", "--force", *history_args,
+            settings=settings,
+            max_output=8000,
+            timeout_seconds=settings.git_history_timeout_seconds if history_args else None,
+        )
+        if code != 0:
+            raise SourceError("GIT_FETCH_FAILED", f"{repo}: {err.strip()}")
+
+    ref_results = [await _ensure_ref_present(path, repo, ref, settings) for ref in refs or []]
+    data = await status_for_repo(repo, settings, message=message)
+    data["changes"] = _snapshot_changes(before, await _repo_snapshot(path, settings))
+    data["changed"] = data["changes"]["total"] > 0
+    if ref_results:
+        data["refs"] = ref_results
+    warnings: list[str] = []
+    if data["shallow"]:
+        warnings.append(
+            "repository is still a shallow clone: only commits reachable from fetched "
+            "branch/tag tips are available and source_log history is truncated; pass "
+            "refs=[<full commit SHA>] to fetch a pinned commit, or deepen/unshallow for history"
+        )
+    if (deepen or unshallow) and not shallow_before:
+        warnings.append("repository already has full history; deepen/unshallow had no effect")
+    if message == "fetched" and not data["changed"]:
+        warnings.append("fetch succeeded but no local ref or history changed")
+    if any(item["status"] == "not_found" for item in ref_results):
+        warnings.append("some requested refs were not found on origin")
+    data["warnings"] = warnings
+    return data
 
 
-async def refresh_repos(settings: Settings, repos: Optional[list[str]] = None) -> list[dict[str, Any]]:
+async def refresh_repos(
+    settings: Settings,
+    repos: Optional[list[str]] = None,
+    *,
+    refs: Optional[list[str]] = None,
+    deepen: Optional[int] = None,
+    unshallow: bool = False,
+) -> list[dict[str, Any]]:
     names = repos or settings.repo_names
-    return [await refresh_repo(repo, settings) for repo in names]
+    if refs:
+        if len(refs) > _MAX_REFRESH_REFS:
+            raise SourceError("BAD_ARGUMENT", f"refs accepts at most {_MAX_REFRESH_REFS} items")
+        for ref in refs:
+            _reject_bad_ref(ref)
+    if (refs or deepen or unshallow) and (not repos or len(repos) != 1):
+        raise SourceError(
+            "BAD_ARGUMENT",
+            "refs, deepen and unshallow require exactly one repo in repos",
+        )
+    if deepen is not None and not 1 <= deepen <= 100_000:
+        raise SourceError("BAD_ARGUMENT", "deepen must be between 1 and 100000")
+    return [
+        await refresh_repo(repo, settings, refs=refs, deepen=deepen, unshallow=unshallow)
+        for repo in names
+    ]
 
 
 async def status_for_repo(
@@ -167,6 +250,7 @@ async def status_for_repo(
     data["commit"] = await rev_parse(repo, "HEAD", settings)
     data["last_fetch_at"] = _fetch_head_mtime(path)
     data["default_branch_ref"] = await default_branch_ref(path, settings)
+    data["shallow"] = await is_shallow_repo(path, settings)
     code, tags, _ = await run_git(path, "tag", "-l", settings=settings, max_output=1_000_000)
     data["tag_count"] = len([line for line in tags.splitlines() if line.strip()]) if code == 0 else 0
     return data
@@ -197,15 +281,57 @@ async def rev_parse(
     if code != 0:
         if await _can_auto_fetch(path, repo, settings):
             await _configure_origin(path, repo, settings)
-            await _fetch_ref(path, ref, settings)
+            if _FULL_COMMIT_SHA_RE.match(ref):
+                await _fetch_commit(path, ref, settings)
+            else:
+                await _fetch_ref(path, ref, settings)
         code, out, err = await run_git(
             path, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}",
             settings=settings,
             max_output=2000,
         )
     if code != 0:
-        raise SourceError("REF_NOT_FOUND", f"ref not found in {repo}: {ref}; {err.strip()}")
+        raise SourceError("REF_NOT_FOUND", await _ref_not_found_message(path, repo, ref, err, settings))
     return out.strip()
+
+
+async def is_shallow_repo(path: Path, settings: Settings) -> bool:
+    code, out, _ = await run_git(
+        path, "rev-parse", "--is-shallow-repository",
+        settings=settings,
+        max_output=2000,
+    )
+    return code == 0 and out.strip() == "true"
+
+
+async def _ref_not_found_message(
+    path: Path,
+    repo: str,
+    ref: str,
+    err: str,
+    settings: Settings,
+) -> str:
+    message = f"ref not found in {repo}: {ref}"
+    if err.strip():
+        message += f"; {err.strip()}"
+    if not await is_shallow_repo(path, settings):
+        return message
+    if _FULL_COMMIT_SHA_RE.match(ref):
+        hint = "the commit was also not fetchable from origin"
+    elif _COMMIT_SHA_RE.match(ref):
+        hint = (
+            "abbreviated commit SHAs cannot be fetched from origin; pass the full "
+            "40-character SHA, or call refresh_repos with unshallow=true"
+        )
+    else:
+        hint = (
+            "pass a full commit SHA, or call refresh_repos with refs=[...], deepen or "
+            "unshallow=true"
+        )
+    return (
+        f"{message}; {repo} is a shallow clone, so commits that are not the tip of a "
+        f"fetched branch or tag are not available locally; {hint}"
+    )
 
 
 async def search_source(
@@ -216,30 +342,52 @@ async def search_source(
     glob: Optional[str],
     limit: int,
     settings: Settings,
+    mode: str = "auto",
+    case_sensitive: bool = False,
+    context: int = 0,
 ) -> dict[str, Any]:
+    if mode not in SEARCH_MODES:
+        raise SourceError("BAD_ARGUMENT", f"mode must be one of: {', '.join(SEARCH_MODES)}")
+    if not 0 <= context <= _MAX_SEARCH_CONTEXT:
+        raise SourceError("BAD_ARGUMENT", f"context must be between 0 and {_MAX_SEARCH_CONTEXT}")
     path = await ensure_repo(repo, settings)
     resolved = await _resolve_ref(repo, ref, settings)
-    use_fixed = len(pattern) > 120 or _is_complex_regex(pattern)
+    effective_pattern = pattern
+    ignore_case = not case_sensitive
+    if mode != "fixed" and pattern.startswith(_INLINE_CASE_FLAG):
+        effective_pattern = pattern[len(_INLINE_CASE_FLAG):]
+        ignore_case = True
+    effective_mode, fallback = _select_search_mode(mode, effective_pattern)
 
-    async def execute_search() -> tuple[int, str, str]:
-        args = _grep_args(pattern=pattern, ref=resolved["ref"], glob=glob, fixed=use_fixed)
-        result = await run_git(
+    async def grep(grep_mode: str) -> tuple[int, str, str]:
+        args = _grep_args(
+            pattern=effective_pattern,
+            ref=resolved["ref"],
+            glob=glob,
+            mode=grep_mode,
+            ignore_case=ignore_case,
+            context=context,
+        )
+        return await run_git(
             path,
             *args,
             settings=settings,
             max_output=limit * 1000,
             allow_lazy_fetch=False,
         )
+
+    async def execute_search() -> tuple[int, str, str]:
+        nonlocal effective_mode, fallback
+        result = await grep(effective_mode)
         code, _, err = result
-        if code not in (0, 1) and not use_fixed and _is_grep_pattern_error(err):
-            args = _grep_args(pattern=pattern, ref=resolved["ref"], glob=glob, fixed=True)
-            result = await run_git(
-                path,
-                *args,
-                settings=settings,
-                max_output=limit * 1000,
-                allow_lazy_fetch=False,
-            )
+        if code not in (0, 1) and mode == "auto" and effective_mode != "fixed":
+            if _is_grep_pattern_error(err) or _is_pcre_unavailable(err):
+                fallback = (
+                    f"{effective_mode} pattern rejected by git grep "
+                    f"({_first_line(err)}); searched as fixed string"
+                )
+                effective_mode = "fixed"
+                result = await grep(effective_mode)
         return result
 
     if glob is None:
@@ -248,15 +396,31 @@ async def search_source(
     else:
         code, out, err = await execute_search()
     if code == 1:
-        out = f"no matches for {pattern!r}"
+        out = (
+            f"no matches for {effective_pattern!r} (mode={effective_mode}, "
+            f"{'case-insensitive' if ignore_case else 'case-sensitive'})"
+        )
     elif code != 0:
         if _is_missing_blob_error(err):
             raise SourceError(
                 "REPO_BLOBS_MISSING",
                 f"{repo} is missing blobs required to search {resolved['ref']}",
             )
+        if _is_grep_pattern_error(err) or _is_pcre_unavailable(err):
+            raise SourceError("BAD_PATTERN", f"{effective_mode} pattern rejected: {err.strip()}")
         raise SourceError("GIT_GREP_FAILED", err.strip())
-    return {**resolved, "output": out}
+    data = {
+        **resolved,
+        "pattern": effective_pattern,
+        "mode": effective_mode,
+        "case_sensitive": not ignore_case,
+        "context": context,
+        "matched": code == 0,
+        "output": out,
+    }
+    if fallback:
+        data["fallback"] = fallback
+    return data
 
 
 async def read_source(
@@ -265,18 +429,59 @@ async def read_source(
     ref: str,
     filepath: str,
     settings: Settings,
+    start_line: Optional[int] = None,
+    end_line: Optional[int] = None,
 ) -> dict[str, Any]:
     _reject_bad_filepath(filepath)
+    if start_line is not None and start_line < 1:
+        raise SourceError("BAD_ARGUMENT", "start_line must be >= 1")
+    if end_line is not None and end_line < 1:
+        raise SourceError("BAD_ARGUMENT", "end_line must be >= 1")
+    if start_line is not None and end_line is not None and end_line < start_line:
+        raise SourceError("BAD_ARGUMENT", "end_line must be >= start_line")
     path = await ensure_repo(repo, settings)
     resolved = await _resolve_ref(repo, ref, settings)
     code, out, err = await run_git(
         path, "show", f"{resolved['ref']}:{filepath}",
         settings=settings,
-        max_output=120_000,
+        max_output=settings.read_max_file_bytes,
     )
     if code != 0:
         raise SourceError("GIT_SHOW_FAILED", err.strip())
-    return {**resolved, "filepath": filepath, "content": out}
+    file_truncated = len(out) > settings.read_max_file_bytes
+    if file_truncated:
+        out = out[:settings.read_max_file_bytes]
+    lines = out.splitlines(keepends=True)
+    first = start_line or 1
+    last = min(end_line or len(lines), len(lines))
+    selected: list[str] = []
+    size = 0
+    line_cut = False
+    for line in lines[first - 1:last]:
+        if selected and size + len(line) > _MAX_READ_BYTES:
+            break
+        line_cut = len(line) > _MAX_READ_BYTES
+        selected.append(line[:_MAX_READ_BYTES])
+        size += len(selected[-1])
+    returned_end = first + len(selected) - 1
+    truncated = returned_end < last or line_cut
+    data: dict[str, Any] = {
+        **resolved,
+        "filepath": filepath,
+        "total_lines": len(lines),
+        "start_line": first,
+        "end_line": returned_end,
+        "truncated": truncated,
+        "content": "".join(selected),
+    }
+    if truncated:
+        data["hint"] = (
+            f"output limited to {_MAX_READ_BYTES} characters; continue with "
+            f"start_line={returned_end + 1}"
+        )
+    if file_truncated:
+        data["total_lines_exact"] = False
+    return data
 
 
 async def source_log(
@@ -296,7 +501,13 @@ async def source_log(
     code, out, err = await run_git(path, *args, settings=settings, max_output=60_000)
     if code != 0:
         raise SourceError("GIT_LOG_FAILED", err.strip())
-    return {**resolved, "output": out}
+    data = {**resolved, "output": out, "shallow": await is_shallow_repo(path, settings)}
+    if data["shallow"] and len(out.splitlines()) < n:
+        data["warning"] = (
+            "history is truncated because the repository is a shallow clone; "
+            "call refresh_repos with deepen or unshallow=true for older commits"
+        )
+    return data
 
 
 async def source_diff(
@@ -306,14 +517,23 @@ async def source_diff(
     ref2: str,
     filepath: Optional[str],
     settings: Settings,
+    mode: Optional[str] = None,
 ) -> dict[str, Any]:
+    mode = mode or ("patch" if filepath else "stat")
+    if mode not in DIFF_MODES:
+        raise SourceError("BAD_ARGUMENT", f"mode must be one of: {', '.join(DIFF_MODES)}")
+    if filepath:
+        _reject_bad_filepath(filepath)
     path = await ensure_repo(repo, settings)
     resolved1 = await _resolve_ref(repo, ref1, settings)
     resolved2 = await _resolve_ref(repo, ref2, settings)
-    args = ["diff", resolved1["ref"], resolved2["ref"], "--stat"]
+    args = ["diff", resolved1["ref"], resolved2["ref"]]
+    if mode == "stat":
+        args.append("--stat=200")
+    elif mode == "name-status":
+        args.append("--name-status")
     if filepath:
-        _reject_bad_filepath(filepath)
-        args = ["diff", resolved1["ref"], resolved2["ref"], "--", filepath]
+        args.extend(["--", filepath])
     code, out, err = await run_git(path, *args, settings=settings, max_output=80_000)
     if code != 0:
         raise SourceError("GIT_DIFF_FAILED", err.strip())
@@ -323,6 +543,7 @@ async def source_diff(
         "commit1": resolved1["commit"],
         "ref2": resolved2["ref"],
         "commit2": resolved2["commit"],
+        "mode": mode,
         "output": out or "no diff",
     }
 
@@ -422,7 +643,7 @@ async def _fetch_ref(path: Path, ref: str, settings: Settings) -> bool:
     code, _, err = await run_git(
         path,
         "fetch",
-        "--depth=1",
+        *await _shallow_fetch_args(path, settings),
         "--force",
         "origin",
         f"+{source_ref}:{destination}",
@@ -433,6 +654,129 @@ async def _fetch_ref(path: Path, ref: str, settings: Settings) -> bool:
     if code != 0:
         raise SourceError("GIT_FETCH_FAILED", err.strip() or f"git fetch exited {code}")
     return True
+
+
+async def _fetch_commit(path: Path, sha: str, settings: Settings) -> bool:
+    sha = sha.lower()
+    args = (
+        "fetch",
+        *await _shallow_fetch_args(path, settings),
+        "--no-tags",
+        "origin",
+        f"+{sha}:refs/source-mcp/commits/{sha}",
+    )
+    code, _, err = await run_git(path, *args, settings=settings, max_output=8000)
+    if code != 0 and settings.github_token and _is_git_auth_failure(err):
+        code, _, err = await run_git(
+            path, *args,
+            settings=settings,
+            max_output=8000,
+            use_github_token=False,
+        )
+    if code == 0:
+        return True
+    if _is_missing_remote_commit(err):
+        return False
+    raise SourceError("GIT_FETCH_FAILED", err.strip() or f"git fetch exited {code}")
+
+
+async def _shallow_fetch_args(path: Path, settings: Settings) -> tuple[str, ...]:
+    # Keep shallow clones shallow, but never re-truncate a repo that already has history.
+    return ("--depth=1",) if await is_shallow_repo(path, settings) else ()
+
+
+async def _ensure_ref_present(
+    path: Path,
+    repo: str,
+    ref: str,
+    settings: Settings,
+) -> dict[str, Any]:
+    code, out, _ = await run_git(
+        path, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}",
+        settings=settings,
+        max_output=2000,
+    )
+    is_sha = bool(_COMMIT_SHA_RE.match(ref))
+    if code == 0 and is_sha:
+        return {"ref": ref, "status": "present", "commit": out.strip()}
+    if code == 0:
+        # Branch or tag names may have moved; refresh them from origin.
+        status = "refreshed" if await _fetch_ref(path, ref, settings) else "local-only"
+    elif _FULL_COMMIT_SHA_RE.match(ref):
+        status = "fetched" if await _fetch_commit(path, ref, settings) else "not_found"
+    elif is_sha and await is_shallow_repo(path, settings):
+        return {
+            "ref": ref,
+            "status": "not_found",
+            "error": (
+                "abbreviated commit SHAs cannot be fetched from origin; pass the full "
+                "40-character SHA or use unshallow=true"
+            ),
+        }
+    else:
+        status = "fetched" if await _fetch_ref(path, ref, settings) else "not_found"
+    code, out, _ = await run_git(
+        path, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}",
+        settings=settings,
+        max_output=2000,
+    )
+    if code != 0:
+        return {"ref": ref, "status": "not_found"}
+    return {"ref": ref, "status": status, "commit": out.strip()}
+
+
+async def _repo_snapshot(path: Path, settings: Settings) -> dict[str, Any]:
+    code, out, err = await run_git(
+        path, "for-each-ref", "--format=%(objectname) %(refname)",
+        settings=settings,
+        max_output=20_000_000,
+    )
+    if code != 0:
+        raise SourceError("GIT_REFS_FAILED", err.strip())
+    refs: dict[str, str] = {}
+    for line in out.splitlines():
+        parts = line.split(" ", 1)
+        if len(parts) == 2:
+            refs[parts[1]] = parts[0]
+    return {"refs": refs, "shallow_boundary": await _shallow_boundary(path, settings)}
+
+
+async def _shallow_boundary(path: Path, settings: Settings) -> frozenset[str]:
+    code, out, _ = await run_git(
+        path, "rev-parse", "--git-path", "shallow",
+        settings=settings,
+        max_output=4000,
+    )
+    if code != 0 or not out.strip():
+        return frozenset()
+    shallow_file = Path(out.strip())
+    if not shallow_file.is_absolute():
+        shallow_file = path / shallow_file
+    try:
+        return frozenset(line.strip() for line in shallow_file.read_text().splitlines() if line.strip())
+    except OSError:
+        return frozenset()
+
+
+def _snapshot_changes(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    old_refs: dict[str, str] = before["refs"]
+    new_refs: dict[str, str] = after["refs"]
+    added = sorted(set(new_refs) - set(old_refs))
+    removed = sorted(set(old_refs) - set(new_refs))
+    updated = sorted(ref for ref in set(old_refs) & set(new_refs) if old_refs[ref] != new_refs[ref])
+    history_changed = before["shallow_boundary"] != after["shallow_boundary"]
+    return {
+        "total": len(added) + len(removed) + len(updated) + int(history_changed),
+        "added_refs": len(added),
+        "updated_refs": len(updated),
+        "removed_refs": len(removed),
+        "history_changed": history_changed,
+        "sample": [
+            *(f"+ {ref}" for ref in added),
+            *(f"~ {ref}" for ref in updated),
+            *(f"- {ref}" for ref in removed),
+        ][:_MAX_CHANGED_REF_SAMPLE],
+    }
 
 
 async def _clone_repo(path: Path, repo: str, settings: Settings) -> None:
@@ -518,11 +862,30 @@ def _fetch_head_mtime(path: Path) -> Optional[float]:
     return None
 
 
-def _is_complex_regex(pattern: str) -> bool:
-    if _COMPLEX_RE_PATTERN.search(pattern):
-        return True
-    special = sum(1 for c in pattern if c in r"()[]{}|+*?^$\\")
-    return special > 8
+def _select_search_mode(mode: str, pattern: str) -> tuple[str, Optional[str]]:
+    if mode != "auto":
+        return mode, None
+    if len(pattern) > 120:
+        return "fixed", "pattern longer than 120 characters; searched as fixed string"
+    # Extended regex is the default so alternation like "foo|bar" works; Perl-only
+    # syntax (lookaround, \d, lazy quantifiers, inline groups) switches to PCRE.
+    if _PERL_ONLY_RE_PATTERN.search(pattern):
+        return "perl", None
+    return "regex", None
+
+
+def _is_pcre_unavailable(stderr: str) -> bool:
+    lower = stderr.lower()
+    return any(marker in lower for marker in _PCRE_UNAVAILABLE_MARKERS)
+
+
+def _is_missing_remote_commit(stderr: str) -> bool:
+    lower = stderr.lower()
+    return any(marker in lower for marker in _MISSING_REMOTE_COMMIT_MARKERS)
+
+
+def _first_line(text: str) -> str:
+    return next((line.strip() for line in text.splitlines() if line.strip()), "")
 
 
 def _is_grep_pattern_error(stderr: str) -> bool:
@@ -548,12 +911,30 @@ def _is_git_auth_failure(stderr: str) -> bool:
     )
 
 
-def _grep_args(*, pattern: str, ref: str, glob: Optional[str], fixed: bool) -> list[str]:
-    grep_flag = "-F" if fixed else "-e"
-    args = ["grep", "-n", "--break", "--heading", "-i", grep_flag, pattern, ref]
+def _grep_args(
+    *,
+    pattern: str,
+    ref: str,
+    glob: Optional[str],
+    mode: str,
+    ignore_case: bool = True,
+    context: int = 0,
+) -> list[str]:
+    mode_flag = {"fixed": "-F", "regex": "-E", "perl": "-P"}[mode]
+    args = ["grep", "-n", "--break", "--heading", mode_flag]
+    if ignore_case:
+        args.append("-i")
+    if context:
+        args.append(f"-C{context}")
+    args.extend(["-e", pattern, ref])
     if glob:
         args.extend(["--", glob])
     return args
+
+
+def _reject_bad_ref(ref: str) -> None:
+    if not isinstance(ref, str) or not ref.strip() or ref.startswith("-") or ".." in ref:
+        raise SourceError("BAD_ARGUMENT", f"bad ref: {ref!r}")
 
 
 def _reject_bad_filepath(filepath: str) -> None:

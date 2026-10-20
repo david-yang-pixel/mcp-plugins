@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     github_token: str = Field(default="", validation_alias="SOURCE_MCP_GITHUB_TOKEN")
     fetch_ttl_seconds: int = Field(default=900, validation_alias="SOURCE_MCP_FETCH_TTL_SECONDS")
     git_timeout_seconds: float = Field(default=60.0, validation_alias="SOURCE_MCP_GIT_TIMEOUT_SECONDS")
+    git_history_timeout_seconds: float = Field(
+        default=900.0,
+        validation_alias="SOURCE_MCP_GIT_HISTORY_TIMEOUT_SECONDS",
+    )
+    read_max_file_bytes: int = Field(
+        default=20_000_000,
+        ge=120_000,
+        validation_alias="SOURCE_MCP_READ_MAX_FILE_BYTES",
+    )
     full_repo_search_concurrency: int = Field(
         default=1,
         ge=1,
