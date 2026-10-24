@@ -27,6 +27,102 @@ def free_port():
         return sock.getsockname()[1]
 
 
+def upgrade_from_base_container(prefix, image, key):
+    """Replace a pre-change container: init off, default shm, one secret, old command."""
+    service = prefix + '-base'
+    host_port = free_port()
+    env_keys = ['FAIL_HEALTH', 'FAIL_PUBLIC', 'PORT', 'TEST_API_KEY', 'VERSION']
+    environment = {
+        'TEST_API_KEY': key, 'PORT': '8000', 'FAIL_HEALTH': 'false',
+        'FAIL_PUBLIC': 'false', 'VERSION': 'base',
+    }
+    old_target = server.normalize_target({
+        'port': host_port, 'container_port': 8000, 'auth_key': 'TEST_API_KEY',
+        'health_path': '/health', 'init': False, 'network': 'bridge', 'mounts': [],
+        'command': ['uvicorn', 'zendesk_browser_relay.app:app', '--host', '127.0.0.1', '--port', '8097'],
+        'env_keys': env_keys,
+        'secret_file_paths': {
+            'FEISHU_NOTIFICATION_WEBHOOK_URL': '/var/lib/zendesk-browser-relay/state/feishu_webhook_url',
+        },
+    })
+    new_target = server.normalize_target({
+        **old_target,
+        'init': True,
+        'shm_size': '256m',
+        'command': ['python', '-B', 'app.py'],
+        'secret_file_paths': {
+            **old_target['secret_file_paths'],
+            'ZENDESK_MCP_AUTHORIZATION': '/run/mcp-secrets/zendesk_mcp_authorization',
+        },
+    })
+    release = server.ROOT / 'releases' / service / 'base'
+    release.mkdir(parents=True)
+    secret = release / 'FEISHU_NOTIFICATION_WEBHOOK_URL'
+    secret.write_text('https://example.invalid/hook')
+    env_file = release / 'runtime.env'
+    env_file.write_text(''.join(k + '=' + v + '\n' for k, v in sorted(environment.items())))
+    server.command([
+        'docker', 'run', '-d', '--name', service, '--network', 'bridge', '--restart', 'always',
+        '--label', 'io.mcp-plugins.managed=true', '--label', 'io.mcp-plugins.revision=' + ('b' * 40),
+        '--env-file', str(env_file), '--publish', f'127.0.0.1:{host_port}:8000',
+        '--cap-drop=ALL', '--security-opt=no-new-privileges:true',
+        '--mount', f'type=bind,source={secret},target=/var/lib/zendesk-browser-relay/state/feishu_webhook_url,readonly',
+        image, 'python', '-B', 'app.py',
+    ])
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            server.verify_service(old_target, environment, require_ready=False)
+            break
+        except (OSError, ValueError, server.DeployError):
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.2)
+    current = server.inspect(service)
+    assert current['HostConfig'].get('Init') in (None, False)
+    assert current['HostConfig']['ShmSize'] == 64 * 1024 * 1024
+    state_dir = server.ROOT / 'state'
+    state_dir.mkdir(mode=0o700, exist_ok=True)
+    (state_dir / (service + '.json')).write_text(json.dumps({
+        'service': service, 'revision': 'b' * 40, 'image': image, 'container': current['Id'],
+        'previous_container': None, 'release': str(release), 'target': old_target,
+    }))
+    try:
+        server.validate_current(current, new_target, service)
+    except server.DeployError:
+        pass
+    else:
+        raise AssertionError('base container unexpectedly matched the new init/shm contract')
+    server.validate_current(current, old_target, service)
+    body = {
+        'digest': 'sha256:' + 'c' * 64, 'target': new_target, 'environment': environment,
+        'files': {
+            'FEISHU_NOTIFICATION_WEBHOOK_URL': 'https://example.invalid/hook',
+            'ZENDESK_MCP_AUTHORIZATION': 'synthetic-zendesk-token',
+        },
+        'settings': None, 'registry_user': 'fixture', 'registry_token': 'synthetic',
+        'deployer_sha256': hashlib.sha256(Path(server.__file__).read_bytes()).hexdigest(),
+    }
+    server.deploy(service, 'e' * 40, body, new_target)
+    upgraded = server.inspect(service)
+    assert upgraded['Id'] != current['Id']
+    assert upgraded['HostConfig']['Init'] is True
+    assert upgraded['HostConfig']['ShmSize'] == 256 * 1024 * 1024
+    assert upgraded['Config']['Cmd'] == ['python', '-B', 'app.py']
+    destinations = {item['Destination'] for item in upgraded['Mounts']}
+    assert '/var/lib/zendesk-browser-relay/state/feishu_webhook_url' in destinations
+    assert '/run/mcp-secrets/zendesk_mcp_authorization' in destinations
+    server.validate_current(upgraded, new_target, service)
+    drifted = json.loads(json.dumps(upgraded))
+    drifted['HostConfig']['ShmSize'] = 64 * 1024 * 1024
+    try:
+        server.validate_current(drifted, new_target, service)
+    except server.DeployError as exc:
+        assert 'shared memory' in str(exc)
+    else:
+        raise AssertionError('shared memory drift was accepted')
+
+
 def main():
     prefix = 'mcp-ci-' + secrets.token_hex(4)
     image = prefix + ':fixture'
@@ -145,7 +241,11 @@ http {{
                 assert (root / 'nginx.pid').read_text().strip() == nginx_pid
                 assert config.read_bytes() == site_before
                 real_public(peer, payload()['environment'], state(peer)['target'], revision, timeout=6)
-                print('PASS: automatic distinct/stable ports, real TLS routes, bad-key rejection, first-deploy cleanup, public-failure rollback, unchanged peer and graceful Nginx reload')
+                peer_before_upgrade = server.inspect(peer)['Id']
+                upgrade_from_base_container(prefix, image, key)
+                assert server.inspect(peer)['Id'] == peer_before_upgrade
+                assert (root / 'nginx.pid').read_text().strip() == nginx_pid
+                print('PASS: automatic distinct/stable ports, real TLS routes, bad-key rejection, first-deploy cleanup, public-failure rollback, unchanged peer and graceful Nginx reload, base-container recreate')
                 nginx_command('-s', 'quit')
                 process.wait(timeout=15)
                 process = None

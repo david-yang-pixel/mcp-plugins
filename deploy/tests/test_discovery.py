@@ -129,7 +129,8 @@ class FirstDeployTests(unittest.TestCase):
         self.payload = {'environment': {'EXAMPLE_MCP_API_KEY': 'synthetic-secret'}}
         self.new = {'Id': 'new-id', 'Image': 'new-image', 'Config': {
             'Env': ['EXAMPLE_MCP_API_KEY=synthetic-secret'],
-            'Labels': {'io.mcp-plugins.managed': 'true', 'io.mcp-plugins.revision': REVISION}}}
+            'Labels': {'io.mcp-plugins.managed': 'true', 'io.mcp-plugins.revision': REVISION}},
+            'HostConfig': {'Init': False, 'ShmSize': 64 * 1024 * 1024}}
 
     def create(self, health=1, existing=None, persist=None, candidate=None):
         with patch.object(server, 'inspect_optional', side_effect=[existing, candidate or self.new]), \
@@ -215,8 +216,12 @@ class FirstDeployTests(unittest.TestCase):
     def test_bridge_service_can_keep_image_nonroot_user_on_update(self):
         current = {'Config': {'User': '1000'}, 'Mounts': [], 'HostConfig': {
             'NetworkMode': 'bridge', 'Privileged': False, 'Init': False,
+            'ShmSize': 64 * 1024 * 1024,
             'PortBindings': {'18120/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '18120'}]}}}
         server.validate_current(current, self.target, 'example-mcp')
+        current['HostConfig']['ShmSize'] = 32 * 1024 * 1024
+        with self.assertRaisesRegex(server.DeployError, 'shared memory'):
+            server.validate_current(current, self.target, 'example-mcp')
 
 
 if __name__ == '__main__':

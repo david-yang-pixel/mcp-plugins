@@ -130,18 +130,32 @@ class Settings(BaseSettings):
     @property
     def zendesk_mcp_authorization_value(self) -> Optional[str]:
         try:
-            from_file = self.zendesk_mcp_authorization_file.read_text(
-                encoding="utf-8"
-            ).strip()
-        except (FileNotFoundError, OSError):
-            from_file = ""
-        if from_file:
-            return from_file
-        return (
-            self.zendesk_mcp_authorization.get_secret_value()
-            if self.zendesk_mcp_authorization
-            else None
-        )
+            raw = self.zendesk_mcp_authorization_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raw = None
+            problem = "missing"
+        except (OSError, UnicodeError):
+            raw = None
+            problem = "unreadable"
+        else:
+            raw = raw.strip()
+            problem = None if raw else "blank"
+        if problem == "blank":
+            raise ValueError("Zendesk MCP authorization file is blank")
+        if raw:
+            return raw
+        # A configured MCP URL must not silently skip cursor checks when the
+        # mounted secret is missing or unreadable. Env is only a fallback
+        # when freshness is not configured.
+        if self.zendesk_mcp_url and problem in {"missing", "unreadable"}:
+            raise ValueError("Zendesk MCP authorization file is " + problem)
+        if self.zendesk_mcp_authorization is None:
+            return None
+        value = self.zendesk_mcp_authorization.get_secret_value()
+        stripped = value.strip()
+        if value and not stripped:
+            raise ValueError("Zendesk MCP authorization is blank")
+        return stripped or None
 
     @property
     def ticket_automation_allowlist_values(self) -> frozenset[int]:

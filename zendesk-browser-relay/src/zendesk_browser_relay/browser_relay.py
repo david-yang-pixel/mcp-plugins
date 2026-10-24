@@ -190,8 +190,8 @@ class ZendeskBrowserRelay:
             # the control plane mistake normal serialized browser work for a
             # failed dependency.
             return SessionResponse(ok=True, status="busy")
-        try:
-            async with lock:
+        async with lock:
+            try:
                 result = await asyncio.wait_for(
                     self._with_page(
                         self._check_and_recover_readiness_page,
@@ -199,19 +199,23 @@ class ZendeskBrowserRelay:
                     ),
                     timeout=self._settings.zendesk_browser_operation_timeout_seconds,
                 )
-        except TimeoutError:
-            await self._close_context(reason="readiness_timeout")
-            result = BrowserResult(
-                ok=False,
-                status="unknown",
-                error="operation_timeout",
-            )
-        except Exception as exc:  # noqa: BLE001 - readiness must fail closed.
-            logger.warning(
-                "browser_relay_readiness_failed error_type=%s",
-                type(exc).__name__,
-            )
-            result = BrowserResult(ok=False, status="unknown", error=type(exc).__name__)
+            except TimeoutError:
+                # Drop the timed-out context before another request can launch
+                # a replacement on the same profile.
+                await self._close_context(reason="readiness_timeout")
+                result = BrowserResult(
+                    ok=False,
+                    status="unknown",
+                    error="operation_timeout",
+                )
+            except Exception as exc:  # noqa: BLE001 - readiness must fail closed.
+                logger.warning(
+                    "browser_relay_readiness_failed error_type=%s",
+                    type(exc).__name__,
+                )
+                result = BrowserResult(
+                    ok=False, status="unknown", error=type(exc).__name__
+                )
         await self._notify_readiness_transition(result.status)
         return SessionResponse(ok=result.ok, status=result.status)
 
@@ -500,6 +504,39 @@ class ZendeskBrowserRelay:
             await asyncio.wait_for(page.close(), timeout=timeout)
         except TimeoutError:
             logger.warning("browser_relay_page_close_timeout")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - close must not mask the caller.
+            logger.warning(
+                "browser_relay_page_close_failed error_type=%s",
+                type(exc).__name__,
+            )
+
+    async def _stop_playwright(self, timeout: float) -> None:
+        playwright = self._playwright
+        manager = self._playwright_manager
+        self._playwright = None
+        self._playwright_manager = None
+        try:
+            stop = getattr(playwright, "stop", None)
+        except AttributeError:
+            stop = None
+        try:
+            if callable(stop):
+                await asyncio.wait_for(stop(), timeout=timeout)
+            elif manager is not None:
+                exit_manager = getattr(manager, "__aexit__", None)
+                if callable(exit_manager):
+                    await exit_manager(None, None, None)
+        except TimeoutError:
+            logger.warning("browser_relay_playwright_stop_timeout")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - stopping the driver is best effort.
+            logger.warning(
+                "browser_relay_playwright_stop_failed error_type=%s",
+                type(exc).__name__,
+            )
 
     async def _close_context(
         self,
@@ -521,34 +558,27 @@ class ZendeskBrowserRelay:
         self._context_started_at = 0.0
         self._context_uses = 0
         timeout = self._settings.zendesk_context_close_timeout_seconds
-        if context is not None:
-            logger.info("browser_relay_context_close reason=%s", reason)
-            try:
-                await asyncio.wait_for(context.close(), timeout=timeout)
-            except TimeoutError:
-                logger.warning(
-                    "browser_relay_context_close_timeout reason=%s",
-                    reason,
-                )
-        if not stop_playwright:
-            return
-        playwright = self._playwright
-        manager = self._playwright_manager
-        self._playwright = None
-        self._playwright_manager = None
         try:
-            stop = getattr(playwright, "stop", None)
-        except AttributeError:
-            stop = None
-        if callable(stop):
-            try:
-                await asyncio.wait_for(stop(), timeout=timeout)
-            except TimeoutError:
-                logger.warning("browser_relay_playwright_stop_timeout")
-        elif manager is not None:
-            exit_manager = getattr(manager, "__aexit__", None)
-            if callable(exit_manager):
-                await exit_manager(None, None, None)
+            if context is not None:
+                logger.info("browser_relay_context_close reason=%s", reason)
+                try:
+                    await asyncio.wait_for(context.close(), timeout=timeout)
+                except TimeoutError:
+                    logger.warning(
+                        "browser_relay_context_close_timeout reason=%s",
+                        reason,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - keep going to stop().
+                    logger.warning(
+                        "browser_relay_context_close_failed reason=%s error_type=%s",
+                        reason,
+                        type(exc).__name__,
+                    )
+        finally:
+            if stop_playwright:
+                await self._stop_playwright(timeout)
 
     async def close(self) -> None:
         async with self._get_lock():
@@ -802,6 +832,13 @@ class ZendeskBrowserRelay:
                     error="live_customer_cursor_changed",
                 )
             return None
+
+        if self._settings.zendesk_mcp_url and self._freshness_checker is None:
+            return BrowserResult(
+                ok=False,
+                status="freshness_check_failed",
+                error="authorization_unavailable",
+            )
 
         if (
             not request.freshness_check_url

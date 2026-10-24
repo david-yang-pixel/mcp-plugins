@@ -119,7 +119,8 @@ class TransactionTests(unittest.TestCase):
         self.target, self.payload = fixture()
         self.old = {"Id": "old-container", "Image": "old-image",
                     "Config": {"Env": [k + "=" + v for k, v in self.payload["environment"].items()], "User": "", "Labels": {}},
-                    "HostConfig": {"NetworkMode": "host", "Privileged": False, "RestartPolicy": {"Name": "always"}},
+                    "HostConfig": {"NetworkMode": "host", "Privileged": False, "RestartPolicy": {"Name": "always"},
+                                   "Init": False, "ShmSize": 64 * 1024 * 1024},
                     "Mounts": []}
         self.new = copy.deepcopy(self.old)
         self.new.update(Id="new-container", Image="new-image")
@@ -129,7 +130,7 @@ class TransactionTests(unittest.TestCase):
         self.release = Path(self.directory.name)
         (self.release / "runtime.env").write_text("placeholder")
 
-    def execute(self, wait_effect=None, current=None, new=None):
+    def execute(self, wait_effect=None, current=None, new=None, current_contract=None):
         with patch.object(server, "inspect", side_effect=[current or self.old, new or self.new]), \
              patch.object(server, "inspect_optional", return_value=new or self.new), \
              patch.object(server, "verify_service", return_value=5), \
@@ -137,7 +138,10 @@ class TransactionTests(unittest.TestCase):
              patch.object(server, "command", return_value=b"ok") as command, \
              patch.object(server.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps([new or self.new]).encode(), b"")):
             try:
-                result = server.replace_container(self.service, REVISION, "image", self.target, self.payload, self.release, "new-image")
+                result = server.replace_container(
+                    self.service, REVISION, "image", self.target, self.payload, self.release, "new-image",
+                    current_contract=current_contract,
+                )
                 return result, command.call_args_list, wait.call_count
             except Exception as exc:
                 return exc, command.call_args_list, wait.call_count
@@ -171,6 +175,117 @@ class TransactionTests(unittest.TestCase):
         result, commands, waits = self.execute([5], current=changed)
         self.assertIsInstance(result, server.DeployError)
         self.assertEqual(commands, [])
+
+    def test_recorded_contract_allows_recreate_when_live_init_is_false(self):
+        self.target = {**self.target, "init": True, "shm_size": "256m"}
+        self.new["HostConfig"]["Init"] = True
+        self.new["HostConfig"]["ShmSize"] = 256 * 1024 * 1024
+        recorded = {**self.target, "init": False, "shm_size": None}
+        refused, commands, _ = self.execute()
+        self.assertIsInstance(refused, server.DeployError)
+        self.assertEqual(commands, [])
+        accepted, commands, _ = self.execute([5], current_contract=recorded)
+        self.assertEqual(accepted["container"], "new-container")
+        run = next(call.args[0] for call in commands if call.args[0][:2] == ["docker", "run"])
+        self.assertIn("--init", run)
+        self.assertEqual(run[run.index("--shm-size") + 1], "256m")
+
+
+class BaseRelayMigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.service = "zendesk-browser-relay"
+        self.old_target = server.normalize_target({
+            "port": 8097,
+            "container_port": 8097,
+            "auth_key": "RELAY_API_KEY",
+            "health_path": "/health",
+            "init": False,
+            "network": "host",
+            "mounts": [],
+            "command": ["uvicorn", "zendesk_browser_relay.app:app", "--host", "127.0.0.1", "--port", "8097"],
+            "env_keys": ["RELAY_API_KEY"],
+            "secret_file_paths": {
+                "FEISHU_NOTIFICATION_WEBHOOK_URL": "/var/lib/zendesk-browser-relay/state/feishu_webhook_url",
+            },
+        })
+        self.new_target = server.normalize_target({
+            **self.old_target,
+            "init": True,
+            "shm_size": "256m",
+            "command": ["python", "-m", "zendesk_browser_relay.app"],
+            "secret_file_paths": {
+                **self.old_target["secret_file_paths"],
+                "ZENDESK_MCP_AUTHORIZATION": "/run/mcp-secrets/zendesk_mcp_authorization",
+            },
+        })
+        release = self.root / "releases" / self.service / "base"
+        release.mkdir(parents=True)
+        secret = release / "FEISHU_NOTIFICATION_WEBHOOK_URL"
+        secret.write_text("https://example.invalid/hook")
+        self.current = {
+            "Id": "base-container",
+            "Config": {"Labels": {"io.mcp-plugins.managed": "true"}, "User": ""},
+            "HostConfig": {
+                "NetworkMode": "host",
+                "Privileged": False,
+                "Init": None,
+                "ShmSize": 64 * 1024 * 1024,
+            },
+            "Mounts": [{
+                "Destination": "/var/lib/zendesk-browser-relay/state/feishu_webhook_url",
+                "Source": str(secret),
+                "Type": "bind",
+            }],
+        }
+        state = self.root / "state"
+        state.mkdir()
+        (state / (self.service + ".json")).write_text(json.dumps({
+            "container": "base-container",
+            "target": self.old_target,
+        }))
+
+    def test_recreate_migration_accepts_the_base_browser_relay_contract(self):
+        with patch.object(server, "ROOT", self.root):
+            recorded = server.preflight(self.service, self.new_target, {self.service: self.old_target}, self.current)
+            server.validate_current(self.current, recorded, self.service)
+            with self.assertRaisesRegex(server.DeployError, "process configuration|shared memory"):
+                server.validate_current(self.current, self.new_target, self.service)
+        self.assertFalse(recorded["init"])
+        self.assertEqual(recorded["command"][0], "uvicorn")
+        self.assertTrue(self.new_target["init"])
+        self.assertEqual(self.new_target["shm_size"], "256m")
+
+    def test_port_mount_and_secret_rewrites_still_require_migration(self):
+        moved_port = {**self.new_target, "port": 8098, "container_port": 8098}
+        relocated = copy.deepcopy(self.new_target)
+        relocated["secret_file_paths"] = {
+            "FEISHU_NOTIFICATION_WEBHOOK_URL": "/run/mcp-secrets/feishu_webhook_url",
+            "ZENDESK_MCP_AUTHORIZATION": "/run/mcp-secrets/zendesk_mcp_authorization",
+        }
+        removed = copy.deepcopy(self.new_target)
+        removed["secret_file_paths"] = {
+            "ZENDESK_MCP_AUTHORIZATION": "/run/mcp-secrets/zendesk_mcp_authorization",
+        }
+        outside = copy.deepcopy(self.new_target)
+        outside["secret_file_paths"] = {
+            **self.old_target["secret_file_paths"],
+            "OTHER_SECRET": "/tmp/not-allowed",
+        }
+        mounts = copy.deepcopy(self.new_target)
+        mounts["mounts"] = [{"source": "/opt/data", "destination": "/var/lib/mcp/data", "readonly": False}]
+        with patch.object(server, "ROOT", self.root):
+            for target in (moved_port, relocated, removed, outside, mounts):
+                with self.subTest(target=target["secret_file_paths"]), self.assertRaisesRegex(server.DeployError, "explicit migration"):
+                    server.preflight(self.service, target, {self.service: self.old_target}, self.current)
+
+    def test_shared_memory_drift_is_rejected_against_the_recorded_contract(self):
+        drifted = copy.deepcopy(self.current)
+        drifted["HostConfig"]["ShmSize"] = 32 * 1024 * 1024
+        with patch.object(server, "ROOT", self.root), self.assertRaisesRegex(server.DeployError, "shared memory"):
+            server.validate_current(drifted, self.old_target, self.service)
 
 
 if __name__ == "__main__":

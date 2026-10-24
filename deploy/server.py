@@ -172,6 +172,43 @@ def validate_request(service, revision, payload, target):
     return f"ghcr.io/{REPOSITORY}/{service}@{payload['digest']}"
 
 
+def shm_bytes(value):
+    """Return the Docker HostConfig.ShmSize for a contract value.
+
+    Omitting --shm-size leaves Docker's 64MiB default. Units follow Docker:
+    optional kb/mb/gb/tb suffixes are binary, not decimal.
+    """
+    if value is None:
+        return 64 * 1024 * 1024
+    text = value.lower()
+    if len(text) > 1 and text[-1] == "b" and text[-2] in "kmgt":
+        text = text[:-1]
+    unit = 1
+    if text[-1:] in "kmgtb":
+        unit = {"b": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3, "t": 1024 ** 4}[text[-1]]
+        text = text[:-1]
+    return int(text) * unit
+
+
+def recreate_migration_blocked(old_target, target):
+    """Block replacements that would move ports, networks, or data mounts.
+
+    init, command, and shm_size are process settings applied by recreating the
+    container. Secret files may only gain entries under /run/mcp-secrets/;
+    existing secret destinations stay unchanged.
+    """
+    if any(old_target[key] != target[key] for key in ("port", "container_port", "network", "mounts")):
+        return True
+    old_files, new_files = old_target["secret_file_paths"], target["secret_file_paths"]
+    if any(new_files.get(key) != destination for key, destination in old_files.items()):
+        return True
+    return any(
+        not str(destination).startswith("/run/mcp-secrets/")
+        for key, destination in new_files.items()
+        if key not in old_files
+    )
+
+
 def validate_current(current, target, service):
     host = current["HostConfig"]
     if host["NetworkMode"] != target.get("network", "host") or host.get("Privileged"):
@@ -198,6 +235,8 @@ def validate_current(current, target, service):
             raise DeployError("Live mount source drifted")
     if bool(host.get("Init")) != target["init"] or (target.get("network", "host") == "host" and current["Config"].get("User", "")):
         raise DeployError("Live process configuration drifted")
+    if host.get("ShmSize") != shm_bytes(target.get("shm_size")):
+        raise DeployError("Live shared memory size drifted")
 
 
 def request_json(port, path, key, body=None, timeout=10):
@@ -610,13 +649,17 @@ def wait_healthy(service, target, env, ready, timeout=None):
     raise DeployError("Health/authentication/readiness verification timed out")
 
 
-def verify_readback(service, expected_image, environment):
+def verify_readback(service, expected_image, environment, target=None):
     deployed = inspect(service)
     if expected_image and deployed["Image"] != expected_image:
         raise DeployError("Unexpected final image identity")
     actual = dict(x.split("=", 1) for x in deployed["Config"]["Env"])
     if any(actual.get(k) != v for k, v in environment.items()):
         raise DeployError("Runtime environment readback mismatch")
+    if target is not None:
+        host = deployed["HostConfig"]
+        if bool(host.get("Init")) != target["init"] or host.get("ShmSize") != shm_bytes(target.get("shm_size")):
+            raise DeployError("Replacement process configuration mismatch")
     return deployed
 
 
@@ -645,7 +688,7 @@ def create_container(service, revision, image, target, payload, release, expecte
     try:
         command(args)
         count = wait_healthy(service, target, payload['environment'], False)
-        deployed = verify_readback(service, expected_image, payload['environment'])
+        deployed = verify_readback(service, expected_image, payload['environment'], target)
         record = {"service": service, "revision": revision, "image": image, "container": deployed['Id'],
                   "previous_container": None, "release": str(release), "target": target}
         if persist:
@@ -660,9 +703,12 @@ def create_container(service, revision, image, target, payload, release, expecte
     return record
 
 
-def replace_container(service, revision, image, target, payload, release, expected_image=None, persist=None, rollback=None, restored=None):
+def replace_container(service, revision, image, target, payload, release, expected_image=None, persist=None, rollback=None, restored=None, current_contract=None):
     current = inspect(service)
-    validate_current(current, target, service)
+    # The live container must still match the contract it was created with.
+    # Recreate fields such as init are applied to the replacement, not required
+    # of the container being replaced.
+    validate_current(current, current_contract or target, service)
     old_env = dict(value.split("=", 1) for value in current["Config"]["Env"])
     ready = service == "zendesk-browser-relay"
     # A failed preflight must not stop the existing service.
@@ -683,7 +729,7 @@ def replace_container(service, revision, image, target, payload, release, expect
         command(["docker", "update", "--restart=no", backup])
         command(args)
         count = wait_healthy(service, target, payload["environment"], ready)
-        deployed = verify_readback(service, expected_image, payload['environment'])
+        deployed = verify_readback(service, expected_image, payload['environment'], target)
         record = {"service": service, "revision": revision, "image": image, "container": deployed["Id"],
                   "previous_container": backup, "release": str(release), "target": target}
         if persist:
@@ -718,10 +764,14 @@ def preflight(service, target, installed, current):
         old_target = previous.get('target', installed.get(service))
         if old_target is None:
             raise DeployError("Missing previous service contract")
-        # Port/mount/network changes need an explicit migration, not an implicit replacement.
+        # Port, network, and data-mount changes need an explicit migration.
+        # init, command, shm, and additional secret files are recreated in place.
         old_target = normalize_target({'network': 'host' if service in installed else 'bridge', **old_target})
-        if any(old_target[k] != target[k] for k in ('port', 'container_port', 'network', 'mounts', 'secret_file_paths', 'init', 'command')):
+        if recreate_migration_blocked(old_target, target):
             raise DeployError("Existing infrastructure changed; an explicit migration is required")
+        changes = [key for key in ('init', 'command', 'shm_size', 'secret_file_paths') if old_target[key] != target[key]]
+        if changes:
+            print(json.dumps({"service": service, "stage": "recreate", "changes": changes}), flush=True)
         validate_current(current, old_target, service)
     reservations = {name: item['port'] for name, item in installed.items()}
     for path in (ROOT / 'state').glob('*.json'):
@@ -736,13 +786,14 @@ def preflight(service, target, installed, current):
                 listener.bind(('127.0.0.1', target['port']))
         except OSError:
             raise DeployError("Service port is already in use") from None
+    return old_target if current else None
 
 
 def deploy(service, revision, payload, target, installed=None):
     image = validate_request(service, revision, payload, target)
     target = allocate_target(service, target, installed or {})
     current = inspect_optional(service)
-    preflight(service, target, installed or {}, current)
+    current_contract = preflight(service, target, installed or {}, current)
     route = RouteTransaction(service, target, revision, legacy=service in (installed or {}))
     print(json.dumps({"service": service, "stage": "pulling", "revision": revision}), flush=True)
     expected_image = pull_image(image, revision, payload)
@@ -768,8 +819,10 @@ def deploy(service, revision, payload, target, installed=None):
     def restored(env):
         if route.legacy or route.previous is not None:
             wait_public(service, env, target, None if route.legacy else previous['revision'])
-    operation = replace_container if current else create_container
-    record = operation(service, revision, image, target, payload, release, expected_image, persist, route.rollback, restored)
+    if current:
+        record = replace_container(service, revision, image, target, payload, release, expected_image, persist, route.rollback, restored, current_contract)
+    else:
+        record = create_container(service, revision, image, target, payload, release, expected_image, persist, route.rollback, restored)
     print(json.dumps({'service': service, 'host_port': target['port'], 'container_port': target['container_port'],
                       'public_url': record['public_url'], 'verified': True}), flush=True)
 

@@ -85,6 +85,30 @@ def test_lifespan_starts_independent_session_supervisor_when_login_is_configured
         assert started.wait(timeout=1)
 
 
+def test_freshness_checker_fails_closed_when_authorization_file_is_missing(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("RELAY_API_KEY", "x" * 32)
+    monkeypatch.setenv("ZENDESK_MCP_URL", "https://zendesk.example/mcp")
+    monkeypatch.setenv("ZENDESK_MCP_AUTHORIZATION", "y" * 32)
+    monkeypatch.setenv(
+        "ZENDESK_MCP_AUTHORIZATION_FILE",
+        str(tmp_path / "missing-authorization"),
+    )
+    from zendesk_browser_relay.app import get_freshness_checker, reset_relay_for_tests
+    from zendesk_browser_relay.settings import get_settings
+
+    get_settings.cache_clear()
+    reset_relay_for_tests()
+
+    try:
+        get_freshness_checker()
+    except ValueError as exc:
+        assert "missing" in str(exc)
+    else:
+        raise AssertionError("freshness checker started without an authorization file")
+
+
 def test_get_relay_reuses_singleton(monkeypatch, tmp_path):
     monkeypatch.setenv("RELAY_API_KEY", "x" * 32)
     monkeypatch.setenv("TICKET_RUN_DB_PATH", str(tmp_path / "ticket-runs.sqlite3"))
