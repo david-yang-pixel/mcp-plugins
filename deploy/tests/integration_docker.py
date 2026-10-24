@@ -80,7 +80,7 @@ def upgrade_from_base_container(prefix, image, key):
             time.sleep(0.2)
     current = server.inspect(service)
     assert current['HostConfig'].get('Init') in (None, False)
-    assert current['HostConfig']['ShmSize'] == 64 * 1024 * 1024
+    assert isinstance(current['HostConfig']['ShmSize'], int) and current['HostConfig']['ShmSize'] > 0
     state_dir = server.ROOT / 'state'
     state_dir.mkdir(mode=0o700, exist_ok=True)
     (state_dir / (service + '.json')).write_text(json.dumps({

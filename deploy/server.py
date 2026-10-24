@@ -173,13 +173,14 @@ def validate_request(service, revision, payload, target):
 
 
 def shm_bytes(value):
-    """Return the Docker HostConfig.ShmSize for a contract value.
+    """Return HostConfig.ShmSize bytes for an explicit shm_size contract.
 
-    Omitting --shm-size leaves Docker's 64MiB default. Units follow Docker:
-    optional kb/mb/gb/tb suffixes are binary, not decimal.
+    None means the contract omits --shm-size. The container then inherits the
+    daemon default, which is not a fixed size this process can assume. Units
+    follow Docker: optional kb/mb/gb/tb suffixes are binary, not decimal.
     """
     if value is None:
-        return 64 * 1024 * 1024
+        return None
     text = value.lower()
     if len(text) > 1 and text[-1] == "b" and text[-2] in "kmgt":
         text = text[:-1]
@@ -235,7 +236,8 @@ def validate_current(current, target, service):
             raise DeployError("Live mount source drifted")
     if bool(host.get("Init")) != target["init"] or (target.get("network", "host") == "host" and current["Config"].get("User", "")):
         raise DeployError("Live process configuration drifted")
-    if host.get("ShmSize") != shm_bytes(target.get("shm_size")):
+    expected_shm = shm_bytes(target.get("shm_size"))
+    if expected_shm is not None and host.get("ShmSize") != expected_shm:
         raise DeployError("Live shared memory size drifted")
 
 
@@ -658,7 +660,9 @@ def verify_readback(service, expected_image, environment, target=None):
         raise DeployError("Runtime environment readback mismatch")
     if target is not None:
         host = deployed["HostConfig"]
-        if bool(host.get("Init")) != target["init"] or host.get("ShmSize") != shm_bytes(target.get("shm_size")):
+        expected_shm = shm_bytes(target.get("shm_size"))
+        shm_mismatch = expected_shm is not None and host.get("ShmSize") != expected_shm
+        if bool(host.get("Init")) != target["init"] or shm_mismatch:
             raise DeployError("Replacement process configuration mismatch")
     return deployed
 

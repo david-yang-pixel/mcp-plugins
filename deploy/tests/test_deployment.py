@@ -190,6 +190,28 @@ class TransactionTests(unittest.TestCase):
         self.assertIn("--init", run)
         self.assertEqual(run[run.index("--shm-size") + 1], "256m")
 
+    def test_replacement_readback_accepts_undeclared_daemon_shm(self):
+        daemon_shm = 128 * 1024 * 1024
+        self.old["HostConfig"]["ShmSize"] = daemon_shm
+        self.new["HostConfig"]["ShmSize"] = daemon_shm
+        result, commands, _ = self.execute([5])
+        self.assertEqual(result["container"], "new-container")
+        self.assertFalse(any(call.args[0][1] == "rm" for call in commands))
+        run = next(call.args[0] for call in commands if call.args[0][:2] == ["docker", "run"])
+        self.assertNotIn("--shm-size", run)
+
+    def test_replacement_readback_rejects_explicit_shm_mismatch(self):
+        self.target = {**self.target, "shm_size": "64m"}
+        self.new["HostConfig"]["ShmSize"] = 128 * 1024 * 1024
+        result, commands, waits = self.execute([5, 5])
+        self.assertIsInstance(result, server.DeployError)
+        self.assertIn("restored and verified", str(result))
+        self.assertEqual(waits, 2)
+        operations = [call.args[0] for call in commands]
+        self.assertIn(["docker", "rm", "-f", self.service], operations)
+        run = next(op for op in operations if op[:2] == ["docker", "run"])
+        self.assertEqual(run[run.index("--shm-size") + 1], "64m")
+
 
 class BaseRelayMigrationTests(unittest.TestCase):
     def setUp(self):
@@ -282,10 +304,46 @@ class BaseRelayMigrationTests(unittest.TestCase):
                     server.preflight(self.service, target, {self.service: self.old_target}, self.current)
 
     def test_shared_memory_drift_is_rejected_against_the_recorded_contract(self):
+        recorded = {**self.old_target, "shm_size": "64m"}
         drifted = copy.deepcopy(self.current)
         drifted["HostConfig"]["ShmSize"] = 32 * 1024 * 1024
-        with patch.object(server, "ROOT", self.root), self.assertRaisesRegex(server.DeployError, "shared memory"):
-            server.validate_current(drifted, self.old_target, self.service)
+        decimal = copy.deepcopy(self.current)
+        decimal["HostConfig"]["ShmSize"] = 64 * 1000 * 1000
+        with patch.object(server, "ROOT", self.root):
+            with self.assertRaisesRegex(server.DeployError, "shared memory"):
+                server.validate_current(drifted, recorded, self.service)
+            with self.assertRaisesRegex(server.DeployError, "shared memory"):
+                server.validate_current(decimal, {**self.old_target, "shm_size": "64mb"}, self.service)
+            server.validate_current(self.current, {**self.old_target, "shm_size": "64mb"}, self.service)
+
+    def test_undeclared_shm_accepts_daemon_default_in_preflight_and_readback(self):
+        daemon_shm = 128 * 1024 * 1024
+        self.assertIsNone(server.shm_bytes(None))
+        self.assertEqual(server.shm_bytes("128m"), daemon_shm)
+        current = copy.deepcopy(self.current)
+        current["HostConfig"]["ShmSize"] = daemon_shm
+        replacement = {
+            "Image": "new-image",
+            "Config": {"Env": ["RELAY_API_KEY=secret"]},
+            "HostConfig": {"Init": False, "ShmSize": daemon_shm},
+        }
+        with patch.object(server, "ROOT", self.root):
+            recorded = server.preflight(
+                self.service, self.new_target, {self.service: self.old_target}, current,
+            )
+            server.validate_current(current, recorded, self.service)
+        self.assertIsNone(recorded["shm_size"])
+        with patch.object(server, "inspect", return_value=replacement):
+            server.verify_readback(self.service, "new-image", {"RELAY_API_KEY": "secret"}, self.old_target)
+            server.verify_readback(
+                self.service, "new-image", {"RELAY_API_KEY": "secret"},
+                {**self.old_target, "shm_size": "128mb"},
+            )
+            with self.assertRaisesRegex(server.DeployError, "process configuration"):
+                server.verify_readback(
+                    self.service, "new-image", {"RELAY_API_KEY": "secret"},
+                    {**self.old_target, "shm_size": "64m"},
+                )
 
 
 if __name__ == "__main__":
