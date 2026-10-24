@@ -48,9 +48,13 @@ def validate_service_name(service):
 def normalize_target(target):
     if not isinstance(target, dict):
         raise DeployError("Invalid deployment contract")
-    result = {"init": False, "mounts": [], "command": [], "network": "bridge", "port": "auto", **target}
+    result = {"init": False, "mounts": [], "command": [], "network": "bridge", "port": "auto", "shm_size": None, **target}
     result.setdefault('container_port', result['port'])
-    if set(result) != {"port", "container_port", "auth_key", "health_path", "init", "mounts", "command", "network", "env_keys", "secret_file_paths"}:
+    allowed = {
+        "port", "container_port", "auth_key", "health_path", "init", "mounts", "command",
+        "network", "env_keys", "secret_file_paths", "shm_size",
+    }
+    if set(result) != allowed:
         raise DeployError("Unexpected deployment contract fields")
     if result['port'] != 'auto' and (type(result["port"]) is not int or not 1024 <= result["port"] <= 65535):
         raise DeployError("Invalid service port")
@@ -62,6 +66,12 @@ def normalize_target(target):
         raise DeployError("Invalid health path")
     if type(result["init"]) is not bool or result["network"] not in ("host", "bridge"):
         raise DeployError("Invalid process configuration")
+    shm_size = result["shm_size"]
+    if shm_size is not None and (
+        not isinstance(shm_size, str)
+        or not re.fullmatch(r"[1-9][0-9]*[kmgt]?b?", shm_size)
+    ):
+        raise DeployError("Invalid shared memory size")
     if result['network'] == 'host' and result['port'] != result['container_port']:
         raise DeployError("Host networking requires the original fixed port")
     if not isinstance(result["command"], list) or any(not isinstance(v, str) or "\0" in v for v in result["command"]):
@@ -570,6 +580,8 @@ def run_arguments(service, image, revision, target, release):
                  "--cap-drop=ALL", "--security-opt=no-new-privileges:true"]
     if target["init"]:
         args.append("--init")
+    if target.get("shm_size"):
+        args += ["--shm-size", str(target["shm_size"])]
     for mount in target["mounts"]:
         source = {"@env": str(release / "runtime.env"), "@settings": str(release / "config.yaml")}.get(mount["source"], mount_source(service, mount["source"]))
         if mount["source"].startswith('@data/'):

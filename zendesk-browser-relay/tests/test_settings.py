@@ -30,3 +30,20 @@ def test_settings_parse_ticket_automation_allowlist(monkeypatch):
     settings = get_settings()
 
     assert settings.ticket_automation_allowlist_values == frozenset({3880, 3936})
+
+
+def test_settings_read_zendesk_mcp_authorization_from_file(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("RELAY_API_KEY", "x" * 32)
+    auth_file = tmp_path / "zendesk_mcp_authorization"
+    auth_file.write_text("file-token-value-here\n", encoding="utf-8")
+    monkeypatch.setenv(
+        "ZENDESK_MCP_AUTHORIZATION_FILE", str(auth_file)
+    )
+    from zendesk_browser_relay.settings import get_settings
+
+    get_settings.cache_clear()
+    settings = get_settings()
+
+    assert settings.zendesk_mcp_authorization_value == "file-token-value-here"

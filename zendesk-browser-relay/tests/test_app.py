@@ -72,7 +72,7 @@ def test_lifespan_starts_independent_session_supervisor_when_login_is_configured
 
     async def supervisor(current_relay, *, interval_seconds):
         assert current_relay is relay
-        assert interval_seconds == 30
+        assert interval_seconds == 300
         started.set()
         import asyncio
 
