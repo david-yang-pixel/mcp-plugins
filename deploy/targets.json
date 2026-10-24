@@ -181,6 +181,8 @@
     "health_path": "/health",
     "init": true,
     "shm_size": "256m",
+    "memory": "2g",
+    "cpus": "1.5",
     "mounts": [
       {
         "source": "/opt/dify-db/browser-relay-state",

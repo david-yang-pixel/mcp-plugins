@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from contextlib import suppress
 
@@ -40,6 +41,12 @@ _result_dispatcher_singleton: DifyResultDispatcher | None = None
 _continuation_dispatcher_singleton: CodexContinuationDispatcher | None = None
 _freshness_checker_singleton: ZendeskMcpFreshnessChecker | None = None
 
+logger = logging.getLogger("uvicorn.error")
+
+# uvicorn waits this long for in-flight requests on SIGTERM, then the lifespan
+# closes the browser. Both have to fit in the deployer's 60s `docker stop`.
+GRACEFUL_SHUTDOWN_SECONDS = 15
+
 
 def get_relay() -> ZendeskBrowserRelay:
     global _relay_singleton
@@ -47,7 +54,7 @@ def get_relay() -> ZendeskBrowserRelay:
         _relay_singleton = ZendeskBrowserRelay(
             get_settings(),
             coordinator=get_coordinator(),
-            freshness_checker=get_freshness_checker(),
+            freshness_checker_factory=get_freshness_checker,
             feishu_notifier=get_feishu_notifier(),
         )
     return _relay_singleton
@@ -109,10 +116,19 @@ def get_continuation_dispatcher() -> CodexContinuationDispatcher | None:
 
 
 def get_freshness_checker() -> ZendeskMcpFreshnessChecker | None:
+    """Return the freshness checker, or None while it cannot be built.
+
+    A missing, blank, or unreadable authorization file only disables sends
+    (the relay fails them closed); the rest of the service keeps running.
+    """
     global _freshness_checker_singleton
     if _freshness_checker_singleton is None:
         settings = get_settings()
-        authorization = settings.zendesk_mcp_authorization_value
+        try:
+            authorization = settings.zendesk_mcp_authorization_value
+        except ValueError as exc:
+            logger.warning("zendesk_mcp_authorization_unavailable reason=%s", exc)
+            return None
         if not settings.zendesk_mcp_url or not authorization:
             return None
         _freshness_checker_singleton = ZendeskMcpFreshnessChecker(
@@ -154,7 +170,10 @@ def create_app() -> FastAPI:
                     name="zendesk-session-supervisor",
                 )
             )
-        if settings.zendesk_browser_memory_limit_mb > 0:
+        if (
+            settings.zendesk_browser_memory_limit_mb > 0
+            or settings.zendesk_browser_cpu_limit_percent > 0
+        ):
             background_tasks.append(
                 asyncio.create_task(
                     run_browser_resource_watchdog(
@@ -162,7 +181,6 @@ def create_app() -> FastAPI:
                         interval_seconds=(
                             settings.zendesk_browser_memory_check_interval_seconds
                         ),
-                        memory_limit_mb=settings.zendesk_browser_memory_limit_mb,
                     ),
                     name="zendesk-browser-resource-watchdog",
                 )
@@ -432,11 +450,14 @@ app = create_app()
 def main(*, host: str = "127.0.0.1", port: int = 8097) -> None:
     from .logging_config import LOGGING_CONFIG
 
+    # Pass the app object: an import string would make `python -m` import
+    # this module a second time and build a second app.
     uvicorn.run(
-        "zendesk_browser_relay.app:app",
+        app,
         host=host,
         port=port,
         log_config=LOGGING_CONFIG,
+        timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS,
     )
 
 

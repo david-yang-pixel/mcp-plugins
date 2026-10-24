@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -52,12 +53,23 @@ class Settings(BaseSettings):
     zendesk_totp_secret: Optional[SecretStr] = None
     zendesk_session_supervisor_enabled: bool = True
     zendesk_session_check_interval_seconds: int = Field(default=300, ge=30, le=3_600)
+    # Applies to each send attempt separately, not to the retry pair.
     zendesk_browser_operation_timeout_seconds: int = Field(
-        default=240,
+        default=300,
         ge=30,
         le=900,
     )
     zendesk_context_close_timeout_seconds: int = Field(default=20, ge=5, le=120)
+    # Shutdown has to finish inside the deployer's 60s `docker stop` window.
+    zendesk_shutdown_lock_timeout_seconds: int = Field(default=15, ge=1, le=60)
+    zendesk_send_confirm_timeout_ms: int = Field(
+        default=15_000,
+        ge=1_000,
+        le=120_000,
+    )
+    # Optional regex for the Zendesk write request that stores the reply.
+    # Unset, every POST/PUT/PATCH to the Zendesk host after the click counts.
+    zendesk_send_confirm_url_pattern: Optional[str] = None
     zendesk_readiness_navigation_timeout_ms: int = Field(
         default=12_000,
         ge=3_000,
@@ -69,6 +81,8 @@ class Settings(BaseSettings):
         ge=15,
         le=600,
     )
+    zendesk_browser_cpu_limit_percent: int = Field(default=80, ge=0, le=1_600)
+    zendesk_browser_cpu_high_samples: int = Field(default=5, ge=1, le=60)
     zendesk_auto_login_initial_backoff_seconds: int = Field(
         default=30,
         ge=5,
@@ -94,6 +108,17 @@ class Settings(BaseSettings):
         if value.endswith(".zendesk.com"):
             value = value.removesuffix(".zendesk.com")
         return value.strip("/")
+
+    @field_validator("zendesk_send_confirm_url_pattern")
+    @classmethod
+    def validate_send_confirm_pattern(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not value.strip():
+            return None
+        try:
+            re.compile(value)
+        except re.error as exc:
+            raise ValueError(f"invalid send confirm URL pattern: {exc}") from None
+        return value
 
     @property
     def zendesk_base_url(self) -> str:

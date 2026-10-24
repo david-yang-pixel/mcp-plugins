@@ -12,6 +12,9 @@ SendStatus = Literal[
     "login_required",
     "send_failed",
     "send_not_confirmed",
+    # The send control was clicked but the outcome could not be confirmed.
+    # The reply may have reached the customer: do not retry automatically.
+    "send_unknown",
     "stale_context",
     "freshness_check_failed",
 ]

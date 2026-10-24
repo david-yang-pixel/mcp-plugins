@@ -48,11 +48,12 @@ def validate_service_name(service):
 def normalize_target(target):
     if not isinstance(target, dict):
         raise DeployError("Invalid deployment contract")
-    result = {"init": False, "mounts": [], "command": [], "network": "bridge", "port": "auto", "shm_size": None, **target}
+    result = {"init": False, "mounts": [], "command": [], "network": "bridge", "port": "auto", "shm_size": None,
+              "memory": None, "cpus": None, **target}
     result.setdefault('container_port', result['port'])
     allowed = {
         "port", "container_port", "auth_key", "health_path", "init", "mounts", "command",
-        "network", "env_keys", "secret_file_paths", "shm_size",
+        "network", "env_keys", "secret_file_paths", "shm_size", "memory", "cpus",
     }
     if set(result) != allowed:
         raise DeployError("Unexpected deployment contract fields")
@@ -72,6 +73,20 @@ def normalize_target(target):
         or not re.fullmatch(r"[1-9][0-9]*[kmgt]?b?", shm_size)
     ):
         raise DeployError("Invalid shared memory size")
+    memory = result["memory"]
+    if memory is not None and (
+        not isinstance(memory, str)
+        or not re.fullmatch(r"[1-9][0-9]*[kmg]?b?", memory)
+        or shm_bytes(memory) < 64 * 1024 ** 2
+    ):
+        raise DeployError("Invalid memory limit")
+    cpus = result["cpus"]
+    if cpus is not None and (
+        not isinstance(cpus, str)
+        or not re.fullmatch(r"[0-9]+(\.[0-9]{1,3})?", cpus)
+        or not 0 < float(cpus) <= 64
+    ):
+        raise DeployError("Invalid CPU limit")
     if result['network'] == 'host' and result['port'] != result['container_port']:
         raise DeployError("Host networking requires the original fixed port")
     if not isinstance(result["command"], list) or any(not isinstance(v, str) or "\0" in v for v in result["command"]):
@@ -173,9 +188,9 @@ def validate_request(service, revision, payload, target):
 
 
 def shm_bytes(value):
-    """Return HostConfig.ShmSize bytes for an explicit shm_size contract.
+    """Return HostConfig bytes for an explicit shm_size or memory contract.
 
-    None means the contract omits --shm-size. The container then inherits the
+    None means the contract omits the flag. The container then inherits the
     daemon default, which is not a fixed size this process can assume. Units
     follow Docker: optional kb/mb/gb/tb suffixes are binary, not decimal.
     """
@@ -191,11 +206,33 @@ def shm_bytes(value):
     return int(text) * unit
 
 
+def nano_cpus(value):
+    """Return HostConfig.NanoCpus for an explicit cpus contract, else None."""
+    if value is None:
+        return None
+    whole, _, fraction = value.partition(".")
+    return int(whole) * 10 ** 9 + int((fraction + "000")[:3]) * 10 ** 6
+
+
+def resource_drift(host, target):
+    """Name the first explicit shm/memory/CPU setting the container lacks."""
+    checks = (
+        ("shared memory size", host.get("ShmSize"), shm_bytes(target.get("shm_size"))),
+        ("memory limit", host.get("Memory"), shm_bytes(target.get("memory"))),
+        ("memory limit", host.get("MemorySwap"), shm_bytes(target.get("memory"))),
+        ("CPU limit", host.get("NanoCpus"), nano_cpus(target.get("cpus"))),
+    )
+    for name, actual, expected in checks:
+        if expected is not None and actual != expected:
+            return name
+    return None
+
+
 def recreate_migration_blocked(old_target, target):
     """Block replacements that would move ports, networks, or data mounts.
 
-    init, command, and shm_size are process settings applied by recreating the
-    container. Secret files may only gain entries under /run/mcp-secrets/;
+    init, command, shm_size, memory, and cpus are process settings applied by
+    recreating the container. Secret files may only gain entries under /run/mcp-secrets/;
     existing secret destinations stay unchanged.
     """
     if any(old_target[key] != target[key] for key in ("port", "container_port", "network", "mounts")):
@@ -236,9 +273,9 @@ def validate_current(current, target, service):
             raise DeployError("Live mount source drifted")
     if bool(host.get("Init")) != target["init"] or (target.get("network", "host") == "host" and current["Config"].get("User", "")):
         raise DeployError("Live process configuration drifted")
-    expected_shm = shm_bytes(target.get("shm_size"))
-    if expected_shm is not None and host.get("ShmSize") != expected_shm:
-        raise DeployError("Live shared memory size drifted")
+    drift = resource_drift(host, target)
+    if drift:
+        raise DeployError("Live " + drift + " drifted")
 
 
 def request_json(port, path, key, body=None, timeout=10):
@@ -623,6 +660,12 @@ def run_arguments(service, image, revision, target, release):
         args.append("--init")
     if target.get("shm_size"):
         args += ["--shm-size", str(target["shm_size"])]
+    if target.get("memory"):
+        # Equal swap disables swap: the container is OOM-killed at the limit
+        # instead of thrashing the host.
+        args += ["--memory", target["memory"], "--memory-swap", target["memory"]]
+    if target.get("cpus"):
+        args += ["--cpus", target["cpus"]]
     for mount in target["mounts"]:
         source = {"@env": str(release / "runtime.env"), "@settings": str(release / "config.yaml")}.get(mount["source"], mount_source(service, mount["source"]))
         if mount["source"].startswith('@data/'):
@@ -660,9 +703,7 @@ def verify_readback(service, expected_image, environment, target=None):
         raise DeployError("Runtime environment readback mismatch")
     if target is not None:
         host = deployed["HostConfig"]
-        expected_shm = shm_bytes(target.get("shm_size"))
-        shm_mismatch = expected_shm is not None and host.get("ShmSize") != expected_shm
-        if bool(host.get("Init")) != target["init"] or shm_mismatch:
+        if bool(host.get("Init")) != target["init"] or resource_drift(host, target):
             raise DeployError("Replacement process configuration mismatch")
     return deployed
 
@@ -769,11 +810,12 @@ def preflight(service, target, installed, current):
         if old_target is None:
             raise DeployError("Missing previous service contract")
         # Port, network, and data-mount changes need an explicit migration.
-        # init, command, shm, and additional secret files are recreated in place.
+        # init, command, shm, resource limits, and additional secret files are
+        # recreated in place.
         old_target = normalize_target({'network': 'host' if service in installed else 'bridge', **old_target})
         if recreate_migration_blocked(old_target, target):
             raise DeployError("Existing infrastructure changed; an explicit migration is required")
-        changes = [key for key in ('init', 'command', 'shm_size', 'secret_file_paths') if old_target[key] != target[key]]
+        changes = [key for key in ('init', 'command', 'shm_size', 'memory', 'cpus', 'secret_file_paths') if old_target[key] != target[key]]
         if changes:
             print(json.dumps({"service": service, "stage": "recreate", "changes": changes}), flush=True)
         validate_current(current, old_target, service)

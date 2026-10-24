@@ -109,4 +109,6 @@ Secrets 通过 GitHub 的动态索引逐项引用，每个部署任务只接收�
 ]
 ```
 
+进程设置可选声明 `"init": true`、`"shm_size": "256m"`、`"memory": "2g"` 和 `"cpus": "1.5"`。`memory` 同时设置 `--memory` 与 `--memory-swap`（不使用 swap，至少 64m），`cpus` 最多三位小数；单位按 Docker 二进制换算。未声明的字段不加参数，也不和守护进程默认值比较。这些设置在替换容器时随新容器生效，属于重建而非迁移；替换前按上次成功部署的契约检查运行中容器，替换后读回 `HostConfig` 核对，不一致则回滚。修改这部分逻辑后需先运行 `python3 deploy/install_server.py --update-helper-only` 更新服务器执行器，否则哈希校验会拒绝部署。
+
 服务器自动创建 `/opt/mcp-plugins/data/example-mcp/cache`，只供该服务挂载。新服务不接受任意主机目录、Docker socket 或 host 网络。文件密钥通过 `secret_files` 声明 `name`、`required: true` 和 `destination`，路径必须在 `/run/mcp-secrets/` 内。已有服务端口和挂载的变更需要单独迁移，首次接入后普通代码及环境变量变动仍自动按服务部署。

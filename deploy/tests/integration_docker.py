@@ -49,6 +49,8 @@ def upgrade_from_base_container(prefix, image, key):
         **old_target,
         'init': True,
         'shm_size': '256m',
+        'memory': '512m',
+        'cpus': '0.5',
         'command': ['python', '-B', 'app.py'],
         'secret_file_paths': {
             **old_target['secret_file_paths'],
@@ -108,6 +110,9 @@ def upgrade_from_base_container(prefix, image, key):
     assert upgraded['Id'] != current['Id']
     assert upgraded['HostConfig']['Init'] is True
     assert upgraded['HostConfig']['ShmSize'] == 256 * 1024 * 1024
+    assert upgraded['HostConfig']['Memory'] == 512 * 1024 * 1024
+    assert upgraded['HostConfig']['MemorySwap'] == 512 * 1024 * 1024
+    assert upgraded['HostConfig']['NanoCpus'] == 500_000_000
     assert upgraded['Config']['Cmd'] == ['python', '-B', 'app.py']
     destinations = {item['Destination'] for item in upgraded['Mounts']}
     assert '/var/lib/zendesk-browser-relay/state/feishu_webhook_url' in destinations
@@ -121,6 +126,14 @@ def upgrade_from_base_container(prefix, image, key):
         assert 'shared memory' in str(exc)
     else:
         raise AssertionError('shared memory drift was accepted')
+    unlimited = json.loads(json.dumps(upgraded))
+    unlimited['HostConfig']['Memory'] = 0
+    try:
+        server.validate_current(unlimited, new_target, service)
+    except server.DeployError as exc:
+        assert 'memory limit' in str(exc)
+    else:
+        raise AssertionError('memory limit drift was accepted')
 
 
 def main():

@@ -212,6 +212,61 @@ class TransactionTests(unittest.TestCase):
         run = next(op for op in operations if op[:2] == ["docker", "run"])
         self.assertEqual(run[run.index("--shm-size") + 1], "64m")
 
+    def test_resource_limits_are_applied_and_read_back(self):
+        recorded = self.target
+        self.target = {**self.target, "memory": "2g", "cpus": "1.5"}
+        self.new["HostConfig"].update(Memory=2 * 1024 ** 3, MemorySwap=2 * 1024 ** 3, NanoCpus=1_500_000_000)
+        refused, commands, _ = self.execute()
+        self.assertIn("memory limit", str(refused))
+        self.assertEqual(commands, [])
+        result, commands, _ = self.execute([5], current_contract=recorded)
+        self.assertEqual(result["container"], "new-container")
+        run = next(call.args[0] for call in commands if call.args[0][:2] == ["docker", "run"])
+        self.assertEqual(run[run.index("--memory") + 1], "2g")
+        self.assertEqual(run[run.index("--memory-swap") + 1], "2g")
+        self.assertEqual(run[run.index("--cpus") + 1], "1.5")
+
+    def test_resource_limit_readback_mismatch_rolls_back(self):
+        recorded = self.target
+        self.target = {**self.target, "memory": "2g", "cpus": "1.5"}
+        self.new["HostConfig"].update(Memory=2 * 1024 ** 3, MemorySwap=2 * 1024 ** 3, NanoCpus=0)
+        result, commands, waits = self.execute([5, 5], current_contract=recorded)
+        self.assertIsInstance(result, server.DeployError)
+        self.assertIn("restored and verified", str(result))
+        self.assertEqual(waits, 2)
+
+    def test_undeclared_resource_limits_add_no_flags(self):
+        result, commands, _ = self.execute([5])
+        self.assertEqual(result["container"], "new-container")
+        run = next(call.args[0] for call in commands if call.args[0][:2] == ["docker", "run"])
+        for flag in ("--memory", "--memory-swap", "--cpus"):
+            self.assertNotIn(flag, run)
+
+
+class ResourceContractTests(unittest.TestCase):
+    def test_resource_limits_are_validated(self):
+        base = fixture()[0]
+        for field, value in (
+            ("memory", "0"), ("memory", "1m"), ("memory", 2048), ("memory", "2 g"),
+            ("cpus", "0"), ("cpus", "-1"), ("cpus", "1.2345"), ("cpus", 2), ("cpus", "65"),
+        ):
+            with self.subTest(field=field, value=value), self.assertRaises(server.DeployError):
+                server.normalize_target({**base, field: value})
+        accepted = server.normalize_target({**base, "memory": "2048m", "cpus": "0.5"})
+        self.assertEqual(server.shm_bytes(accepted["memory"]), 2 * 1024 ** 3)
+        self.assertEqual(server.nano_cpus(accepted["cpus"]), 500_000_000)
+        self.assertEqual(server.nano_cpus("2"), 2_000_000_000)
+
+    def test_live_resource_drift_is_rejected(self):
+        target = server.normalize_target({**fixture()[0], "memory": "2g", "cpus": "1.5"})
+        host = {"Memory": 2 * 1024 ** 3, "MemorySwap": 2 * 1024 ** 3, "NanoCpus": 1_500_000_000}
+        self.assertIsNone(server.resource_drift(host, target))
+        self.assertEqual(server.resource_drift({**host, "Memory": 0}, target), "memory limit")
+        self.assertEqual(server.resource_drift({**host, "MemorySwap": -1}, target), "memory limit")
+        self.assertEqual(server.resource_drift({**host, "NanoCpus": 0}, target), "CPU limit")
+        undeclared = server.normalize_target(fixture()[0])
+        self.assertIsNone(server.resource_drift({"Memory": 0, "NanoCpus": 0}, undeclared))
+
 
 class BaseRelayMigrationTests(unittest.TestCase):
     def setUp(self):
@@ -279,6 +334,13 @@ class BaseRelayMigrationTests(unittest.TestCase):
         self.assertEqual(recorded["command"][0], "uvicorn")
         self.assertTrue(self.new_target["init"])
         self.assertEqual(self.new_target["shm_size"], "256m")
+
+    def test_adding_resource_limits_is_a_recreate_not_a_migration(self):
+        limited = {**self.new_target, "memory": "2g", "cpus": "1.5"}
+        with patch.object(server, "ROOT", self.root):
+            recorded = server.preflight(self.service, limited, {self.service: self.old_target}, self.current)
+        self.assertIsNone(recorded["memory"])
+        self.assertIsNone(recorded["cpus"])
 
     def test_port_mount_and_secret_rewrites_still_require_migration(self):
         moved_port = {**self.new_target, "port": 8098, "container_port": 8098}

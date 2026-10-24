@@ -9,26 +9,20 @@ logger = logging.getLogger("uvicorn.error")
 
 
 class ContextRecycler(Protocol):
-    async def recycle_context_if_over_memory_limit(self) -> bool: ...
+    async def recycle_context_if_over_resource_limit(self) -> str | None: ...
 
 
 async def run_browser_resource_watchdog(
     relay: ContextRecycler,
     *,
     interval_seconds: float,
-    memory_limit_mb: int,
 ) -> None:
-    """Recycle the browser context when Chrome RSS exceeds the configured limit."""
-    if memory_limit_mb <= 0:
-        return
+    """Recycle the browser context when Chrome memory or idle CPU stays high."""
     while True:
         try:
-            recycled = await relay.recycle_context_if_over_memory_limit()
-            if recycled:
-                logger.warning(
-                    "browser_relay_memory_recycle limit_mb=%s",
-                    memory_limit_mb,
-                )
+            reason = await relay.recycle_context_if_over_resource_limit()
+            if reason:
+                logger.warning("browser_relay_resource_recycle reason=%s", reason)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - watchdog must stay alive.

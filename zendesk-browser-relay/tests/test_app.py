@@ -101,12 +101,59 @@ def test_freshness_checker_fails_closed_when_authorization_file_is_missing(
     get_settings.cache_clear()
     reset_relay_for_tests()
 
+    assert get_freshness_checker() is None
+
+
+def test_broken_authorization_file_only_blocks_sends(monkeypatch, tmp_path):
+    """The service starts and serves codex completions; /send fails closed."""
+    auth_file = tmp_path / "zendesk_mcp_authorization"
+    auth_file.write_text("   \n", encoding="utf-8")
+    monkeypatch.setenv("RELAY_API_KEY", "x" * 32)
+    monkeypatch.setenv("CODEX_COMPLETION_API_KEY", "c" * 32)
+    monkeypatch.setenv("TICKET_RUN_DB_PATH", str(tmp_path / "ticket-runs.sqlite3"))
+    monkeypatch.setenv("ZENDESK_PROFILE_DIR", str(tmp_path / "profile"))
+    monkeypatch.setenv("ZENDESK_MCP_URL", "https://zendesk.example/mcp")
+    monkeypatch.setenv("ZENDESK_MCP_AUTHORIZATION_FILE", str(auth_file))
+    monkeypatch.setenv("ZENDESK_SESSION_SUPERVISOR_ENABLED", "false")
+    monkeypatch.setenv("ZENDESK_BROWSER_MEMORY_LIMIT_MB", "0")
+    monkeypatch.setenv("ZENDESK_BROWSER_CPU_LIMIT_PERCENT", "0")
+    import zendesk_browser_relay.app as app_module
+    from zendesk_browser_relay.settings import get_settings
+
+    get_settings.cache_clear()
+    app_module.reset_relay_for_tests()
     try:
-        get_freshness_checker()
-    except ValueError as exc:
-        assert "missing" in str(exc)
-    else:
-        raise AssertionError("freshness checker started without an authorization file")
+        with TestClient(app_module.create_app()) as client:
+            assert client.get("/health").status_code == 200
+            completion = client.post(
+                "/v1/codex-completions",
+                headers={"Authorization": "Bearer " + "c" * 32},
+                json={
+                    "ticket_id": 2861,
+                    "request_id": "r" * 16 + ":1",
+                    "job_id": "11111111-1111-4111-8111-111111111111",
+                    "status": "failed",
+                },
+            )
+            # Reaches the coordinator instead of failing on the secret file.
+            assert completion.status_code != 500
+
+            relay = app_module.get_relay()
+            from zendesk_browser_relay.schemas import SendRequest
+
+            import asyncio
+
+            result = asyncio.run(
+                relay._check_freshness_before_send(
+                    SendRequest(ticket_id=2861, body="hello")
+                )
+            )
+            assert result is not None
+            assert result.status == "freshness_check_failed"
+            assert result.error == "authorization_unavailable"
+    finally:
+        get_settings.cache_clear()
+        app_module.reset_relay_for_tests()
 
 
 def test_get_relay_reuses_singleton(monkeypatch, tmp_path):
@@ -525,3 +572,47 @@ def test_stale_codex_completion_starts_one_latest_cursor_continuation(
         run_token=current.run_token,
         job_id="22222222-2222-4222-8222-222222222222",
     ).reason == "already_bound"
+
+
+def test_python_m_entrypoint_builds_the_app_once(monkeypatch):
+    import importlib
+    import runpy
+    import sys
+
+    import uvicorn
+
+    import zendesk_browser_relay.app as app_module
+
+    monkeypatch.setenv("RELAY_API_KEY", "x" * 32)
+    built = []
+    served = []
+
+    def fake_run(app, **kwargs):
+        # An import string would make uvicorn import the module again.
+        if isinstance(app, str):
+            module = importlib.import_module(app.partition(":")[0])
+            app = getattr(module, app.partition(":")[2])
+        served.append((app, kwargs))
+
+    monkeypatch.setattr(uvicorn, "run", fake_run)
+    # runpy executes a fresh copy of the module as __main__; count its builds
+    # and any second import uvicorn would trigger.
+    monkeypatch.delitem(sys.modules, "zendesk_browser_relay.app")
+    import fastapi
+
+    original_init = fastapi.FastAPI.__init__
+
+    def counting_init(self, *args, **kwargs):
+        if kwargs.get("title") == "Zendesk Browser Relay":
+            built.append(1)
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(fastapi.FastAPI, "__init__", counting_init)
+    try:
+        runpy.run_module("zendesk_browser_relay.app", run_name="__main__")
+    finally:
+        sys.modules["zendesk_browser_relay.app"] = app_module
+
+    assert len(built) == 1
+    assert len(served) == 1
+    assert served[0][1]["timeout_graceful_shutdown"] == 15

@@ -4,12 +4,15 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import re
+import signal
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from playwright.async_api import Error as PlaywrightError
@@ -23,13 +26,22 @@ from .settings import Settings
 
 logger = logging.getLogger("uvicorn.error")
 
+# Images are disabled through Blink settings instead of context.route(): a
+# route on "**/*" disables the HTTP cache, so every new page would download
+# the full Zendesk bundle again.
 CHROMIUM_LAUNCH_ARGS = (
     "--no-sandbox",
-    "--disable-dev-shm-usage",
     "--disable-gpu",
+    "--blink-settings=imagesEnabled=false",
 )
+# Playwright adds --disable-dev-shm-usage by default. The container contract
+# sizes /dev/shm (shm_size), so let Chrome use it.
+CHROMIUM_IGNORED_DEFAULT_ARGS = ("--disable-dev-shm-usage",)
 
-BLOCKED_RESOURCE_TYPES = frozenset({"image", "media", "font"})
+SEND_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH"})
+SESSION_COOKIE_FILE = "relay-session-cookies.json"
+SESSION_COOKIE_SAVE_INTERVAL_SECONDS = 600
+PROFILE_SINGLETON_FILES = ("SingletonLock", "SingletonSocket", "SingletonCookie")
 
 LOGIN_URL_MARKERS = (
     "/auth/",
@@ -126,6 +138,102 @@ class BrowserResult:
     error: Optional[str] = None
 
 
+@dataclass
+class _SendAttempt:
+    """Progress of one send attempt, readable after it is cancelled."""
+
+    stage: str = "goto"
+    clicked: bool = False
+
+
+@dataclass
+class _WriteRequestTracker:
+    """Follow the Zendesk write requests a send click starts on one page."""
+
+    base_url: str
+    pattern: Optional[re.Pattern[str]] = None
+    pending: set[Any] = field(default_factory=set)
+    succeeded: list[str] = field(default_factory=list)
+    failed: list[str] = field(default_factory=list)
+    changed: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def matches(self, request) -> bool:
+        if request.method.upper() not in SEND_WRITE_METHODS:
+            return False
+        if not request.url.startswith(self.base_url + "/"):
+            return False
+        return self.pattern is None or bool(self.pattern.search(request.url))
+
+    def on_request(self, request) -> None:
+        if self.matches(request):
+            self.pending.add(request)
+            self.changed.set()
+
+    def on_response(self, response) -> None:
+        request = response.request
+        if request not in self.pending:
+            return
+        self.pending.discard(request)
+        target = self.succeeded if 200 <= response.status < 300 else self.failed
+        target.append(f"{request.method} {_url_path(request.url)} {response.status}")
+        self.changed.set()
+
+    def on_request_failed(self, request) -> None:
+        if request not in self.pending:
+            return
+        self.pending.discard(request)
+        self.failed.append(f"{request.method} {_url_path(request.url)} failed")
+        self.changed.set()
+
+    def attach(self, page) -> None:
+        page.on("request", self.on_request)
+        page.on("response", self.on_response)
+        page.on("requestfailed", self.on_request_failed)
+
+    def detach(self, page) -> None:
+        for event, handler in (
+            ("request", self.on_request),
+            ("response", self.on_response),
+            ("requestfailed", self.on_request_failed),
+        ):
+            try:
+                page.remove_listener(event, handler)
+            except Exception:  # noqa: BLE001 - the page may already be gone.
+                pass
+
+    async def settle(self, timeout_seconds: float, quiet_seconds: float = 1.0) -> str:
+        """Wait for the click's writes to finish and stay quiet briefly.
+
+        Returns confirmed, failed (none succeeded), mixed, pending, or none.
+        The quiet period keeps an early unrelated request from deciding the
+        outcome before the reply request has started.
+        """
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            settled = bool(self.succeeded or self.failed) and not self.pending
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if settled:
+                    return self._verdict()
+                return "pending" if self.pending else "none"
+            self.changed.clear()
+            wait = min(remaining, quiet_seconds) if settled else remaining
+            try:
+                await asyncio.wait_for(self.changed.wait(), timeout=wait)
+            except TimeoutError:
+                if settled:
+                    return self._verdict()
+
+    def _verdict(self) -> str:
+        if self.failed:
+            return "mixed" if self.succeeded else "failed"
+        return "confirmed"
+
+
+def _url_path(url: str) -> str:
+    return urlsplit(url).path
+
+
 class ZendeskBrowserRelay:
     _RECYCLE_AFTER_USES = 200
     _RECYCLE_AFTER_SECONDS = 6 * 60 * 60
@@ -145,10 +253,14 @@ class ZendeskBrowserRelay:
         coordinator: Optional[TicketRunCoordinator] = None,
         freshness_checker: Any | None = None,
         feishu_notifier: FeishuStatusNotifier | None = None,
+        freshness_checker_factory: Callable[[], Any | None] | None = None,
     ):
         self._settings = settings
         self._coordinator = coordinator
         self._freshness_checker = freshness_checker
+        # Resolved on first send so a bad authorization file only blocks
+        # sends instead of the whole service.
+        self._freshness_checker_factory = freshness_checker_factory
         self._feishu_notifier = feishu_notifier
         self._lock: Optional[asyncio.Lock] = None
         self._playwright_manager: Any | None = None
@@ -161,12 +273,16 @@ class ZendeskBrowserRelay:
         self._auto_login_failures = 0
         self._next_auto_login_at = 0.0
         self._login_recovery_active = False
+        self._cookies_saved_at = 0.0
+        self._cpu_sample: tuple[float, float] | None = None
+        self._cpu_high_samples = 0
+        self._closing = False
 
     async def check_session(self) -> SessionResponse:
         async with self._get_lock():
             try:
                 result = await asyncio.wait_for(
-                    self._with_page(self._check_session_page, count_use=True),
+                    self._check_session(),
                     timeout=self._settings.zendesk_browser_operation_timeout_seconds,
                 )
             except TimeoutError:
@@ -193,10 +309,7 @@ class ZendeskBrowserRelay:
         async with lock:
             try:
                 result = await asyncio.wait_for(
-                    self._with_page(
-                        self._check_and_recover_readiness_page,
-                        count_use=False,
-                    ),
+                    self._check_and_recover_readiness(),
                     timeout=self._settings.zendesk_browser_operation_timeout_seconds,
                 )
             except TimeoutError:
@@ -219,18 +332,31 @@ class ZendeskBrowserRelay:
         await self._notify_readiness_transition(result.status)
         return SessionResponse(ok=result.ok, status=result.status)
 
-    async def _check_and_recover_readiness_page(self, page: Page) -> BrowserResult:
-        result = await self._check_readiness_page(page)
+    async def _check_session(self) -> BrowserResult:
+        result = await self._check_login_status()
+        if result.status != "login_required":
+            return result
+        login_result = await self._with_page(self._open_login_and_submit)
+        if not login_result.ok:
+            return BrowserResult(
+                ok=False,
+                status="login_required",
+                current_url=login_result.current_url,
+                error=login_result.error,
+            )
+        return await self._check_login_status()
+
+    async def _check_and_recover_readiness(self) -> BrowserResult:
+        result = await self._check_login_status()
         if result.status == "logged_in":
             self._reset_auto_login_backoff()
             return result
         if result.status != "login_required":
             return result
-        return await self._recover_login_if_due(page, observed=result)
+        return await self._recover_login_if_due(observed=result)
 
     async def _recover_login_if_due(
         self,
-        page: Page,
         *,
         observed: BrowserResult,
     ) -> BrowserResult:
@@ -251,18 +377,17 @@ class ZendeskBrowserRelay:
         try:
             try:
                 login_result = await asyncio.wait_for(
-                    self._try_auto_login(page),
+                    self._with_page(self._open_login_and_submit, count_use=False),
                     timeout=self._settings.zendesk_auto_login_attempt_timeout_seconds,
                 )
             except TimeoutError:
                 login_result = BrowserResult(
                     ok=False,
                     status="login_required",
-                    current_url=page.url,
                     error="TimeoutError",
                 )
             if login_result.ok:
-                verified = await self._check_readiness_page(page)
+                verified = await self._check_login_status()
                 if verified.ok and verified.status == "logged_in":
                     self._reset_auto_login_backoff()
                     logger.info("browser_relay_auto_login_recovered")
@@ -296,20 +421,9 @@ class ZendeskBrowserRelay:
     async def send_message(self, request: SendRequest) -> SendResponse:
         async with self._get_lock():
             started = time.perf_counter()
-            try:
-                result, first_result, retried = await asyncio.wait_for(
-                    self._send_message_with_optional_retry(request),
-                    timeout=self._settings.zendesk_browser_operation_timeout_seconds,
-                )
-            except TimeoutError:
-                await self._close_context(reason="send_timeout")
-                result = BrowserResult(
-                    ok=False,
-                    status="send_failed",
-                    error="operation_timeout",
-                )
-                first_result = result
-                retried = False
+            result, first_result, retried = (
+                await self._send_message_with_optional_retry(request)
+            )
             total_ms = round((time.perf_counter() - started) * 1000, 1)
             logger.info(
                 "browser_relay_send_timing ticket_id=%s status=%s total_ms=%s "
@@ -352,21 +466,68 @@ class ZendeskBrowserRelay:
             result = await self._send_message_once(request)
         return result, first_result, retried
 
-    async def recycle_context_if_over_memory_limit(self) -> bool:
+    async def recycle_context_if_over_resource_limit(self) -> str | None:
+        """Recycle the browser when it uses too much memory or idles hot.
+
+        Returns the recycle reason, or None when the browser was left alone.
+        """
+        profile_dir = self._settings.zendesk_profile_dir
+        if self._memory_over_limit(profile_dir) and await self._recycle_if(
+            lambda: self._memory_over_limit(profile_dir),
+            reason="memory_limit",
+        ):
+            return "memory_limit"
+        if self._cpu_over_limit(profile_dir) and await self._recycle_if(
+            lambda: True,
+            reason="cpu_limit",
+        ):
+            return "cpu_limit"
+        return None
+
+    async def _recycle_if(self, still_needed: Callable[[], bool], *, reason) -> bool:
+        async with self._get_lock():
+            if self._context is None or not still_needed():
+                return False
+            await self._close_context(reason=reason)
+            return True
+
+    def _memory_over_limit(self, profile_dir: Path) -> bool:
         limit_mb = self._settings.zendesk_browser_memory_limit_mb
         if limit_mb <= 0:
             return False
-        rss_mb = profile_chromium_rss_mb(self._settings.zendesk_profile_dir)
-        if rss_mb <= limit_mb:
+        return profile_chromium_memory_mb(profile_dir) > limit_mb
+
+    def _cpu_over_limit(self, profile_dir: Path) -> bool:
+        """Count consecutive idle samples where Chrome stays above the limit.
+
+        Samples taken while a browser operation holds the lock reset the
+        streak: a send legitimately burns CPU, an idle workspace should not.
+        """
+        limit = self._settings.zendesk_browser_cpu_limit_percent
+        if limit <= 0:
             return False
-        async with self._get_lock():
-            if self._context is None:
-                return False
-            refreshed = profile_chromium_rss_mb(self._settings.zendesk_profile_dir)
-            if refreshed <= limit_mb:
-                return False
-            await self._close_context(reason="memory_limit")
-            return True
+        now = time.monotonic()
+        cpu_seconds = profile_chromium_cpu_seconds(profile_dir)
+        previous = self._cpu_sample
+        self._cpu_sample = (now, cpu_seconds)
+        if previous is None or self._get_lock().locked() or self._context is None:
+            self._cpu_high_samples = 0
+            return False
+        wall = now - previous[0]
+        used = cpu_seconds - previous[1]
+        if wall <= 0 or used < 0:
+            # Processes were replaced between samples.
+            self._cpu_high_samples = 0
+            return False
+        if used / wall * 100 <= limit:
+            self._cpu_high_samples = 0
+            return False
+        self._cpu_high_samples += 1
+        if self._cpu_high_samples < self._settings.zendesk_browser_cpu_high_samples:
+            return False
+        self._cpu_high_samples = 0
+        self._cpu_sample = None
+        return True
 
     async def _notify_send_status(self, request: SendRequest, result: BrowserResult) -> None:
         if self._feishu_notifier is None:
@@ -390,9 +551,36 @@ class ZendeskBrowserRelay:
             )
 
     async def _send_message_once(self, request: SendRequest) -> BrowserResult:
-        return await self._with_page(
-            lambda page: self._send_message_page(page, request)
+        """Run one send attempt under its own timeout.
+
+        Once the send control has been clicked the reply may already be
+        stored in Zendesk, so any later timeout or error is reported as
+        send_unknown. Callers must not retry that status automatically.
+        """
+        attempt = _SendAttempt()
+        try:
+            return await asyncio.wait_for(
+                self._with_page(
+                    lambda page: self._send_message_page(page, request, attempt)
+                ),
+                timeout=self._settings.zendesk_browser_operation_timeout_seconds,
+            )
+        except TimeoutError:
+            await self._close_context(reason="send_timeout")
+            error = f"operation_timeout:{attempt.stage}"
+        except Exception as exc:  # noqa: BLE001 - see send_unknown below.
+            if not attempt.clicked:
+                raise
+            error = f"{type(exc).__name__}:{attempt.stage}"
+        logger.warning(
+            "browser_relay_send_attempt_aborted ticket_id=%s clicked=%s error=%s",
+            request.ticket_id,
+            attempt.clicked,
+            error,
         )
+        if attempt.clicked:
+            return BrowserResult(ok=False, status="send_unknown", error=error)
+        return BrowserResult(ok=False, status="send_failed", error=error)
 
     def _should_retry_send(self, result: BrowserResult) -> bool:
         # _send_message_page already attempted configured auto-login. Repeating
@@ -430,6 +618,9 @@ class ZendeskBrowserRelay:
             await self._close_page(page)
 
     async def _get_or_create_context(self):
+        if self._closing:
+            # An abandoned send must not relaunch Chrome during shutdown.
+            raise RuntimeError("browser relay is shutting down")
         self._settings.zendesk_profile_dir.mkdir(parents=True, exist_ok=True)
         if await self._should_rebuild_context():
             await self._close_context(reason="scheduled_recycle")
@@ -445,21 +636,30 @@ class ZendeskBrowserRelay:
 
     async def _launch_context(self) -> None:
         started = time.perf_counter()
-        await self._ensure_playwright()
-        launch_options = {
-            "user_data_dir": str(self._settings.zendesk_profile_dir),
-            "headless": self._settings.zendesk_headless,
-            "args": list(CHROMIUM_LAUNCH_ARGS),
-        }
-        if self._settings.zendesk_proxy_server:
-            launch_options["proxy"] = {"server": self._settings.zendesk_proxy_server}
-        self._context = await self._playwright.chromium.launch_persistent_context(
-            **launch_options,
-        )
-        self._context.set_default_timeout(self._settings.zendesk_navigation_timeout_ms)
-        await self._install_resource_blocking(self._context)
-        for existing in list(self._context.pages):
+        # Nothing should hold the profile while no context is open. Leftovers
+        # from a crashed or unclosable browser would block the new launch.
+        await self._kill_profile_processes(reason="prelaunch")
+        try:
+            context = await self._launch_persistent_context()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - retried once on a new driver.
+            # A dead Playwright driver fails every launch until it is replaced.
+            logger.warning(
+                "browser_relay_launch_failed error_type=%s restarting_driver=true",
+                type(exc).__name__,
+            )
+            await self._stop_playwright(
+                self._settings.zendesk_context_close_timeout_seconds
+            )
+            await self._kill_profile_processes(reason="launch_failed")
+            context = await self._launch_persistent_context()
+        self._context = context
+        context.on("close", lambda _closed: self._forget_context(context))
+        context.set_default_timeout(self._settings.zendesk_navigation_timeout_ms)
+        for existing in list(context.pages):
             await self._close_page(existing)
+        await self._restore_session_cookies(context)
         self._context_started_at = time.monotonic()
         self._context_uses = 0
         logger.info(
@@ -468,14 +668,100 @@ class ZendeskBrowserRelay:
             self._settings.zendesk_headless,
         )
 
-    async def _install_resource_blocking(self, context) -> None:
-        async def handler(route, request):
-            if request.resource_type in BLOCKED_RESOURCE_TYPES:
-                await route.abort()
-                return
-            await route.continue_()
+    async def _launch_persistent_context(self):
+        await self._ensure_playwright()
+        launch_options = {
+            "user_data_dir": str(self._settings.zendesk_profile_dir),
+            "headless": self._settings.zendesk_headless,
+            "args": list(CHROMIUM_LAUNCH_ARGS),
+            "ignore_default_args": list(CHROMIUM_IGNORED_DEFAULT_ARGS),
+        }
+        if self._settings.zendesk_proxy_server:
+            launch_options["proxy"] = {"server": self._settings.zendesk_proxy_server}
+        return await self._playwright.chromium.launch_persistent_context(
+            **launch_options,
+        )
 
-        await context.route("**/*", handler)
+    def _forget_context(self, context) -> None:
+        """Drop a context Chrome closed on its own, e.g. after a crash."""
+        if self._context is not context:
+            return
+        logger.warning("browser_relay_context_disconnected")
+        self._context = None
+        self._context_started_at = 0.0
+        self._context_uses = 0
+
+    @property
+    def _session_cookie_path(self) -> Path:
+        return self._settings.zendesk_profile_dir / SESSION_COOKIE_FILE
+
+    async def _save_session_cookies(self, *, force: bool = False) -> None:
+        """Keep Zendesk session cookies that Chrome drops on every restart.
+
+        Zendesk issues its agent session as a session cookie, which a
+        persistent profile does not restore after the browser process exits.
+        """
+        context = self._context
+        if context is None:
+            return
+        now = time.monotonic()
+        if (
+            not force
+            and self._cookies_saved_at
+            and now - self._cookies_saved_at < SESSION_COOKIE_SAVE_INTERVAL_SECONDS
+        ):
+            return
+        try:
+            cookies = [
+                cookie
+                for cookie in await context.cookies(self._settings.zendesk_base_url)
+                if cookie.get("expires", -1) == -1
+            ]
+            path = self._session_cookie_path
+            temporary = path.with_name(path.name + ".tmp")
+            descriptor = os.open(
+                temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(cookies, handle)
+            os.replace(temporary, path)
+            self._cookies_saved_at = now
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - persistence is best effort.
+            logger.warning(
+                "browser_relay_session_cookie_save_failed error_type=%s",
+                type(exc).__name__,
+            )
+
+    async def _restore_session_cookies(self, context) -> None:
+        path = self._session_cookie_path
+        if not path.is_file():
+            return
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            current = {
+                (cookie.get("name"), cookie.get("domain"), cookie.get("path"))
+                for cookie in await context.cookies(self._settings.zendesk_base_url)
+            }
+            # Never overwrite cookies the profile already holds; they are newer.
+            missing = [
+                cookie
+                for cookie in saved
+                if isinstance(cookie, dict)
+                and (cookie.get("name"), cookie.get("domain"), cookie.get("path"))
+                not in current
+            ]
+            if missing:
+                await context.add_cookies(missing)
+                logger.info("browser_relay_session_cookies_restored count=%s", len(missing))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a bad snapshot must not block launch.
+            logger.warning(
+                "browser_relay_session_cookie_restore_failed error_type=%s",
+                type(exc).__name__,
+            )
 
     async def _should_rebuild_context(self) -> bool:
         if self._context is None:
@@ -550,14 +836,17 @@ class ZendeskBrowserRelay:
             "send_timeout",
             "send_retry",
             "memory_limit",
+            "cpu_limit",
         ] = "scheduled_recycle",
         stop_playwright: bool = False,
+        timeout: float | None = None,
     ) -> None:
         context = self._context
         self._context = None
         self._context_started_at = 0.0
         self._context_uses = 0
-        timeout = self._settings.zendesk_context_close_timeout_seconds
+        if timeout is None:
+            timeout = self._settings.zendesk_context_close_timeout_seconds
         try:
             if context is not None:
                 logger.info("browser_relay_context_close reason=%s", reason)
@@ -568,6 +857,7 @@ class ZendeskBrowserRelay:
                         "browser_relay_context_close_timeout reason=%s",
                         reason,
                     )
+                    await self._kill_profile_processes(reason=reason)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001 - keep going to stop().
@@ -576,51 +866,128 @@ class ZendeskBrowserRelay:
                         reason,
                         type(exc).__name__,
                     )
+                    await self._kill_profile_processes(reason=reason)
         finally:
             if stop_playwright:
                 await self._stop_playwright(timeout)
 
+    async def _kill_profile_processes(self, *, reason: str) -> int:
+        """SIGKILL Chrome processes still holding the profile directory."""
+        profile_dir = self._settings.zendesk_profile_dir
+        pids = profile_chromium_pids(profile_dir)
+        if not pids:
+            return 0
+        killed = 0
+        for pid in sorted(pids):
+            try:
+                os.kill(pid, signal.SIGKILL)
+                killed += 1
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                logger.warning("browser_relay_kill_denied pid=%s", pid)
+        deadline = time.monotonic() + 5
+        while profile_chromium_pids(profile_dir) and time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+        # Chrome refuses a profile whose Singleton lock names a dead process.
+        for name in PROFILE_SINGLETON_FILES:
+            try:
+                (profile_dir / name).unlink(missing_ok=True)
+            except OSError:
+                pass
+        logger.warning(
+            "browser_relay_profile_processes_killed reason=%s count=%s",
+            reason,
+            killed,
+        )
+        return killed
+
     async def close(self) -> None:
-        async with self._get_lock():
-            await self._close_context(reason="shutdown", stop_playwright=True)
+        """Release the browser within the deployer's stop window.
 
-    async def _check_session_page(self, page: Page) -> BrowserResult:
-        dashboard_url = f"{self._settings.zendesk_base_url}/agent/dashboard"
+        A send that still holds the lock after the grace period is abandoned:
+        its context is closed underneath it and Chrome is killed if needed.
+        """
+        self._closing = True
+        lock = self._get_lock()
+        acquired = False
         try:
-            await page.goto(dashboard_url, wait_until="domcontentloaded")
-            await page.wait_for_load_state("networkidle", timeout=10_000)
-        except PlaywrightError:
-            pass
-
-        current_url = page.url
-        if await self._is_login_required(page):
-            login_result = await self._try_auto_login(page)
-            if login_result.ok:
-                return login_result
-            return BrowserResult(
-                ok=False, status="login_required", current_url=current_url
+            await asyncio.wait_for(
+                lock.acquire(),
+                timeout=self._settings.zendesk_shutdown_lock_timeout_seconds,
             )
-        return BrowserResult(ok=True, status="logged_in", current_url=current_url)
+            acquired = True
+        except TimeoutError:
+            logger.warning("browser_relay_shutdown_lock_timeout")
+        try:
+            await self._close_context(
+                reason="shutdown",
+                stop_playwright=True,
+                timeout=min(10, self._settings.zendesk_context_close_timeout_seconds),
+            )
+        finally:
+            if acquired:
+                lock.release()
 
-    async def _check_readiness_page(self, page: Page) -> BrowserResult:
+    async def _check_login_status(self) -> BrowserResult:
+        """Ask the Zendesk API who the browser session belongs to.
+
+        This reuses the context cookies without loading the agent workspace.
+        Anything other than a clear answer is reported as unknown, never as
+        logged in.
+        """
+        context = await self._get_or_create_context()
+        url = f"{self._settings.zendesk_base_url}/api/v2/users/me.json"
+        try:
+            response = await context.request.get(
+                url,
+                timeout=self._settings.zendesk_readiness_navigation_timeout_ms,
+                fail_on_status_code=False,
+            )
+        except PlaywrightError as exc:
+            return BrowserResult(ok=False, status="unknown", error=type(exc).__name__)
+        try:
+            if response.status in (401, 403):
+                return BrowserResult(ok=False, status="login_required")
+            if response.status != 200:
+                return BrowserResult(
+                    ok=False, status="unknown", error=f"http_{response.status}"
+                )
+            try:
+                payload = await response.json()
+            except (PlaywrightError, ValueError) as exc:
+                return BrowserResult(
+                    ok=False, status="unknown", error=type(exc).__name__
+                )
+        finally:
+            try:
+                await response.dispose()
+            except PlaywrightError:
+                pass
+        user = payload.get("user") if isinstance(payload, dict) else None
+        if not isinstance(user, dict):
+            return BrowserResult(ok=False, status="unknown", error="invalid_user_payload")
+        # Anonymous visitors get a user with a null id; end users are not
+        # allowed to reply as agents.
+        if type(user.get("id")) is int and user.get("role") in ("agent", "admin"):
+            await self._save_session_cookies()
+            return BrowserResult(ok=True, status="logged_in")
+        return BrowserResult(ok=False, status="login_required")
+
+    async def _open_login_and_submit(self, page: Page) -> BrowserResult:
         dashboard_url = f"{self._settings.zendesk_base_url}/agent/dashboard"
-        nav_timeout = self._settings.zendesk_readiness_navigation_timeout_ms
         try:
             await page.goto(
                 dashboard_url,
                 wait_until="domcontentloaded",
-                timeout=nav_timeout,
+                timeout=self._settings.zendesk_readiness_navigation_timeout_ms,
             )
-            await page.wait_for_load_state("domcontentloaded", timeout=5_000)
         except PlaywrightError:
             pass
-        if await self._is_login_required(page):
-            return BrowserResult(
-                ok=False,
-                status="login_required",
-                current_url=page.url,
-            )
-        return BrowserResult(ok=True, status="logged_in", current_url=page.url)
+        result = await self._try_auto_login(page)
+        if result.ok:
+            await self._save_session_cookies(force=True)
+        return result
 
     async def _notify_readiness_transition(self, status: str) -> None:
         previous = self._last_readiness_status
@@ -646,8 +1013,12 @@ class ZendeskBrowserRelay:
             )
 
     async def _send_message_page(
-        self, page: Page, request: SendRequest
+        self,
+        page: Page,
+        request: SendRequest,
+        attempt: _SendAttempt | None = None,
     ) -> BrowserResult:
+        attempt = attempt or _SendAttempt()
         ticket_url = (
             f"{self._settings.zendesk_base_url}/agent/tickets/{request.ticket_id}"
         )
@@ -661,11 +1032,22 @@ class ZendeskBrowserRelay:
             pass
 
         if await self._is_login_required(page):
-            login_result = await self._try_auto_login(page)
+            attempt.stage = "login"
+            try:
+                login_result = await asyncio.wait_for(
+                    self._try_auto_login(page),
+                    timeout=self._settings.zendesk_auto_login_attempt_timeout_seconds,
+                )
+            except TimeoutError:
+                login_result = BrowserResult(
+                    ok=False, status="login_required", error="TimeoutError"
+                )
             if not login_result.ok:
                 return BrowserResult(
                     ok=False, status="login_required", current_url=page.url
                 )
+            await self._save_session_cookies(force=True)
+            attempt.stage = "goto_after_login"
             try:
                 started = time.perf_counter()
                 await page.goto(ticket_url, wait_until="domcontentloaded")
@@ -675,19 +1057,21 @@ class ZendeskBrowserRelay:
             except PlaywrightError:
                 pass
 
+        tracker: _WriteRequestTracker | None = None
+        stage = attempt.stage
         try:
-            stage = "channel"
+            stage = attempt.stage = "channel"
             started = time.perf_counter()
             await self._ensure_native_messaging_channel(page)
             timings["channel_ms"] = round((time.perf_counter() - started) * 1000, 1)
-            stage = "composer"
+            stage = attempt.stage = "composer"
             started = time.perf_counter()
             await self._ensure_native_composer_mode(page)
             composer = await self._first_visible(
                 page, self._native_composer_selectors()
             )
             timings["composer_ms"] = round((time.perf_counter() - started) * 1000, 1)
-            stage = "fill"
+            stage = attempt.stage = "fill"
             started = time.perf_counter()
             await composer.click()
             await self._fill_composer_preserving_paragraphs(
@@ -696,7 +1080,7 @@ class ZendeskBrowserRelay:
                 request.body,
             )
             timings["fill_ms"] = round((time.perf_counter() - started) * 1000, 1)
-            stage = "freshness"
+            stage = attempt.stage = "freshness"
             started = time.perf_counter()
             freshness = await self._check_freshness_before_send(request)
             timings["freshness_ms"] = round((time.perf_counter() - started) * 1000, 1)
@@ -715,7 +1099,7 @@ class ZendeskBrowserRelay:
                     timings,
                 )
                 return freshness
-            stage = "send_button"
+            stage = attempt.stage = "send_button"
             started = time.perf_counter()
             send_button = await self._first_visible_optional(
                 page,
@@ -723,45 +1107,58 @@ class ZendeskBrowserRelay:
                 timeout=700,
             )
             timings["send_button_ms"] = round((time.perf_counter() - started) * 1000, 1)
-            stage = "click"
+            stage = attempt.stage = "click"
+            tracker = _WriteRequestTracker(
+                base_url=self._settings.zendesk_base_url,
+                pattern=self._send_confirm_pattern(request.ticket_id),
+            )
+            tracker.attach(page)
             started = time.perf_counter()
+            # From here on the reply may reach the customer even if this
+            # attempt fails or times out.
+            attempt.clicked = True
             if send_button is not None:
                 await send_button.click()
             else:
                 await composer.press("Control+Enter")
-            await page.wait_for_timeout(2_000)
             timings["click_ms"] = round((time.perf_counter() - started) * 1000, 1)
+            stage = attempt.stage = "confirm"
+            started = time.perf_counter()
+            # Keep the page open until the write that stores the reply has
+            # returned; closing it earlier can abort the request.
+            writes = await tracker.settle(
+                self._settings.zendesk_send_confirm_timeout_ms / 1_000
+            )
+            body_remains = await self._locator_contains_text(composer, request.body)
+            timings["confirm_ms"] = round((time.perf_counter() - started) * 1000, 1)
             timings["total_page_ms"] = round(
                 (time.perf_counter() - total_started) * 1000, 1
             )
-            stage = "confirm"
-            if await self._locator_contains_text(composer, request.body):
-                logger.warning(
-                    "browser_relay_send_not_confirmed ticket_id=%s timings=%s",
-                    request.ticket_id,
-                    timings,
-                )
-                return BrowserResult(
-                    ok=False,
-                    status="send_not_confirmed",
-                    current_url=page.url,
-                    error="composer_still_contains_body",
-                )
-            logger.info(
-                "browser_relay_send_page_timing ticket_id=%s status=sent timings=%s",
+            result = self._send_outcome(writes, body_remains, page.url)
+            log = logger.info if result.ok else logger.warning
+            log(
+                "browser_relay_send_page_timing ticket_id=%s status=%s error=%s "
+                "writes=%s succeeded=%s failed=%s timings=%s",
                 request.ticket_id,
+                result.status,
+                result.error,
+                writes,
+                tracker.succeeded,
+                tracker.failed,
                 timings,
             )
-            return BrowserResult(ok=True, status="sent", current_url=page.url)
+            return result
         except PlaywrightError as exc:
             timings["total_page_ms"] = round(
                 (time.perf_counter() - total_started) * 1000, 1
             )
             error = f"{type(exc).__name__}:{stage}"
+            status = "send_unknown" if attempt.clicked else "send_failed"
             logger.warning(
-                "browser_relay_send_page_failed ticket_id=%s status=send_failed "
+                "browser_relay_send_page_failed ticket_id=%s status=%s "
                 "error=%s stage=%s message=%s timings=%s",
                 request.ticket_id,
+                status,
                 type(exc).__name__,
                 stage,
                 str(exc)[:500],
@@ -769,10 +1166,61 @@ class ZendeskBrowserRelay:
             )
             return BrowserResult(
                 ok=False,
-                status="send_failed",
+                status=status,
                 current_url=page.url,
                 error=error,
             )
+        finally:
+            if tracker is not None:
+                tracker.detach(page)
+
+    def _send_confirm_pattern(self, ticket_id: int) -> re.Pattern[str] | None:
+        pattern = self._settings.zendesk_send_confirm_url_pattern
+        if not pattern:
+            return None
+        return re.compile(pattern.replace("{ticket_id}", str(ticket_id)))
+
+    def _send_outcome(
+        self,
+        writes: str,
+        body_remains: bool,
+        current_url: str,
+    ) -> BrowserResult:
+        """Map the observed write requests and composer state to a status.
+
+        Only a settled, successful write plus a cleared composer is "sent".
+        A rejected write with the body still in the composer means Zendesk
+        did not take the reply. Every other combination is send_unknown.
+        """
+        if writes == "confirmed" and not body_remains:
+            return BrowserResult(ok=True, status="sent", current_url=current_url)
+        if writes == "failed" and body_remains:
+            return BrowserResult(
+                ok=False,
+                status="send_failed",
+                current_url=current_url,
+                error="write_request_failed:confirm",
+            )
+        if writes == "none" and body_remains:
+            return BrowserResult(
+                ok=False,
+                status="send_not_confirmed",
+                current_url=current_url,
+                error="composer_still_contains_body",
+            )
+        error = {
+            "confirmed": "composer_still_contains_body",
+            "failed": "write_request_failed",
+            "mixed": "write_request_failed",
+            "pending": "write_request_pending",
+            "none": "no_write_request_observed",
+        }[writes]
+        return BrowserResult(
+            ok=False,
+            status="send_unknown",
+            current_url=current_url,
+            error=error + ":confirm",
+        )
 
     async def _check_freshness_before_send(
         self,
@@ -795,14 +1243,15 @@ class ZendeskBrowserRelay:
                     error=f"run_generation_{local_check.reason}"[:300],
                 )
 
+        freshness_checker = self._resolve_freshness_checker()
         if (
-            self._freshness_checker is not None
+            freshness_checker is not None
             and request.snapshot_customer_message_count is not None
             and request.snapshot_customer_last_message_id is not None
         ):
             try:
                 live_last_id, live_count = (
-                    await self._freshness_checker.current_customer_cursor(
+                    await freshness_checker.current_customer_cursor(
                         request.ticket_id
                     )
                 )
@@ -833,7 +1282,7 @@ class ZendeskBrowserRelay:
                 )
             return None
 
-        if self._settings.zendesk_mcp_url and self._freshness_checker is None:
+        if self._settings.zendesk_mcp_url and freshness_checker is None:
             return BrowserResult(
                 ok=False,
                 status="freshness_check_failed",
@@ -876,6 +1325,11 @@ class ZendeskBrowserRelay:
             status="stale_context",
             error=str(data.get("reason") or "stale_context")[:300],
         )
+
+    def _resolve_freshness_checker(self) -> Any | None:
+        if self._freshness_checker is None and self._freshness_checker_factory:
+            self._freshness_checker = self._freshness_checker_factory()
+        return self._freshness_checker
 
     def _post_freshness_check(
         self,
@@ -1144,26 +1598,94 @@ class ZendeskBrowserRelay:
             return False
 
 
-def profile_chromium_rss_mb(profile_dir: Path) -> float:
-    needle = str(profile_dir.resolve())
-    total_kb = 0
-    proc_root = Path("/proc")
+def _read_process(entry: Path) -> tuple[int, list[str]] | None:
+    """Return (parent pid, argv) for one /proc entry, or None if it is gone."""
+    try:
+        argv = [
+            arg.decode("utf-8", errors="ignore")
+            for arg in (entry / "cmdline").read_bytes().split(b"\0")
+            if arg
+        ]
+        stat = (entry / "stat").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    # The command name may contain spaces or parentheses; fields after it don't.
+    fields = stat.rpartition(")")[2].split()
+    try:
+        return int(fields[1]), argv
+    except (IndexError, ValueError):
+        return None
+
+
+def profile_chromium_pids(profile_dir: Path, proc_root: Path = Path("/proc")) -> set[int]:
+    """Return Chrome processes started on the profile, plus their children."""
     if not proc_root.is_dir():
-        return 0.0
+        return set()
+    needles = {str(profile_dir), str(profile_dir.resolve())}
+    own_pid = os.getpid()
+    children: dict[int, list[int]] = {}
+    roots: set[int] = set()
     for entry in proc_root.iterdir():
         if not entry.name.isdigit():
             continue
-        try:
-            cmdline = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(
-                "utf-8",
-                errors="ignore",
-            )
-            if needle not in cmdline:
-                continue
-            for line in (entry / "status").read_text(encoding="utf-8").splitlines():
-                if line.startswith("VmRSS:"):
-                    total_kb += int(line.split()[1])
-                    break
-        except (OSError, ValueError):
+        pid = int(entry.name)
+        process = _read_process(entry)
+        if process is None or pid == own_pid:
             continue
+        parent, argv = process
+        children.setdefault(parent, []).append(pid)
+        if any(
+            arg.startswith("--user-data-dir=")
+            and arg.removeprefix("--user-data-dir=") in needles
+            for arg in argv
+        ):
+            roots.add(pid)
+    found: set[int] = set()
+    queue = list(roots)
+    while queue:
+        pid = queue.pop()
+        if pid in found:
+            continue
+        found.add(pid)
+        queue.extend(children.get(pid, ()))
+    return found
+
+
+def _process_memory_kb(entry: Path) -> int:
+    # PSS splits shared pages between processes, so summing it does not count
+    # Chrome's shared libraries and shared memory once per renderer like RSS.
+    for name, key in (("smaps_rollup", "Pss:"), ("status", "VmRSS:")):
+        try:
+            for line in (entry / name).read_text(encoding="utf-8").splitlines():
+                if line.startswith(key):
+                    return int(line.split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+    return 0
+
+
+def profile_chromium_memory_mb(
+    profile_dir: Path,
+    proc_root: Path = Path("/proc"),
+) -> float:
+    total_kb = sum(
+        _process_memory_kb(proc_root / str(pid))
+        for pid in profile_chromium_pids(profile_dir, proc_root)
+    )
     return total_kb / 1024.0
+
+
+def profile_chromium_cpu_seconds(
+    profile_dir: Path,
+    proc_root: Path = Path("/proc"),
+) -> float:
+    ticks = 0
+    for pid in profile_chromium_pids(profile_dir, proc_root):
+        try:
+            stat = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+            fields = stat.rpartition(")")[2].split()
+            # utime and stime are fields 14 and 15 of /proc/<pid>/stat.
+            ticks += int(fields[11]) + int(fields[12])
+        except (OSError, ValueError, IndexError):
+            continue
+    return ticks / os.sysconf("SC_CLK_TCK")
