@@ -269,6 +269,72 @@ class BaseRelayMigrationTests(unittest.TestCase):
             "target": self.old_target,
         }))
 
+    def test_installer_preserves_old_contract_for_a_legacy_state_without_target(self):
+        state = self.root / "state" / (self.service + ".json")
+        record = json.loads(state.read_text())
+        record.pop("target")
+        state.write_text(json.dumps(record))
+
+        with patch.object(server, "ROOT", self.root), patch.object(
+            server, "inspect_optional", return_value=self.current
+        ):
+            server.record_prior_legacy_contracts(
+                {self.service: self.old_target}, {self.service: self.new_target}
+            )
+            saved = json.loads(state.read_text())
+            self.assertEqual(saved["target"], self.old_target)
+            # If the helper install stops now, the old contract still works.
+            self.assertEqual(
+                server.preflight(
+                    self.service, self.old_target, {self.service: self.old_target}, self.current
+                ),
+                self.old_target,
+            )
+            self.assertEqual(
+                server.preflight(
+                    self.service, self.new_target, {self.service: self.new_target}, self.current
+                ),
+                self.old_target,
+            )
+        backups = list((self.root / "state").glob(self.service + ".json.bak-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertNotIn("target", json.loads(backups[0].read_text()))
+
+    def test_installer_refuses_to_record_drifted_or_foreign_legacy_container(self):
+        state = self.root / "state" / (self.service + ".json")
+        record = json.loads(state.read_text())
+        record.pop("target")
+        state.write_text(json.dumps(record))
+        foreign = copy.deepcopy(self.current)
+        foreign["Id"] = "different-container"
+        drifted = copy.deepcopy(self.current)
+        drifted["HostConfig"]["Init"] = True
+        with patch.object(server, "ROOT", self.root):
+            for current in (foreign, drifted):
+                with self.subTest(container=current["Id"]), patch.object(
+                    server, "inspect_optional", return_value=current
+                ), self.assertRaises(server.DeployError):
+                    server.record_prior_legacy_contracts(
+                        {self.service: self.old_target},
+                        {self.service: self.new_target},
+                    )
+                self.assertNotIn("target", json.loads(state.read_text()))
+
+    def test_installer_leaves_unchanged_legacy_service_alone(self):
+        state = self.root / "state" / (self.service + ".json")
+        record = json.loads(state.read_text())
+        record.pop("target")
+        state.write_text(json.dumps(record))
+        before = state.read_bytes()
+        with patch.object(server, "ROOT", self.root), patch.object(
+            server, "inspect_optional", side_effect=AssertionError("unrelated service inspected")
+        ):
+            server.record_prior_legacy_contracts(
+                {self.service: self.old_target}, {self.service: self.old_target}
+            )
+        self.assertEqual(state.read_bytes(), before)
+        self.assertEqual(list((self.root / "state").glob("*.bak-*")), [])
+
     def test_recreate_migration_accepts_the_base_browser_relay_contract(self):
         with patch.object(server, "ROOT", self.root):
             recorded = server.preflight(self.service, self.new_target, {self.service: self.old_target}, self.current)

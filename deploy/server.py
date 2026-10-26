@@ -793,6 +793,42 @@ def preflight(service, target, installed, current):
     return old_target if current else None
 
 
+def record_prior_legacy_contracts(installed, proposed):
+    """Preserve the trusted old contract before replacing the admin allowlist.
+
+    Early deployment records did not contain a target. Once targets.json is
+    updated, its old values cannot be recovered from the deployment request.
+    """
+    pending = []
+    for service, old in installed.items():
+        if service not in proposed or old == proposed[service]:
+            continue
+        state_path = ROOT / "state" / (service + ".json")
+        if not state_path.is_file():
+            continue
+        original = state_path.read_text()
+        record = json.loads(original)
+        if "target" in record:
+            if not isinstance(record["target"], dict):
+                raise DeployError("Invalid saved service contract")
+            continue
+        old_target = normalize_target({"network": "host", **old})
+        new_target = normalize_target({"network": "host", **proposed[service]})
+        if recreate_migration_blocked(old_target, new_target):
+            raise DeployError("Existing infrastructure changed; an explicit migration is required")
+        current = inspect_optional(service)
+        labels = (current or {}).get("Config", {}).get("Labels") or {}
+        if current is None or record.get("container") != current["Id"] or labels.get("io.mcp-plugins.managed") != "true":
+            raise DeployError("Legacy container is not owned by its deployment record")
+        validate_current(current, old_target, service)
+        pending.append((state_path, original, record, old_target))
+
+    for path, original, record, old_target in pending:
+        secure_write(path.with_name(path.name + ".bak-" + str(time.time_ns())), original)
+        record["target"] = old_target
+        secure_write(path, json.dumps(record, indent=2))
+
+
 def deploy(service, revision, payload, target, installed=None):
     image = validate_request(service, revision, payload, target)
     target = allocate_target(service, target, installed or {})
