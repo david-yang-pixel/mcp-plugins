@@ -111,6 +111,12 @@ class _FakePage:
         self.load_states: list[str] = []
         self.gotos: list[str] = []
         self.keyboard = _FakeKeyboard()
+        self.close_count = 0
+        self.closed = False
+
+    async def close(self):
+        self.close_count += 1
+        self.closed = True
 
     async def goto(self, url, *, wait_until=None):
         self.url = url
@@ -197,17 +203,22 @@ class _MissingLocator(_FakeLocator):
 
 
 class _FakeContext:
-    def __init__(self, page=None):
-        self.pages = [page or _FakePage()]
+    def __init__(self, page=None, *, new_page_type=_FakePage):
+        self._new_page_type = new_page_type
+        self.pages = [page or new_page_type()]
         self.close_count = 0
         self.default_timeout = None
         self.is_closed = False
+        self.route_count = 0
 
     def set_default_timeout(self, timeout):
         self.default_timeout = timeout
 
+    async def route(self, pattern, handler):
+        self.route_count += 1
+
     async def new_page(self):
-        page = _FakePage()
+        page = self._new_page_type()
         self.pages.append(page)
         return page
 
@@ -498,7 +509,7 @@ async def test_send_message_does_not_retry_login_required_after_auto_login_fails
             zendesk_profile_dir=tmp_path,
         )
     )
-    first_context = _FakeContext(_LoginRequiredPage())
+    first_context = _FakeContext(new_page_type=_LoginRequiredPage)
     second_context = _FakeContext()
     manager = _SequentialPlaywrightManager([first_context, second_context])
 
@@ -553,7 +564,7 @@ async def test_readiness_auto_recovers_login_and_notifies_only_on_transitions(
     async def passive_probe(_page):
         return results.pop(0)
 
-    async def with_page(operation):
+    async def with_page(operation, *, count_use=True):
         return await operation(object())
 
     monkeypatch.setattr(relay, "_check_readiness_page", passive_probe)
@@ -591,7 +602,7 @@ async def test_readiness_auto_login_uses_exponential_backoff_after_failure(
     async def login_required(_page):
         return BrowserResult(ok=False, status="login_required")
 
-    async def with_page(operation):
+    async def with_page(operation, *, count_use=True):
         return await operation(object())
 
     clock = [100.0]
@@ -639,21 +650,25 @@ async def test_readiness_auto_login_attempt_has_a_total_timeout(
     async def login_required(_page):
         return BrowserResult(ok=False, status="login_required")
 
-    async def with_page(operation):
+    async def with_page(operation, *, count_use=True):
         return await operation(_FakePage())
 
     observed_timeouts = []
+    original_wait_for = asyncio.wait_for
 
-    async def timeout_immediately(awaitable, *, timeout):
+    async def timeout_on_auto_login(awaitable, *, timeout):
         observed_timeouts.append(timeout)
-        awaitable.close()
-        raise TimeoutError
+        if timeout == 45:
+            if hasattr(awaitable, "close"):
+                awaitable.close()
+            raise TimeoutError
+        return await original_wait_for(awaitable, timeout=timeout)
 
     monkeypatch.setattr(relay, "_check_readiness_page", login_required)
     monkeypatch.setattr(relay, "_with_page", with_page)
     monkeypatch.setattr(
         "zendesk_browser_relay.browser_relay.asyncio.wait_for",
-        timeout_immediately,
+        timeout_on_auto_login,
     )
 
     result = await relay.check_readiness()
@@ -661,7 +676,7 @@ async def test_readiness_auto_login_attempt_has_a_total_timeout(
     assert result.status == "login_required"
     assert relay._login_recovery_active is False
     assert relay._auto_login_failures == 1
-    assert observed_timeouts == [45]
+    assert 45 in observed_timeouts
 
 
 @pytest.mark.asyncio
@@ -713,7 +728,7 @@ async def test_failed_readiness_notification_is_retried_on_next_probe(
     async def passive_probe(_page):
         return BrowserResult(ok=False, status="login_required")
 
-    async def with_page(operation):
+    async def with_page(operation, *, count_use=True):
         return await operation(object())
 
     monkeypatch.setattr(relay, "_check_readiness_page", passive_probe)
@@ -755,7 +770,7 @@ async def test_send_message_retries_safe_send_failed_with_fresh_context(
             zendesk_profile_dir=tmp_path,
         )
     )
-    first_context = _FakeContext(_FakePageWithOnlyGenericComposer())
+    first_context = _FakeContext(new_page_type=_FakePageWithOnlyGenericComposer)
     second_context = _FakeContext()
     manager = _SequentialPlaywrightManager([first_context, second_context])
 
@@ -788,7 +803,7 @@ async def test_send_message_does_not_retry_after_click_stage_failure(
             zendesk_profile_dir=tmp_path,
         )
     )
-    context = _FakeContext(_FakePageWithFailingSendClick())
+    context = _FakeContext(new_page_type=_FakePageWithFailingSendClick)
     manager = _SequentialPlaywrightManager([context])
 
     async def fresh(request):
@@ -810,7 +825,7 @@ async def test_send_message_does_not_retry_after_click_stage_failure(
 
 
 @pytest.mark.asyncio
-async def test_with_page_reuses_persistent_context(monkeypatch, tmp_path):
+async def test_with_page_reuses_context_but_closes_each_page(monkeypatch, tmp_path):
     relay = ZendeskBrowserRelay(
         Settings(
             relay_api_key="x" * 32,
@@ -828,12 +843,182 @@ async def test_with_page_reuses_persistent_context(monkeypatch, tmp_path):
     first = await relay._with_page(lambda page: page)
     second = await relay._with_page(lambda page: page)
 
-    assert first is second
+    assert first is not second
+    assert first.close_count == 1
+    assert second.close_count == 1
     assert manager.start_count == 1
     assert manager.chromium.launch_count == 1
     assert context.close_count == 0
+    assert context.route_count == 1
 
     await relay.close()
 
     assert context.close_count == 1
     assert manager.stop_count == 1
+
+
+@pytest.mark.asyncio
+async def test_readiness_probe_does_not_increment_context_uses(monkeypatch, tmp_path):
+    relay = ZendeskBrowserRelay(
+        Settings(
+            relay_api_key="x" * 32,
+            zendesk_profile_dir=tmp_path,
+        )
+    )
+    context = _FakeContext()
+    manager = _FakePlaywrightManager(context)
+    monkeypatch.setattr(
+        "zendesk_browser_relay.browser_relay.async_playwright",
+        lambda: manager,
+    )
+
+    await relay._with_page(lambda page: page, count_use=False)
+    await relay._with_page(lambda page: page, count_use=False)
+
+    assert relay._context_uses == 0
+
+    await relay._with_page(lambda page: page, count_use=True)
+
+    assert relay._context_uses == 1
+
+
+class _DisconnectingPage(_FakePage):
+    async def close(self):
+        raise RuntimeError("Browser disconnected")
+
+
+class _DisconnectingContext(_FakeContext):
+    async def close(self):
+        self.close_count += 1
+        raise RuntimeError("Browser disconnected")
+
+
+class _CancelledCloseContext(_FakeContext):
+    async def close(self):
+        raise asyncio.CancelledError()
+
+
+@pytest.mark.asyncio
+async def test_readiness_timeout_cleanup_holds_the_profile_lock(monkeypatch, tmp_path):
+    relay = ZendeskBrowserRelay(
+        Settings(relay_api_key="x" * 32, zendesk_profile_dir=tmp_path)
+    )
+    relay._settings.zendesk_browser_operation_timeout_seconds = 0.05
+    release_close = asyncio.Event()
+    close_entered = asyncio.Event()
+    competitor_finished = asyncio.Event()
+
+    class _SlowCloseContext(_FakeContext):
+        async def close(self):
+            close_entered.set()
+            await release_close.wait()
+            await super().close()
+
+    first = _SlowCloseContext()
+    second = _FakeContext()
+    relay._context = first
+
+    async def hang(_page):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(relay, "_check_and_recover_readiness_page", hang)
+
+    async def competitor():
+        await close_entered.wait()
+        async with relay._get_lock():
+            assert first.is_closed
+            assert relay._context is None
+            relay._context = second
+        competitor_finished.set()
+
+    readiness = asyncio.create_task(relay.check_readiness())
+    other = asyncio.create_task(competitor())
+    await asyncio.wait_for(close_entered.wait(), timeout=2)
+    await asyncio.sleep(0.05)
+    assert not competitor_finished.is_set()
+    assert relay._get_lock().locked()
+    release_close.set()
+    result = await asyncio.wait_for(readiness, timeout=2)
+    await asyncio.wait_for(other, timeout=2)
+
+    assert result.ok is False
+    assert result.status == "unknown"
+    assert first.close_count == 1
+    assert second.close_count == 0
+    assert relay._context is second
+
+
+@pytest.mark.asyncio
+async def test_page_close_exception_does_not_mask_or_abort(tmp_path):
+    relay = ZendeskBrowserRelay(
+        Settings(relay_api_key="x" * 32, zendesk_profile_dir=tmp_path)
+    )
+    context = _FakeContext(new_page_type=_DisconnectingPage)
+    relay._context = context
+
+    async def fail(_page):
+        raise RuntimeError("navigation failed")
+
+    with pytest.raises(RuntimeError, match="navigation failed"):
+        await relay._with_page(fail)
+
+    assert await relay._with_page(lambda _page: "ok") == "ok"
+    assert context.close_count == 0
+
+
+@pytest.mark.asyncio
+async def test_context_close_exception_still_stops_playwright(tmp_path):
+    relay = ZendeskBrowserRelay(
+        Settings(relay_api_key="x" * 32, zendesk_profile_dir=tmp_path)
+    )
+    context = _DisconnectingContext()
+    manager = _FakePlaywrightManager(context)
+    relay._context = context
+    relay._playwright = manager
+    relay._playwright_manager = manager
+
+    await relay._close_context(reason="readiness_timeout", stop_playwright=True)
+
+    assert context.close_count == 1
+    assert manager.stop_count == 1
+    assert relay._context is None
+    assert relay._playwright is None
+    assert relay._playwright_manager is None
+
+
+@pytest.mark.asyncio
+async def test_context_close_cancellation_propagates_after_stopping(tmp_path):
+    relay = ZendeskBrowserRelay(
+        Settings(relay_api_key="x" * 32, zendesk_profile_dir=tmp_path)
+    )
+    context = _CancelledCloseContext()
+    manager = _FakePlaywrightManager(context)
+    relay._context = context
+    relay._playwright = manager
+    relay._playwright_manager = manager
+
+    with pytest.raises(asyncio.CancelledError):
+        await relay._close_context(reason="shutdown", stop_playwright=True)
+
+    assert manager.stop_count == 1
+    assert relay._playwright is None
+
+
+@pytest.mark.asyncio
+async def test_configured_mcp_url_without_checker_fails_closed(tmp_path):
+    relay = ZendeskBrowserRelay(
+        Settings(
+            relay_api_key="x" * 32,
+            zendesk_profile_dir=tmp_path,
+            zendesk_mcp_url="https://zendesk.example/mcp",
+        )
+    )
+
+    result = await relay._check_freshness_before_send(
+        SendRequest(ticket_id=2861, body="hello")
+    )
+
+    assert result is not None
+    assert result.ok is False
+    assert result.status == "freshness_check_failed"
+    assert result.error == "authorization_unavailable"

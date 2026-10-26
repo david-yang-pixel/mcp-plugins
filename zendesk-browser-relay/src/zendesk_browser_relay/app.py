@@ -30,6 +30,7 @@ from .schemas import (
     SessionResponse,
 )
 from .settings import get_settings
+from .resource_watchdog import run_browser_resource_watchdog
 from .session_supervisor import run_session_supervisor
 from .zendesk_freshness import ZendeskMcpFreshnessChecker
 
@@ -135,28 +136,45 @@ def reset_relay_for_tests() -> None:
 def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        supervisor_task: asyncio.Task[None] | None = None
+        background_tasks: list[asyncio.Task[None]] = []
         settings = get_settings()
+        relay = get_relay()
         if (
             settings.zendesk_session_supervisor_enabled
             and settings.auto_login_configured
         ):
-            supervisor_task = asyncio.create_task(
-                run_session_supervisor(
-                    get_relay(),
-                    interval_seconds=(
-                        settings.zendesk_session_check_interval_seconds
+            background_tasks.append(
+                asyncio.create_task(
+                    run_session_supervisor(
+                        relay,
+                        interval_seconds=(
+                            settings.zendesk_session_check_interval_seconds
+                        ),
                     ),
-                ),
-                name="zendesk-session-supervisor",
+                    name="zendesk-session-supervisor",
+                )
+            )
+        if settings.zendesk_browser_memory_limit_mb > 0:
+            background_tasks.append(
+                asyncio.create_task(
+                    run_browser_resource_watchdog(
+                        relay,
+                        interval_seconds=(
+                            settings.zendesk_browser_memory_check_interval_seconds
+                        ),
+                        memory_limit_mb=settings.zendesk_browser_memory_limit_mb,
+                    ),
+                    name="zendesk-browser-resource-watchdog",
+                )
             )
         try:
             yield
         finally:
-            if supervisor_task is not None:
-                supervisor_task.cancel()
+            for task in background_tasks:
+                task.cancel()
+            for task in background_tasks:
                 with suppress(asyncio.CancelledError):
-                    await supervisor_task
+                    await task
             if _relay_singleton is not None:
                 await _relay_singleton.close()
 
@@ -411,9 +429,21 @@ def create_app() -> FastAPI:
 app = create_app()
 
 
-def main() -> None:
-    uvicorn.run("zendesk_browser_relay.app:app", host="127.0.0.1", port=8097)
+def main(*, host: str = "127.0.0.1", port: int = 8097) -> None:
+    from .logging_config import LOGGING_CONFIG
+
+    uvicorn.run(
+        "zendesk_browser_relay.app:app",
+        host=host,
+        port=port,
+        log_config=LOGGING_CONFIG,
+    )
 
 
 if __name__ == "__main__":
-    main()
+    import os
+
+    main(
+        host=os.environ.get("UVICORN_HOST", "127.0.0.1"),
+        port=int(os.environ.get("UVICORN_PORT", "8097")),
+    )

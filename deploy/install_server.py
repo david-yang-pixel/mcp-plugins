@@ -50,6 +50,12 @@ for folder in ['/etc/mcp-plugins','/opt/mcp-plugins','/opt/mcp-plugins/releases'
 candidate=base64.b64decode(data['helper'])
 namespace={'__name__':'mcp_admin_install','__file__':'/usr/local/sbin/mcp-plugins-deploy'}
 exec(compile(candidate,namespace['__file__'],'exec'),namespace)
+# Backfill before replacing targets: the old helper accepts this same old
+# contract if installation stops early, while the new allowlist cannot recover it.
+previous_targets=pathlib.Path('/etc/mcp-plugins/targets.json')
+old_targets=json.loads(previous_targets.read_text()) if previous_targets.exists() else {}
+new_targets=json.loads(base64.b64decode(data['targets']))
+namespace['record_prior_legacy_contracts'](old_targets,new_targets)
 nginx_result=namespace['install_nginx_include']()
 for target,field,mode in [('/usr/local/sbin/mcp-plugins-deploy','helper',0o700),('/etc/mcp-plugins/targets.json','targets',0o600)]:
  p=pathlib.Path(target)

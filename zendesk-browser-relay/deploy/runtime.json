@@ -4,6 +4,8 @@
     "DIFY_RESULT_WORKFLOW_URL": "https://api.dify.ai/v1/workflows/run",
     "DIFY_RESULT_WORKFLOW_USER": "zendesk-ticket-actor",
     "PLAYWRIGHT_BROWSERS_PATH": "/ms-playwright",
+    "UVICORN_HOST": "127.0.0.1",
+    "UVICORN_PORT": "8097",
     "TICKET_AUTOMATION_ALLOWLIST": "",
     "TICKET_RUN_COALESCE_ACTIVE_MESSAGES": "true",
     "TICKET_RUN_DB_PATH": "/var/lib/zendesk-browser-relay/state/ticket-runs.sqlite3",
@@ -41,10 +43,6 @@
       "name": "MCP_ZENDESK_BROWSER_RELAY__ZENDESK_LOGIN_PASSWORD",
       "required": true
     },
-    "ZENDESK_MCP_AUTHORIZATION": {
-      "name": "MCP_ZENDESK_BROWSER_RELAY__ZENDESK_MCP_AUTHORIZATION",
-      "required": true
-    },
     "ZENDESK_TOTP_SECRET": {
       "name": "MCP_ZENDESK_BROWSER_RELAY__ZENDESK_TOTP_SECRET",
       "required": true
@@ -55,6 +53,11 @@
       "name": "MCP_ZENDESK_BROWSER_RELAY__FEISHU_NOTIFICATION_WEBHOOK_URL",
       "required": true,
       "destination": "/var/lib/zendesk-browser-relay/state/feishu_webhook_url"
+    },
+    "ZENDESK_MCP_AUTHORIZATION": {
+      "name": "MCP_ZENDESK_BROWSER_RELAY__ZENDESK_MCP_AUTHORIZATION",
+      "required": true,
+      "destination": "/run/mcp-secrets/zendesk_mcp_authorization"
     }
   }
 }

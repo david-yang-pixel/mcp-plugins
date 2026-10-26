@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     zendesk_mcp_authorization: Optional[SecretStr] = Field(
         default=None, min_length=16
     )
+    zendesk_mcp_authorization_file: Path = Path(
+        "/run/mcp-secrets/zendesk_mcp_authorization"
+    )
     zendesk_subdomain: str = "langgenius"
     zendesk_profile_dir: Path = Path("/opt/zendesk-browser-relay/profile")
     ticket_run_db_path: Path = Path(
@@ -48,7 +51,24 @@ class Settings(BaseSettings):
     zendesk_login_password: Optional[SecretStr] = None
     zendesk_totp_secret: Optional[SecretStr] = None
     zendesk_session_supervisor_enabled: bool = True
-    zendesk_session_check_interval_seconds: int = Field(default=30, ge=5, le=300)
+    zendesk_session_check_interval_seconds: int = Field(default=300, ge=30, le=3_600)
+    zendesk_browser_operation_timeout_seconds: int = Field(
+        default=240,
+        ge=30,
+        le=900,
+    )
+    zendesk_context_close_timeout_seconds: int = Field(default=20, ge=5, le=120)
+    zendesk_readiness_navigation_timeout_ms: int = Field(
+        default=12_000,
+        ge=3_000,
+        le=60_000,
+    )
+    zendesk_browser_memory_limit_mb: int = Field(default=1_400, ge=0, le=16_384)
+    zendesk_browser_memory_check_interval_seconds: int = Field(
+        default=60,
+        ge=15,
+        le=600,
+    )
     zendesk_auto_login_initial_backoff_seconds: int = Field(
         default=30,
         ge=5,
@@ -109,11 +129,33 @@ class Settings(BaseSettings):
 
     @property
     def zendesk_mcp_authorization_value(self) -> Optional[str]:
-        return (
-            self.zendesk_mcp_authorization.get_secret_value()
-            if self.zendesk_mcp_authorization
-            else None
-        )
+        try:
+            raw = self.zendesk_mcp_authorization_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raw = None
+            problem = "missing"
+        except (OSError, UnicodeError):
+            raw = None
+            problem = "unreadable"
+        else:
+            raw = raw.strip()
+            problem = None if raw else "blank"
+        if problem == "blank":
+            raise ValueError("Zendesk MCP authorization file is blank")
+        if raw:
+            return raw
+        # A configured MCP URL must not silently skip cursor checks when the
+        # mounted secret is missing or unreadable. Env is only a fallback
+        # when freshness is not configured.
+        if self.zendesk_mcp_url and problem in {"missing", "unreadable"}:
+            raise ValueError("Zendesk MCP authorization file is " + problem)
+        if self.zendesk_mcp_authorization is None:
+            return None
+        value = self.zendesk_mcp_authorization.get_secret_value()
+        stripped = value.strip()
+        if value and not stripped:
+            raise ValueError("Zendesk MCP authorization is blank")
+        return stripped or None
 
     @property
     def ticket_automation_allowlist_values(self) -> frozenset[int]:

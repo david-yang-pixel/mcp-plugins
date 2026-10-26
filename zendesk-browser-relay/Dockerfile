@@ -12,4 +12,5 @@ ENV PYTHONPATH=/app/src PYTHONUNBUFFERED=1
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN python -m playwright install --with-deps chromium
 EXPOSE 8097
-CMD ["uvicorn", "zendesk_browser_relay.app:app", "--host", "0.0.0.0", "--port", "8097"]
+ENV UVICORN_HOST=0.0.0.0
+CMD ["python", "-m", "zendesk_browser_relay.app"]

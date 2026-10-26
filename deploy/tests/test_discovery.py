@@ -129,7 +129,8 @@ class FirstDeployTests(unittest.TestCase):
         self.payload = {'environment': {'EXAMPLE_MCP_API_KEY': 'synthetic-secret'}}
         self.new = {'Id': 'new-id', 'Image': 'new-image', 'Config': {
             'Env': ['EXAMPLE_MCP_API_KEY=synthetic-secret'],
-            'Labels': {'io.mcp-plugins.managed': 'true', 'io.mcp-plugins.revision': REVISION}}}
+            'Labels': {'io.mcp-plugins.managed': 'true', 'io.mcp-plugins.revision': REVISION}},
+            'HostConfig': {'Init': False, 'ShmSize': 64 * 1024 * 1024}}
 
     def create(self, health=1, existing=None, persist=None, candidate=None):
         with patch.object(server, 'inspect_optional', side_effect=[existing, candidate or self.new]), \
@@ -215,8 +216,27 @@ class FirstDeployTests(unittest.TestCase):
     def test_bridge_service_can_keep_image_nonroot_user_on_update(self):
         current = {'Config': {'User': '1000'}, 'Mounts': [], 'HostConfig': {
             'NetworkMode': 'bridge', 'Privileged': False, 'Init': False,
+            'ShmSize': 128 * 1024 * 1024,
             'PortBindings': {'18120/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '18120'}]}}}
         server.validate_current(current, self.target, 'example-mcp')
+        explicit = {**self.target, 'shm_size': '64m'}
+        with self.assertRaisesRegex(server.DeployError, 'shared memory'):
+            server.validate_current(current, explicit, 'example-mcp')
+
+    def test_first_deploy_readback_accepts_nondefault_daemon_shm(self):
+        self.new['HostConfig']['ShmSize'] = 128 * 1024 * 1024
+        result, operations = self.create(persist=lambda _: None)
+        self.assertEqual(result['container'], 'new-id')
+        self.assertNotIn('--shm-size', operations[0])
+        self.assertFalse(any(op[1] == 'rm' for op in operations))
+
+    def test_first_deploy_explicit_shm_mismatch_removes_the_new_container(self):
+        self.target = {**self.target, 'shm_size': '64m'}
+        self.new['HostConfig']['ShmSize'] = 128 * 1024 * 1024
+        result, operations = self.create()
+        self.assertIsInstance(result, server.DeployError)
+        self.assertIn('First deployment failed', str(result))
+        self.assertEqual(operations[-1], ['docker', 'rm', '-f', 'example-mcp'])
 
 
 if __name__ == '__main__':

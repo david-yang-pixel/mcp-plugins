@@ -179,7 +179,8 @@
     "port": 8097,
     "auth_key": "RELAY_API_KEY",
     "health_path": "/health",
-    "init": false,
+    "init": true,
+    "shm_size": "256m",
     "mounts": [
       {
         "source": "/opt/dify-db/browser-relay-state",
@@ -198,12 +199,9 @@
       }
     ],
     "command": [
-      "uvicorn",
-      "zendesk_browser_relay.app:app",
-      "--host",
-      "127.0.0.1",
-      "--port",
-      "8097"
+      "python",
+      "-m",
+      "zendesk_browser_relay.app"
     ],
     "env_keys": [
       "CODEX_COMPLETION_API_KEY",
@@ -221,7 +219,6 @@
       "ZENDESK_HEADLESS",
       "ZENDESK_LOGIN_EMAIL",
       "ZENDESK_LOGIN_PASSWORD",
-      "ZENDESK_MCP_AUTHORIZATION",
       "ZENDESK_MCP_URL",
       "ZENDESK_NAVIGATION_TIMEOUT_MS",
       "ZENDESK_PROFILE_DIR",
@@ -231,7 +228,8 @@
       "ZENDESK_TOTP_SECRET"
     ],
     "secret_file_paths": {
-      "FEISHU_NOTIFICATION_WEBHOOK_URL": "/var/lib/zendesk-browser-relay/state/feishu_webhook_url"
+      "FEISHU_NOTIFICATION_WEBHOOK_URL": "/var/lib/zendesk-browser-relay/state/feishu_webhook_url",
+      "ZENDESK_MCP_AUTHORIZATION": "/run/mcp-secrets/zendesk_mcp_authorization"
     }
   }
 }
