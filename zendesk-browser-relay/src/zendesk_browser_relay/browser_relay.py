@@ -1145,25 +1145,43 @@ class ZendeskBrowserRelay:
 
 
 def profile_chromium_rss_mb(profile_dir: Path) -> float:
-    needle = str(profile_dir.resolve())
-    total_kb = 0
+    profile_arg = f"--user-data-dir={profile_dir.resolve()}".encode()
     proc_root = Path("/proc")
     if not proc_root.is_dir():
         return 0.0
+
+    children: dict[int, list[int]] = {}
+    rss_kb: dict[int, int] = {}
+    browser_pids: set[int] = set()
     for entry in proc_root.iterdir():
         if not entry.name.isdigit():
             continue
         try:
-            cmdline = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(
-                "utf-8",
-                errors="ignore",
-            )
-            if needle not in cmdline:
-                continue
+            pid = int(entry.name)
+            args = (entry / "cmdline").read_bytes().split(b"\0")
+            parent = None
+            memory_kb = 0
             for line in (entry / "status").read_text(encoding="utf-8").splitlines():
-                if line.startswith("VmRSS:"):
-                    total_kb += int(line.split()[1])
-                    break
-        except (OSError, ValueError):
+                if line.startswith("PPid:"):
+                    parent = int(line.split()[1])
+                elif line.startswith("VmRSS:"):
+                    memory_kb = int(line.split()[1])
+        except (OSError, ValueError, IndexError):
             continue
+        if profile_arg in args:
+            browser_pids.add(pid)
+        if parent is not None:
+            children.setdefault(parent, []).append(pid)
+        rss_kb[pid] = memory_kb
+
+    total_kb = 0
+    visited: set[int] = set()
+    pending = list(browser_pids)
+    while pending:
+        pid = pending.pop()
+        if pid in visited:
+            continue
+        visited.add(pid)
+        total_kb += rss_kb.get(pid, 0)
+        pending.extend(children.get(pid, ()))
     return total_kb / 1024.0
