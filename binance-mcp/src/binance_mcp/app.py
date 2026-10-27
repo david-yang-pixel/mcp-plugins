@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from decimal import Decimal
 import hashlib
 import hmac
 import json
@@ -62,6 +63,11 @@ class OrdersArgs(SymbolArgs):
     limit: Limit = 500
 
 
+class TradesArgs(SymbolArgs):
+    limit: Limit = 500
+    fromId: Annotated[int, Field(strict=True, ge=0)] | None = None
+
+
 class WalletBalanceArgs(Arguments):
     quoteAsset: Asset = "USDT"
 
@@ -73,6 +79,7 @@ class FundingArgs(Arguments):
 
 # Every path is fixed and read-only. No generic request tool. get-funding-asset is a
 # query that Binance only serves over POST; it is the one non-GET endpoint.
+# position_cost has no path: it is computed from my_trades and price.
 TOOLS = {
     "exchange_info": ("Get trading pair information", "/api/v3/exchangeInfo", SymbolArgs, False, "GET"),
     "price": ("Get the latest price for a pair", "/api/v3/ticker/price", SymbolArgs, False, "GET"),
@@ -82,6 +89,10 @@ TOOLS = {
     "account": ("Get Spot account information and balances", "/api/v3/account", Arguments, True, "GET"),
     "open_orders": ("Get current orders for a pair", "/api/v3/openOrders", SymbolArgs, True, "GET"),
     "all_orders": ("Get historical orders for a pair", "/api/v3/allOrders", OrdersArgs, True, "GET"),
+    "my_trades": ("Get your trade fills for a pair, including fees; page with fromId",
+                  "/api/v3/myTrades", TradesArgs, True, "GET"),
+    "position_cost": ("Compute FIFO cost basis, open lots with buy times, and realized/unrealized P&L "
+                      "for a pair from your full trade history", None, SymbolArgs, True, "GET"),
     "wallet_balance": ("Get the total balance of every wallet (Spot, Funding, Earn, Futures, ...) in a quote asset",
                        "/sapi/v1/asset/wallet/balance", WalletBalanceArgs, True, "GET"),
     "funding_assets": ("Get Funding wallet balances, optionally for one asset",
@@ -175,6 +186,7 @@ def get_tool_weight(name: str, params: dict) -> int:
         "account": 20,
         "open_orders": 6,
         "all_orders": 20,
+        "my_trades": 20,
         # SAPI weight is a separate Binance pool; counting it here only makes local limiting stricter.
         "wallet_balance": 60,
         "funding_assets": 1,
@@ -331,6 +343,8 @@ async def call_tool(name, arguments):
     api_secret = os.environ.get("BINANCE_API_SECRET", "")
     if signed and (not api_key or not api_secret):
         return error("CREDENTIALS_MISSING", "Binance API key and secret are required for account tools")
+    if path is None:
+        return await position_cost(params["symbol"])
 
     cb_error = await rate_limiter.check_circuit_breaker()
     if cb_error:
@@ -386,6 +400,130 @@ async def call_tool(name, arguments):
         return {"success": True, "data": data}
     except (httpx.HTTPError, ValueError, UnicodeError, RecursionError):
         return error("BINANCE_REQUEST_ERROR", "Binance request or response failed")
+
+
+MAX_TRADE_PAGES = 10
+MAX_OPEN_LOTS = 100
+
+
+def _num(value: Decimal) -> str:
+    return format(value.quantize(Decimal("0.00000001")), "f")
+
+
+def _utc(ms: int) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ms / 1000))
+
+
+def fifo_position(trades: list[dict], base: str, quote: str) -> dict:
+    """Match sells against the oldest buys. Fees in the base or quote asset adjust quantity
+    or cost; fees in any other asset (such as BNB) are reported separately, not as cost."""
+    lots: deque[list] = deque()  # [time_ms, remaining_qty, unit_cost]
+    realized = Decimal(0)
+    unmatched = Decimal(0)
+    other_fees: dict[str, Decimal] = {}
+    for trade in trades:
+        qty, quote_qty, fee = Decimal(trade["qty"]), Decimal(trade["quoteQty"]), Decimal(trade["commission"])
+        fee_asset, is_buyer, at = trade["commissionAsset"], trade["isBuyer"], trade["time"]
+        if not isinstance(is_buyer, bool) or not isinstance(at, int) or min(qty, quote_qty, fee) < 0:
+            raise ValueError("invalid trade")
+        base_fee = fee if fee_asset == base else Decimal(0)
+        quote_fee = fee if fee_asset == quote else Decimal(0)
+        if fee and fee_asset not in (base, quote):
+            other_fees[fee_asset] = other_fees.get(fee_asset, Decimal(0)) + fee
+        if is_buyer:
+            net = qty - base_fee
+            if net > 0:
+                lots.append([at, net, (quote_qty + quote_fee) / net])
+            continue
+        consume = qty + base_fee
+        remaining, cost = consume, Decimal(0)
+        while remaining > 0 and lots:
+            lot = lots[0]
+            used = min(lot[1], remaining)
+            cost += used * lot[2]
+            lot[1] -= used
+            remaining -= used
+            if lot[1] <= 0:
+                lots.popleft()
+        # Units sold beyond recorded buys came from elsewhere (transfer, Convert); no P&L for them.
+        unmatched += remaining
+        if consume > 0:
+            realized += (quote_qty - quote_fee) * (consume - remaining) / consume - cost
+    return {
+        "open_quantity": sum((lot[1] for lot in lots), Decimal(0)),
+        "open_cost": sum((lot[1] * lot[2] for lot in lots), Decimal(0)),
+        "realized_pnl": realized,
+        "unmatched_sell_quantity": unmatched,
+        "fees_in_other_assets": {asset: _num(amount) for asset, amount in other_fees.items()},
+        "open_lots": [{"bought_at": _utc(at), "quantity": _num(qty), "unit_cost": _num(unit), "cost": _num(qty * unit)}
+                      for at, qty, unit in lots],
+    }
+
+
+async def position_cost(symbol: str) -> dict:
+    info = await call_tool("exchange_info", {"symbol": symbol})
+    if not info["success"]:
+        return info
+    try:
+        meta = info["data"]["symbols"][0]
+        base, quote = meta["baseAsset"], meta["quoteAsset"]
+    except (KeyError, IndexError, TypeError):
+        return error("BINANCE_RESPONSE_ERROR", "Invalid Binance response")
+
+    trades: list[dict] = []
+    from_id = 0
+    for _ in range(MAX_TRADE_PAGES):
+        page = await call_tool("my_trades", {"symbol": symbol, "limit": 1000, "fromId": from_id})
+        if not page["success"]:
+            return page
+        batch = page["data"]
+        if not isinstance(batch, list):
+            return error("BINANCE_RESPONSE_ERROR", "Invalid Binance response")
+        trades.extend(batch)
+        if len(batch) < 1000:
+            break
+        try:
+            from_id = int(batch[-1]["id"]) + 1
+        except (KeyError, TypeError, ValueError):
+            return error("BINANCE_RESPONSE_ERROR", "Invalid Binance response")
+    else:
+        return error("TOO_MANY_TRADES", f"More than {MAX_TRADE_PAGES * 1000} trades for {symbol}; cost basis not computed")
+
+    try:
+        trades.sort(key=lambda trade: int(trade["id"]))
+        position = fifo_position(trades, base, quote)
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return error("BINANCE_RESPONSE_ERROR", "Invalid Binance trade data")
+
+    qty, cost, lots = position["open_quantity"], position["open_cost"], position["open_lots"]
+    data = {
+        "symbol": symbol, "base_asset": base, "quote_asset": quote, "method": "FIFO",
+        "trade_count": len(trades),
+        "first_trade_at": _utc(trades[0]["time"]) if trades else None,
+        "last_trade_at": _utc(trades[-1]["time"]) if trades else None,
+        "open_quantity": _num(qty), "open_cost": _num(cost),
+        "average_cost": _num(cost / qty) if qty > 0 else None,
+        "realized_pnl": _num(position["realized_pnl"]),
+        "unmatched_sell_quantity": _num(position["unmatched_sell_quantity"]),
+        "fees_in_other_assets": position["fees_in_other_assets"],
+        # Oldest first: the FIFO head is what the next sell consumes.
+        "open_lots": lots[:MAX_OPEN_LOTS], "open_lots_truncated": len(lots) > MAX_OPEN_LOTS,
+        "current_price": None, "market_value": None, "unrealized_pnl": None, "unrealized_pnl_pct": None,
+        "note": ("Only trades on this pair are counted: transfers between wallets, Convert, and dust "
+                 "conversion are not, so open_quantity can differ from wallet balances."),
+    }
+    ticker = await call_tool("price", {"symbol": symbol})
+    try:
+        price = Decimal(ticker["data"]["price"]) if ticker["success"] else None
+    except (KeyError, TypeError, ArithmeticError):
+        price = None
+    if price is None:
+        data["price_error"] = ticker.get("code", "BINANCE_RESPONSE_ERROR")
+    else:
+        value = qty * price
+        data.update(current_price=_num(price), market_value=_num(value), unrealized_pnl=_num(value - cost),
+                    unrealized_pnl_pct=_num((value - cost) / cost * 100) if cost > 0 else None)
+    return {"success": True, "data": data}
 
 
 def rpc_error(request_id, code, message):
