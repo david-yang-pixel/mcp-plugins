@@ -27,6 +27,12 @@ Symbol = Annotated[str, Field(strict=True, min_length=2, max_length=20, pattern=
 Limit = Annotated[int, Field(strict=True, ge=1, le=1000)]
 
 
+class InvalidToolArguments(Exception):
+    def __init__(self, message: str = "Invalid tool arguments; see the tool input schema"):
+        self.message = message
+        super().__init__(message)
+
+
 class Arguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -72,20 +78,55 @@ PUBLIC_ORIGIN_HOST = "zendesk.smlershou.top"
 LOCAL_ORIGIN_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
-def is_allowed_origin(origin: str) -> bool:
-    custom_origins = os.environ.get("BINANCE_MCP_ALLOWED_ORIGINS")
-    if custom_origins:
-        allowed = {item.strip() for item in custom_origins.split(",") if item.strip()}
-        if origin in allowed:
-            return True
+def _origin_key(origin: str) -> tuple[str, str, int] | None:
+    """scheme, hostname, and effective port for a pure origin (no path, query, fragment, or userinfo)."""
+    if not isinstance(origin, str) or not origin or any(ch.isspace() for ch in origin):
+        return None
+    # urlsplit drops an empty query/fragment and treats an empty username as missing.
+    if any(ch in origin for ch in "?#@\\"):
+        return None
     try:
         parsed = urlsplit(origin)
+        if (
+            parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or parsed.netloc.endswith(":")
+        ):
+            return None
+        scheme = parsed.scheme
+        host = parsed.hostname
+        if scheme not in ("http", "https") or not host:
+            return None
+        port = parsed.port
     except Exception:
+        return None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    if not 1 <= port <= 65535:
+        return None
+    return scheme, host, port
+
+
+def is_allowed_origin(origin: str) -> bool:
+    key = _origin_key(origin)
+    if key is None:
         return False
-    host = parsed.hostname
-    if parsed.scheme == "https" and host == PUBLIC_ORIGIN_HOST:
+    scheme, host, port = key
+    custom_origins = os.environ.get("BINANCE_MCP_ALLOWED_ORIGINS")
+    if custom_origins:
+        for item in custom_origins.split(","):
+            allowed = _origin_key(item.strip())
+            if allowed is not None and allowed == key:
+                return True
+    if scheme == "https" and host == PUBLIC_ORIGIN_HOST and port == 443:
         return True
-    return parsed.scheme in ("http", "https") and host in LOCAL_ORIGIN_HOSTS
+    # Browsers put the page port in Origin. Local dev uses whatever port the server bound.
+    if host in LOCAL_ORIGIN_HOSTS:
+        return True
+    return False
 
 
 def tool_list():
@@ -168,29 +209,38 @@ class RateLimiter:
         self.is_banned = False
         self.semaphore = asyncio.Semaphore(self._get_concurrency())
 
+    def _cooldown_error(self, now: float) -> dict | None:
+        if now < self.circuit_break_until:
+            remaining = max(1, int(self.circuit_break_until - now))
+            if self.is_banned:
+                return error("IP_BANNED", f"Binance IP ban active (HTTP 418); retry after {remaining}s", retry_after=remaining)
+            return error("RATE_LIMITED", f"Binance rate limit cooldown active (HTTP 429); retry after {remaining}s", retry_after=remaining)
+        return None
+
+    def _reserve_weight(self, now: float, weight: int) -> dict | None:
+        while self.history and self.history[0][0] <= now - 60:
+            self.history.popleft()
+        current_weight = sum(w for _, w in self.history)
+        max_w = self._get_max_weight()
+        if current_weight + weight > max_w:
+            oldest_ts = self.history[0][0] if self.history else now
+            retry_after = max(1, int(60 - (now - oldest_ts)))
+            return error("RATE_LIMITED", "Binance request weight rate limit reached", retry_after=retry_after)
+        self.history.append((now, weight))
+        return None
+
     async def check_circuit_breaker(self) -> dict | None:
         async with self._lock:
-            now = time.time()
-            if now < self.circuit_break_until:
-                remaining = max(1, int(self.circuit_break_until - now))
-                if self.is_banned:
-                    return error("IP_BANNED", f"Binance IP ban active (HTTP 418); retry after {remaining}s", retry_after=remaining)
-                return error("RATE_LIMITED", f"Binance rate limit cooldown active (HTTP 429); retry after {remaining}s", retry_after=remaining)
-            return None
+            return self._cooldown_error(time.time())
 
-    async def acquire_weight(self, weight: int) -> dict | None:
+    async def acquire_admission(self, weight: int) -> dict | None:
+        # Cooldown and weight are decided together after the caller holds the concurrency slot.
         async with self._lock:
             now = time.time()
-            while self.history and self.history[0][0] <= now - 60:
-                self.history.popleft()
-            current_weight = sum(w for _, w in self.history)
-            max_w = self._get_max_weight()
-            if current_weight + weight > max_w:
-                oldest_ts = self.history[0][0] if self.history else now
-                retry_after = max(1, int(60 - (now - oldest_ts)))
-                return error("RATE_LIMITED", "Binance request weight rate limit reached", retry_after=retry_after)
-            self.history.append((now, weight))
-            return None
+            blocked = self._cooldown_error(now)
+            if blocked:
+                return blocked
+            return self._reserve_weight(now, weight)
 
     def record_cooldown(self, status_code: int, retry_after: int):
         now = time.time()
@@ -221,7 +271,7 @@ async def call_tool(name, arguments):
     try:
         params = model.model_validate(arguments).model_dump()
     except ValidationError:
-        return error("BAD_ARGUMENTS", "Invalid tool arguments; see the tool input schema")
+        raise InvalidToolArguments("Invalid tool arguments; see the tool input schema")
     api_key = os.environ.get("BINANCE_API_KEY", "")
     api_secret = os.environ.get("BINANCE_API_SECRET", "")
     if signed and (not api_key or not api_secret):
@@ -232,9 +282,6 @@ async def call_tool(name, arguments):
         return cb_error
 
     weight = get_tool_weight(name, params)
-    weight_error = await rate_limiter.acquire_weight(weight)
-    if weight_error:
-        return weight_error
 
     headers = {}
     signature = ""
@@ -250,6 +297,9 @@ async def call_tool(name, arguments):
     try:
         # Disable environment proxy configuration and redirects to keep credentials on the official origin.
         async with rate_limiter.semaphore:
+            admit_error = await rate_limiter.acquire_admission(weight)
+            if admit_error:
+                return admit_error
             async with httpx.AsyncClient(timeout=10, follow_redirects=False, trust_env=False) as client:
                 async with client.stream("GET", BASE_URL + path + ("?" + query if query else ""), headers=headers) as response:
                     if response.status_code in (418, 429):
@@ -283,6 +333,26 @@ def rpc_result(request_id, result):
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
+def get_max_body_bytes() -> int:
+    try:
+        val = int(os.environ.get("BINANCE_MCP_MAX_BODY_BYTES", "1000000"))
+        return val if val > 0 else 1000000
+    except (ValueError, TypeError):
+        return 1000000
+
+
+def get_max_batch_size() -> int:
+    try:
+        val = int(os.environ.get("BINANCE_MCP_MAX_BATCH_SIZE", "50"))
+        return val if val > 0 else 50
+    except (ValueError, TypeError):
+        return 50
+
+
+def is_valid_rpc_id(val: Any) -> bool:
+    return val is None or (isinstance(val, (str, int)) and not isinstance(val, bool))
+
+
 app = FastAPI(title="binance-mcp", docs_url=None, redoc_url=None, openapi_url=None)
 
 
@@ -291,17 +361,40 @@ async def health():
     return {"ok": True, "service": "binance-mcp"}
 
 
-async def process_rpc_item(item: Any) -> tuple[bool, dict | None]:
-    if not isinstance(item, dict) or item.get("jsonrpc") != "2.0" or not isinstance(item.get("method"), str):
-        request_id = item.get("id") if isinstance(item, dict) else None
-        return (False, rpc_error(request_id, -32600, "Invalid request"))
-    method = item["method"]
-    request_id = item.get("id")
-    is_notification = ("id" not in item)
+async def process_rpc_item(item: Any, is_batch: bool = False) -> tuple[bool, dict | None]:
+    if not isinstance(item, dict):
+        return (False, rpc_error(None, -32600, "Invalid request"))
+    if "id" in item:
+        raw_id = item["id"]
+        if not is_valid_rpc_id(raw_id):
+            return (False, rpc_error(None, -32600, "Invalid request id: id must be a string, integer, or null"))
+        request_id = raw_id
+        is_notification = False
+    else:
+        request_id = None
+        is_notification = True
+
+    if item.get("jsonrpc") != "2.0" or not isinstance(item.get("method"), str):
+        return (False, rpc_error(request_id if not is_notification else None, -32600, "Invalid request"))
+
     if is_notification:
         return (True, None)
 
+    method = item["method"]
+
     if method == "initialize":
+        if is_batch:
+            return (False, rpc_error(request_id, -32600, "initialize cannot be part of a batch request"))
+        init_params = item.get("params")
+        if not isinstance(init_params, dict):
+            return (False, rpc_error(request_id, -32602, "Invalid initialize parameters"))
+        if not isinstance(init_params.get("protocolVersion"), str):
+            return (False, rpc_error(request_id, -32602, "protocolVersion is required"))
+        if not isinstance(init_params.get("capabilities"), dict):
+            return (False, rpc_error(request_id, -32602, "capabilities is required"))
+        client_info = init_params.get("clientInfo")
+        if not isinstance(client_info, dict) or not isinstance(client_info.get("name"), str) or not isinstance(client_info.get("version"), str):
+            return (False, rpc_error(request_id, -32602, "clientInfo must include name and version"))
         return (False, rpc_result(request_id, {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}},
                                                "serverInfo": {"name": "binance-mcp", "version": "0.1.0"}}))
     if method == "ping":
@@ -316,7 +409,10 @@ async def process_rpc_item(item: Any) -> tuple[bool, dict | None]:
     tool_name = params["name"]
     if tool_name not in TOOLS:
         return (False, rpc_error(request_id, -32602, f"Unknown tool: {tool_name}"))
-    payload = await call_tool(tool_name, params.get("arguments", {}))
+    try:
+        payload = await call_tool(tool_name, params.get("arguments", {}))
+    except InvalidToolArguments as e:
+        return (False, rpc_error(request_id, -32602, str(e)))
     return (False, rpc_result(request_id, {"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
                                            "structuredContent": payload, "isError": not payload["success"]}))
 
@@ -336,17 +432,35 @@ async def mcp(request: Request, authorization: str | None = Header(default=None)
     if scheme.lower() != "bearer" or not hmac.compare_digest(token.encode(), key.encode()):
         raise HTTPException(401, "Unauthorized")
 
+    max_body_bytes = get_max_body_bytes()
+    content_length_header = request.headers.get("content-length")
+    if content_length_header is not None:
+        token = content_length_header.strip()
+        if len(token) > 16 or not token.isascii() or not token.isdigit():
+            raise HTTPException(400, "Invalid Content-Length header")
+        if int(token) > max_body_bytes:
+            raise HTTPException(413, "Request body too large")
+
+    chunks = bytearray()
+    async for chunk in request.stream():
+        chunks.extend(chunk)
+        if len(chunks) > max_body_bytes:
+            raise HTTPException(413, "Request body too large")
+
     try:
-        body = await request.json()
+        body = json.loads(chunks)
     except (ValueError, UnicodeError):
         return rpc_error(None, -32700, "Invalid JSON")
 
+    max_batch = get_max_batch_size()
     if isinstance(body, list):
         if len(body) == 0:
             return rpc_error(None, -32600, "Invalid request")
+        if len(body) > max_batch:
+            return rpc_error(None, -32600, f"Batch size exceeds limit of {max_batch}")
         responses = []
         for item in body:
-            is_notif, resp = await process_rpc_item(item)
+            is_notif, resp = await process_rpc_item(item, is_batch=True)
             if not is_notif and resp is not None:
                 responses.append(resp)
         if len(responses) == 0:
@@ -354,7 +468,7 @@ async def mcp(request: Request, authorization: str | None = Header(default=None)
         return JSONResponse(status_code=200, content=responses)
 
     if isinstance(body, dict):
-        is_notif, resp = await process_rpc_item(body)
+        is_notif, resp = await process_rpc_item(body, is_batch=False)
         if is_notif:
             return Response(status_code=202)
         return resp

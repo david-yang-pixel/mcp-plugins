@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import json
@@ -46,7 +47,8 @@ def test_auth_protocol_and_discovery(client, monkeypatch):
     listing = rpc(client, "tools/list").json()["result"]["tools"]
     assert {t["name"] for t in listing} == set(service.TOOLS)
     assert all(t["annotations"]["readOnlyHint"] and t["inputSchema"]["additionalProperties"] is False for t in listing)
-    assert rpc(client, "initialize").json()["result"]["serverInfo"]["name"] == "binance-mcp"
+    init_params = {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "test-client", "version": "1.0.0"}}
+    assert rpc(client, "initialize", init_params).json()["result"]["serverInfo"]["name"] == "binance-mcp"
     assert rpc(client, "ping").json()["result"] == {}
     assert rpc(client, "bad").json()["error"]["code"] == -32601
     assert client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp"}, content="[").json()["error"]["code"] == -32700
@@ -116,8 +118,9 @@ def test_all_endpoints_are_get_and_signature(client, monkeypatch, name, args, pa
 ])
 def test_invalid_inputs_never_reach_network(client, monkeypatch, name, args):
     mock_binance(monkeypatch, lambda request: pytest.fail("unexpected network call"))
-    result = call(client, name, args)
-    assert result["isError"] and result["structuredContent"]["code"] == "BAD_ARGUMENTS"
+    resp = rpc(client, "tools/call", {"name": name, "arguments": args}).json()
+    assert resp["error"]["code"] == -32602
+    assert "Invalid tool arguments" in resp["error"]["message"]
 
 
 def test_unknown_tool_is_not_executable(client):
@@ -168,25 +171,40 @@ def test_bearer_scheme_case_insensitive(client):
 
 
 def test_origin_validation_and_default_bind(client, monkeypatch):
-    # Allowed origins
+    # Allowed origins. Local hosts keep any port; the public host is compared as scheme/host/effective port.
     resp = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp"},
                        json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
     assert resp.status_code == 200
-    for origin in ["https://zendesk.smlershou.top", "http://localhost:8124", "https://127.0.0.1:8124", "http://[::1]:8124"]:
+    for origin in ["https://zendesk.smlershou.top", "https://zendesk.smlershou.top:443",
+                   "https://ZENDESK.smlershou.top", "https://zendesk.smlershou.top:0443",
+                   "http://localhost", "http://localhost:8124", "https://127.0.0.1",
+                   "https://127.0.0.1:8124", "http://[::1]", "http://[::1]:8124"]:
+        assert service.is_allowed_origin(origin)
         resp = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp", "Origin": origin},
                            json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
-        assert resp.status_code == 200
-    # Custom origin via env
-    monkeypatch.setenv("BINANCE_MCP_ALLOWED_ORIGINS", "https://custom.example.com")
-    resp = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp", "Origin": "https://custom.example.com"},
-                       json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
-    assert resp.status_code == 200
-    # Disallowed origins
+        assert resp.status_code == 200, origin
+    # Custom origin via env, including default-port equivalence and host case.
+    monkeypatch.setenv("BINANCE_MCP_ALLOWED_ORIGINS", "https://Custom.Example.com")
+    for origin in ["https://custom.example.com", "https://custom.example.com:443", "https://Custom.Example.com"]:
+        assert service.is_allowed_origin(origin)
+        resp = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp", "Origin": origin},
+                           json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        assert resp.status_code == 200, origin
+    # Disallowed origins: wrong port, scheme, path, query, userinfo, or domain.
     for origin in ["https://attacker.example.com", "http://malicious.org", "null",
-                   "http://zendesk.smlershou.top", "https://zendesk.smlershou.top.evil.com"]:
+                   "http://zendesk.smlershou.top", "https://zendesk.smlershou.top:8443",
+                   "https://zendesk.smlershou.top/", "https://zendesk.smlershou.top/mcp",
+                   "https://zendesk.smlershou.top?foo=bar", "https://zendesk.smlershou.top?",
+                   "https://zendesk.smlershou.top#", "https://zendesk.smlershou.top:443?",
+                   "https://user:pass@zendesk.smlershou.top", "https://@zendesk.smlershou.top",
+                   "https://zendesk.smlershou.top.evil.com", "http://[::1]:99999",
+                   "http://localhost:8124/mcp", "http://localhost:", "http://localhost:0",
+                   " https://zendesk.smlershou.top", "https://custom.example.com:8443",
+                   "https://custom.example.com/mcp", "https://evil.com\\@zendesk.smlershou.top"]:
+        assert not service.is_allowed_origin(origin)
         resp = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp", "Origin": origin},
                            json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
-        assert resp.status_code == 403
+        assert resp.status_code == 403, origin
 
     # Default bind host in main is 127.0.0.1
     calls = []
@@ -198,17 +216,32 @@ def test_origin_validation_and_default_bind(client, monkeypatch):
 
 
 def test_jsonrpc_batch_and_notifications(client):
-    # Batch with multiple calls
+    # Batch with multiple valid calls (no initialize)
     batch_req = [
         {"jsonrpc": "2.0", "id": 1, "method": "ping"},
-        {"jsonrpc": "2.0", "id": 2, "method": "initialize"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
     ]
     resp = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp"}, json=batch_req)
     assert resp.status_code == 200
     results = resp.json()
     assert len(results) == 2
     assert results[0] == {"jsonrpc": "2.0", "id": 1, "result": {}}
-    assert results[1]["result"]["serverInfo"]["name"] == "binance-mcp"
+    assert "tools" in results[1]["result"]
+
+    # Batch containing initialize is rejected
+    batch_with_init = [
+        {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+        {"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {
+            "protocolVersion": "2025-03-26", "capabilities": {},
+            "clientInfo": {"name": "c", "version": "1"}
+        }},
+    ]
+    resp_init = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp"}, json=batch_with_init)
+    assert resp_init.status_code == 200
+    init_results = resp_init.json()
+    assert init_results[0] == {"jsonrpc": "2.0", "id": 1, "result": {}}
+    assert init_results[1]["error"]["code"] == -32600
+    assert "cannot be part of a batch" in init_results[1]["error"]["message"]
 
     # Batch with mixed notifications and requests
     batch_mixed = [
@@ -389,3 +422,211 @@ def test_missing_credentials_do_not_consume_weight_or_mask_ban(client, monkeypat
 def test_concurrency_cap():
     limiter = service.RateLimiter(max_concurrency=2)
     assert limiter.semaphore._value == 2
+
+
+def test_queued_request_rechecks_ban_before_calling_binance(monkeypatch):
+    async def run_test():
+        service.rate_limiter.reset()
+        service.rate_limiter.semaphore = asyncio.Semaphore(1)
+        binance_calls = 0
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def handler(_request):
+            nonlocal binance_calls
+            binance_calls += 1
+            entered.set()
+            await release.wait()
+            return httpx.Response(418, headers={"Retry-After": "120"}, text="banned")
+
+        original = getattr(service.httpx.AsyncClient, "_original", service.httpx.AsyncClient)
+
+        def make_client(**kwargs):
+            assert kwargs.get("trust_env") is False and kwargs.get("follow_redirects") is False
+
+            class Transport(httpx.AsyncBaseTransport):
+                async def handle_async_request(self, request):
+                    return await handler(request)
+
+            return original(transport=Transport(), **kwargs)
+
+        make_client._original = original
+        monkeypatch.setattr(service.httpx, "AsyncClient", make_client)
+
+        first = asyncio.create_task(service.call_tool("price", {"symbol": "BTCUSDT"}))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        second = asyncio.create_task(service.call_tool("price", {"symbol": "BTCUSDT"}))
+        queued = False
+        for _ in range(100):
+            if service.rate_limiter.semaphore._waiters:
+                queued = True
+                break
+            await asyncio.sleep(0)
+        assert queued, "second request never queued on the concurrency semaphore"
+        release.set()
+        result1, result2 = await asyncio.gather(first, second)
+        assert binance_calls == 1
+        assert result1["code"] == "IP_BANNED"
+        assert result2["code"] == "IP_BANNED"
+        assert len(service.rate_limiter.history) == 1
+
+    try:
+        asyncio.run(run_test())
+    finally:
+        service.rate_limiter.reset()
+
+
+def test_initialize_requires_protocol_capabilities_clientinfo(client):
+    valid_params = {
+        "protocolVersion": "2025-03-26",
+        "capabilities": {},
+        "clientInfo": {"name": "test-client", "version": "1.0.0"}
+    }
+    # Success with all required fields
+    ok_resp = rpc(client, "initialize", valid_params).json()
+    assert ok_resp["result"]["serverInfo"]["name"] == "binance-mcp"
+
+    # Missing, null, or non-object params. rpc() cannot send these because it substitutes {}.
+    headers = {"Authorization": "Bearer synthetic-mcp"}
+    for payload in (
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": None},
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": []},
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-03-26", "capabilities": [], "clientInfo": {"name": "c", "version": "1"}
+        }},
+    ):
+        resp = client.post("/mcp", headers=headers, json=payload).json()
+        assert resp["error"]["code"] == -32602
+
+    # Missing protocolVersion
+    bad1 = {"capabilities": {}, "clientInfo": {"name": "c", "version": "1"}}
+    assert rpc(client, "initialize", bad1).json()["error"]["code"] == -32602
+
+    # Missing capabilities
+    bad2 = {"protocolVersion": "2025-03-26", "clientInfo": {"name": "c", "version": "1"}}
+    assert rpc(client, "initialize", bad2).json()["error"]["code"] == -32602
+
+    # Missing clientInfo or clientInfo fields
+    bad3 = {"protocolVersion": "2025-03-26", "capabilities": {}}
+    assert rpc(client, "initialize", bad3).json()["error"]["code"] == -32602
+
+    bad4 = {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "c"}}
+    assert rpc(client, "initialize", bad4).json()["error"]["code"] == -32602
+
+
+def test_jsonrpc_id_type_validation(client):
+    # Invalid id types: array, object, bool, float
+    headers = {"Authorization": "Bearer synthetic-mcp"}
+    invalid_ids = [[1, 2], {"key": "val"}, True, False, 3.14, 1.0]
+    for bad_id in invalid_ids:
+        resp = client.post("/mcp", headers=headers,
+                           json={"jsonrpc": "2.0", "id": bad_id, "method": "ping"}).json()
+        assert resp["error"]["code"] == -32600
+        assert resp["id"] is None
+
+    # Valid id types: int, string, None (explicit null in JSON)
+    for good_id in [0, 1, -1, 42, "req-xyz", None]:
+        resp = client.post("/mcp", headers=headers,
+                           json={"jsonrpc": "2.0", "id": good_id, "method": "ping"}).json()
+        assert resp["result"] == {}
+        assert resp["id"] == good_id
+
+    batch = client.post("/mcp", headers=headers, json=[
+        {"jsonrpc": "2.0", "id": {"bad": True}, "method": "ping"},
+        {"jsonrpc": "2.0", "id": "ok", "method": "ping"},
+    ]).json()
+    assert batch[0]["error"]["code"] == -32600 and batch[0]["id"] is None
+    assert "bad" not in json.dumps(batch[0])
+    assert batch[1] == {"jsonrpc": "2.0", "id": "ok", "result": {}}
+
+
+def _asgi_post(headers, body: bytes, read_flag=None):
+    status = {}
+
+    async def receive():
+        if read_flag is not None:
+            read_flag["called"] = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            status["code"] = message["status"]
+        elif message["type"] == "http.response.body":
+            status.setdefault("body", bytearray()).extend(message.get("body", b""))
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/mcp",
+        "raw_path": b"/mcp",
+        "query_string": b"",
+        "headers": headers,
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+        "root_path": "",
+    }
+
+    async def run():
+        await service.app(scope, receive, send)
+
+    asyncio.run(run())
+    return status["code"], bytes(status.get("body", b""))
+
+
+def test_body_size_and_batch_limits(client, monkeypatch):
+    headers = {"Authorization": "Bearer synthetic-mcp"}
+
+    monkeypatch.setenv("BINANCE_MCP_MAX_BODY_BYTES", "100")
+    assert client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 200
+
+    # Content-Length exceeds limit -> 413
+    large_payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping", "pad": "x" * 200})
+    resp_cl = client.post("/mcp", headers={**headers, "Content-Length": str(len(large_payload))},
+                          content=large_payload)
+    assert resp_cl.status_code == 413
+
+    # Declared Content-Length is over the limit even when the buffered body is tiny, and the body is not read.
+    read_flag = {"called": False}
+    code, _ = _asgi_post(
+        [(b"authorization", b"Bearer synthetic-mcp"), (b"content-type", b"application/json"), (b"content-length", b"5000")],
+        b"{}",
+        read_flag,
+    )
+    assert code == 413 and read_flag["called"] is False
+
+    # Invalid Content-Length is rejected before parsing.
+    bad_len, _ = _asgi_post(
+        [(b"authorization", b"Bearer synthetic-mcp"), (b"content-length", b"-1")],
+        b"{}",
+    )
+    assert bad_len == 400
+
+    # Streaming body exceeds limit without Content-Length -> 413
+    code, _ = _asgi_post(
+        [(b"authorization", b"Bearer synthetic-mcp"), (b"content-type", b"application/json")],
+        large_payload.encode(),
+    )
+    assert code == 413
+    def chunked():
+        yield large_payload.encode()
+    resp_stream = client.post("/mcp", headers=headers, content=chunked())
+    assert resp_stream.status_code == 413
+
+    # Batch count exceeds limit -> -32600; a batch at the limit still succeeds.
+    monkeypatch.setenv("BINANCE_MCP_MAX_BODY_BYTES", "1000000")
+    monkeypatch.setenv("BINANCE_MCP_MAX_BATCH_SIZE", "3")
+    exact_batch = [{"jsonrpc": "2.0", "id": i, "method": "ping"} for i in range(3)]
+    exact = client.post("/mcp", headers=headers, json=exact_batch)
+    assert exact.status_code == 200 and len(exact.json()) == 3
+    large_batch = [{"jsonrpc": "2.0", "id": i, "method": "ping"} for i in range(4)]
+    resp_batch = client.post("/mcp", headers=headers, json=large_batch)
+    assert resp_batch.status_code == 200
+    batch_err = resp_batch.json()
+    assert isinstance(batch_err, dict)
+    assert batch_err["error"]["code"] == -32600
+    assert "Batch size exceeds limit" in batch_err["error"]["message"]
+
