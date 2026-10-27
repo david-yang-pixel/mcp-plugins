@@ -228,7 +228,7 @@ def test_jsonrpc_batch_and_notifications(client):
     assert results[0] == {"jsonrpc": "2.0", "id": 1, "result": {}}
     assert "tools" in results[1]["result"]
 
-    # Batch containing initialize is rejected
+    # Batch containing initialize is rejected entirely without executing any entry
     batch_with_init = [
         {"jsonrpc": "2.0", "id": 1, "method": "ping"},
         {"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {
@@ -239,9 +239,9 @@ def test_jsonrpc_batch_and_notifications(client):
     resp_init = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp"}, json=batch_with_init)
     assert resp_init.status_code == 200
     init_results = resp_init.json()
-    assert init_results[0] == {"jsonrpc": "2.0", "id": 1, "result": {}}
-    assert init_results[1]["error"]["code"] == -32600
-    assert "cannot be part of a batch" in init_results[1]["error"]["message"]
+    assert init_results["id"] is None
+    assert init_results["error"]["code"] == -32600
+    assert "cannot be part of a batch" in init_results["error"]["message"]
 
     # Batch with mixed notifications and requests
     batch_mixed = [
@@ -476,6 +476,144 @@ def test_queued_request_rechecks_ban_before_calling_binance(monkeypatch):
         service.rate_limiter.reset()
 
 
+def test_signed_request_generates_timestamp_after_queue_wait(monkeypatch):
+    async def run_test():
+        service.rate_limiter.reset()
+        service.rate_limiter.semaphore = asyncio.Semaphore(1)
+        monkeypatch.setenv("BINANCE_API_KEY", "test-api-key")
+        monkeypatch.setenv("BINANCE_API_SECRET", "test-api-secret")
+
+        first_entered = asyncio.Event()
+        release_first = asyncio.Event()
+        captured_requests = []
+
+        # Virtual clock starting at 1000.0s
+        simulated_time = 1000.0
+
+        def fake_time():
+            return simulated_time
+
+        monkeypatch.setattr(service.time, "time", fake_time)
+
+        async def handler(request):
+            if "api/v3/ticker/price" in str(request.url):
+                first_entered.set()
+                await release_first.wait()
+                return httpx.Response(200, json={"symbol": "BTCUSDT", "price": "50000"})
+            captured_requests.append(request)
+            return httpx.Response(200, json={"makerCommission": 15, "takerCommission": 15})
+
+        original = getattr(service.httpx.AsyncClient, "_original", service.httpx.AsyncClient)
+
+        def make_client(**kwargs):
+            class Transport(httpx.AsyncBaseTransport):
+                async def handle_async_request(self, request):
+                    return await handler(request)
+
+            return original(transport=Transport(), **kwargs)
+
+        make_client._original = original
+        monkeypatch.setattr(service.httpx, "AsyncClient", make_client)
+
+        # First request acquires slot
+        first_task = asyncio.create_task(service.call_tool("price", {"symbol": "BTCUSDT"}))
+        await asyncio.wait_for(first_entered.wait(), timeout=2)
+
+        # Second task starts while semaphore is locked, queues for > 5 seconds (simulated 10s delay)
+        second_task = asyncio.create_task(service.call_tool("account", {}))
+
+        queued = False
+        for _ in range(100):
+            if service.rate_limiter.semaphore._waiters:
+                queued = True
+                break
+            await asyncio.sleep(0)
+        assert queued, "second request never queued on the concurrency semaphore"
+
+        # Advance time by 10 seconds while queued (> recvWindow of 5000ms)
+        simulated_time = 1010.0
+
+        release_first.set()
+        res1, res2 = await asyncio.gather(first_task, second_task)
+        assert res1["success"] is True
+        assert res2["success"] is True
+
+        assert len(captured_requests) == 1
+        signed_req = captured_requests[0]
+        params = parse_qs(signed_req.url.query.decode("ascii"))
+        ts = int(params["timestamp"][0])
+        # Timestamp must be generated after queue wait, reflecting the new time 1010.0 * 1000
+        assert ts == 1010000
+        assert int(params["recvWindow"][0]) == 5000
+
+        # Signature must match the query containing timestamp=1010000
+        expected_query = f"timestamp={ts}&recvWindow=5000"
+        expected_sig = hmac.new(b"test-api-secret", expected_query.encode(), hashlib.sha256).hexdigest()
+        assert params["signature"][0] == expected_sig
+
+    try:
+        asyncio.run(run_test())
+    finally:
+        service.rate_limiter.reset()
+
+
+def test_batch_with_initialize_rejects_without_executing_sibling_tools(client, monkeypatch):
+    called = False
+
+    def fake_handler(_request):
+        nonlocal called
+        called = True
+        return httpx.Response(200, json={"symbol": "BTCUSDT", "price": "100"})
+
+    mock_binance(monkeypatch, fake_handler)
+
+    batch = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-03-26", "capabilities": {},
+            "clientInfo": {"name": "c", "version": "1"}
+        }},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "price", "arguments": {"symbol": "BTCUSDT"}
+        }}
+    ]
+    resp = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp"}, json=batch)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert isinstance(data, dict)
+    assert data["id"] is None
+    assert data["error"]["code"] == -32600
+    assert "cannot be part of a batch" in data["error"]["message"]
+    assert not called, "Sibling tools/call in batch containing initialize must not be executed"
+
+
+def test_ping_tools_list_reject_non_object_array_params(client):
+    headers = {"Authorization": "Bearer synthetic-mcp"}
+    # Non-object, non-array params should be rejected with -32602
+    for bad_params in [7, "invalid", True, False, 3.14]:
+        for method in ["ping", "tools/list", "unknown_method"]:
+            resp = client.post("/mcp", headers=headers, json={
+                "jsonrpc": "2.0", "id": 1, "method": method, "params": bad_params
+            }).json()
+            assert resp["error"]["code"] == -32602
+            assert resp["id"] == 1
+
+    # Valid params: dict, array (or omitted)
+    resp_ping_dict = client.post("/mcp", headers=headers, json={
+        "jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}
+    }).json()
+    assert resp_ping_dict["result"] == {}
+
+    resp_ping_list = client.post("/mcp", headers=headers, json={
+        "jsonrpc": "2.0", "id": 3, "method": "ping", "params": []
+    }).json()
+    assert resp_ping_list["result"] == {}
+
+    resp_tools_dict = client.post("/mcp", headers=headers, json={
+        "jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {}
+    }).json()
+    assert "tools" in resp_tools_dict["result"]
+
+
 def test_initialize_requires_protocol_capabilities_clientinfo(client):
     valid_params = {
         "protocolVersion": "2025-03-26",
@@ -516,17 +654,17 @@ def test_initialize_requires_protocol_capabilities_clientinfo(client):
 
 
 def test_jsonrpc_id_type_validation(client):
-    # Invalid id types: array, object, bool, float
+    # Invalid id types: array, object, bool, float, None (null)
     headers = {"Authorization": "Bearer synthetic-mcp"}
-    invalid_ids = [[1, 2], {"key": "val"}, True, False, 3.14, 1.0]
+    invalid_ids = [[1, 2], {"key": "val"}, True, False, 3.14, 1.0, None]
     for bad_id in invalid_ids:
         resp = client.post("/mcp", headers=headers,
                            json={"jsonrpc": "2.0", "id": bad_id, "method": "ping"}).json()
         assert resp["error"]["code"] == -32600
         assert resp["id"] is None
 
-    # Valid id types: int, string, None (explicit null in JSON)
-    for good_id in [0, 1, -1, 42, "req-xyz", None]:
+    # Valid id types: int, string
+    for good_id in [0, 1, -1, 42, "req-xyz"]:
         resp = client.post("/mcp", headers=headers,
                            json={"jsonrpc": "2.0", "id": good_id, "method": "ping"}).json()
         assert resp["result"] == {}

@@ -285,21 +285,22 @@ async def call_tool(name, arguments):
 
     headers = {}
     signature = ""
-    if signed:
-        params["timestamp"] = int(time.time() * 1000)
-        params["recvWindow"] = 5000
-        query = urlencode(params)
-        signature = hmac.new(api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
-        query += "&signature=" + signature
-        headers["X-MBX-APIKEY"] = api_key
-    else:
-        query = urlencode(params)
     try:
         # Disable environment proxy configuration and redirects to keep credentials on the official origin.
         async with rate_limiter.semaphore:
             admit_error = await rate_limiter.acquire_admission(weight)
             if admit_error:
                 return admit_error
+            call_params = dict(params)
+            if signed:
+                call_params["timestamp"] = int(time.time() * 1000)
+                call_params["recvWindow"] = 5000
+                query = urlencode(call_params)
+                signature = hmac.new(api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+                query += "&signature=" + signature
+                headers["X-MBX-APIKEY"] = api_key
+            else:
+                query = urlencode(call_params)
             async with httpx.AsyncClient(timeout=10, follow_redirects=False, trust_env=False) as client:
                 async with client.stream("GET", BASE_URL + path + ("?" + query if query else ""), headers=headers) as response:
                     if response.status_code in (418, 429):
@@ -350,7 +351,7 @@ def get_max_batch_size() -> int:
 
 
 def is_valid_rpc_id(val: Any) -> bool:
-    return val is None or (isinstance(val, (str, int)) and not isinstance(val, bool))
+    return isinstance(val, (str, int)) and not isinstance(val, bool)
 
 
 app = FastAPI(title="binance-mcp", docs_url=None, redoc_url=None, openapi_url=None)
@@ -367,7 +368,7 @@ async def process_rpc_item(item: Any, is_batch: bool = False) -> tuple[bool, dic
     if "id" in item:
         raw_id = item["id"]
         if not is_valid_rpc_id(raw_id):
-            return (False, rpc_error(None, -32600, "Invalid request id: id must be a string, integer, or null"))
+            return (False, rpc_error(None, -32600, "Invalid request id: id must be a string or integer"))
         request_id = raw_id
         is_notification = False
     else:
@@ -379,6 +380,9 @@ async def process_rpc_item(item: Any, is_batch: bool = False) -> tuple[bool, dic
 
     if is_notification:
         return (True, None)
+
+    if "params" in item and not isinstance(item["params"], (dict, list)):
+        return (False, rpc_error(request_id, -32602, "Invalid params: params must be an object or array"))
 
     method = item["method"]
 
@@ -458,6 +462,8 @@ async def mcp(request: Request, authorization: str | None = Header(default=None)
             return rpc_error(None, -32600, "Invalid request")
         if len(body) > max_batch:
             return rpc_error(None, -32600, f"Batch size exceeds limit of {max_batch}")
+        if any(isinstance(item, dict) and item.get("method") == "initialize" for item in body):
+            return rpc_error(None, -32600, "initialize cannot be part of a batch request")
         responses = []
         for item in body:
             is_notif, resp = await process_rpc_item(item, is_batch=True)
