@@ -64,7 +64,8 @@ def test_public_works_without_credentials_and_accounts_fail(client, monkeypatch)
         return httpx.Response(200, json={"symbol": "BTCUSDT", "price": "42"})
     mock_binance(monkeypatch, handler)
     assert call(client, "price", {"symbol": "BTCUSDT"})["structuredContent"]["data"]["price"] == "42"
-    for tool, args in [("account", {}), ("open_orders", {"symbol": "BTCUSDT"}), ("all_orders", {"symbol": "BTCUSDT"})]:
+    for tool, args in [("account", {}), ("open_orders", {"symbol": "BTCUSDT"}), ("all_orders", {"symbol": "BTCUSDT"}),
+                       ("wallet_balance", {}), ("funding_assets", {})]:
         result = call(client, tool, args)
         assert result["isError"] and result["structuredContent"]["code"] == "CREDENTIALS_MISSING"
     assert len(requests) == 1 and "X-MBX-APIKEY" not in requests[0].headers
@@ -72,29 +73,31 @@ def test_public_works_without_credentials_and_accounts_fail(client, monkeypatch)
     assert call(client, "account")["structuredContent"]["code"] == "CREDENTIALS_MISSING"
 
 
-@pytest.mark.parametrize("name,args,path,signed", [
-    ("exchange_info", {"symbol": "BTCUSDT"}, "/api/v3/exchangeInfo", False),
-    ("price", {"symbol": "BTCUSDT"}, "/api/v3/ticker/price", False),
-    ("ticker_24h", {"symbol": "BTCUSDT"}, "/api/v3/ticker/24hr", False),
-    ("depth", {"symbol": "BTCUSDT", "limit": 5000}, "/api/v3/depth", False),
-    ("klines", {"symbol": "BTCUSDT", "interval": "1M", "limit": 1000}, "/api/v3/klines", False),
-    ("account", {}, "/api/v3/account", True),
-    ("open_orders", {"symbol": "BTCUSDT"}, "/api/v3/openOrders", True),
-    ("all_orders", {"symbol": "BTCUSDT", "limit": 1000}, "/api/v3/allOrders", True),
+@pytest.mark.parametrize("name,args,path,signed,method", [
+    ("exchange_info", {"symbol": "BTCUSDT"}, "/api/v3/exchangeInfo", False, "GET"),
+    ("price", {"symbol": "BTCUSDT"}, "/api/v3/ticker/price", False, "GET"),
+    ("ticker_24h", {"symbol": "BTCUSDT"}, "/api/v3/ticker/24hr", False, "GET"),
+    ("depth", {"symbol": "BTCUSDT", "limit": 5000}, "/api/v3/depth", False, "GET"),
+    ("klines", {"symbol": "BTCUSDT", "interval": "1M", "limit": 1000}, "/api/v3/klines", False, "GET"),
+    ("account", {}, "/api/v3/account", True, "GET"),
+    ("open_orders", {"symbol": "BTCUSDT"}, "/api/v3/openOrders", True, "GET"),
+    ("all_orders", {"symbol": "BTCUSDT", "limit": 1000}, "/api/v3/allOrders", True, "GET"),
+    ("wallet_balance", {"quoteAsset": "BTC"}, "/sapi/v1/asset/wallet/balance", True, "GET"),
+    ("funding_assets", {"asset": "USDT"}, "/sapi/v1/asset/get-funding-asset", True, "POST"),
 ])
-def test_all_endpoints_are_get_and_signature(client, monkeypatch, name, args, path, signed):
+def test_endpoints_methods_and_signature(client, monkeypatch, name, args, path, signed, method):
     monkeypatch.setenv("BINANCE_API_KEY", "synthetic-binance-key")
     monkeypatch.setenv("BINANCE_API_SECRET", "synthetic-binance-secret")
     monkeypatch.setattr(service.time, "time", lambda: 1700000000.123)
     def handler(req):
-        assert req.method == "GET" and req.url.host == "api.binance.com" and req.url.scheme == "https" and req.url.path == path
+        assert req.method == method and req.url.host == "api.binance.com" and req.url.scheme == "https" and req.url.path == path
         query = req.url.query.decode()
         if signed:
             raw, sig = query.rsplit("&signature=", 1)
             assert sig == hmac.new(b"synthetic-binance-secret", raw.encode(), hashlib.sha256).hexdigest()
             parsed = parse_qs(raw)
             assert parsed["timestamp"] == ["1700000000123"] and parsed["recvWindow"] == ["5000"]
-            assert req.headers["X-MBX-APIKEY"] == "synthetic-binance-key"
+            assert req.headers["X-MBX-APIKEY"] == "synthetic-binance-key" and req.content == b""
         else:
             assert "signature=" not in query and "X-MBX-APIKEY" not in req.headers
         return httpx.Response(200, json={"data": [1, 2]})
@@ -115,6 +118,10 @@ def test_all_endpoints_are_get_and_signature(client, monkeypatch, name, args, pa
     ("klines", {"symbol": "BTCUSDT", "interval": "1m", "limit": 1001}),
     ("all_orders", {"symbol": "BTCUSDT", "limit": "1"}),
     ("all_orders", {"symbol": "BTCUSDT", "limit": True}),
+    ("wallet_balance", {"quoteAsset": "usdt"}), ("wallet_balance", {"quoteAsset": ""}),
+    ("wallet_balance", {"quoteAsset": "USDT", "needBtcValuation": True}),
+    ("funding_assets", {"asset": "USD T"}), ("funding_assets", {"asset": 1}),
+    ("funding_assets", {"needBtcValuation": "true"}), ("funding_assets", {"needBtcValuation": 1}),
 ])
 def test_invalid_inputs_never_reach_network(client, monkeypatch, name, args):
     mock_binance(monkeypatch, lambda request: pytest.fail("unexpected network call"))
@@ -189,6 +196,34 @@ def test_success_status_with_error_body_returns_binance_code(client, monkeypatch
     payload = call(client, "price", {"symbol": "BTCUSDT"})["structuredContent"]
     assert payload == {"success": False, "code": "BINANCE_RESPONSE_ERROR",
                        "error": "Binance returned an error", "binance_code": -1121}
+
+
+@pytest.mark.parametrize("name,args,expected", [
+    ("wallet_balance", {}, {"quoteAsset": ["USDT"]}),
+    ("wallet_balance", {"quoteAsset": "EUR"}, {"quoteAsset": ["EUR"]}),
+    ("funding_assets", {}, {"needBtcValuation": ["true"]}),
+    ("funding_assets", {"asset": "MRVLB", "needBtcValuation": False}, {"asset": ["MRVLB"], "needBtcValuation": ["false"]}),
+    ("funding_assets", {"asset": "T"}, {"asset": ["T"], "needBtcValuation": ["true"]}),
+])
+def test_wallet_tool_query_parameters(client, monkeypatch, name, args, expected):
+    monkeypatch.setenv("BINANCE_API_KEY", "synthetic-binance-key")
+    monkeypatch.setenv("BINANCE_API_SECRET", "synthetic-binance-secret")
+    seen = []
+    def handler(req):
+        raw = req.url.query.decode().rsplit("&signature=", 1)[0]
+        seen.append({k: v for k, v in parse_qs(raw).items() if k not in ("timestamp", "recvWindow")})
+        return httpx.Response(200, json=[{"walletName": "Funding", "balance": "1"}])
+    mock_binance(monkeypatch, handler)
+    result = call(client, name, args)
+    assert not result["isError"] and seen == [expected]
+
+
+def test_wallet_tools_are_listed_read_only(client):
+    tools = {t["name"]: t for t in rpc(client, "tools/list").json()["result"]["tools"]}
+    for name in ("wallet_balance", "funding_assets"):
+        assert tools[name]["annotations"]["readOnlyHint"] and not tools[name]["annotations"]["destructiveHint"]
+    assert service.get_tool_weight("wallet_balance", {}) == 60
+    assert service.get_tool_weight("funding_assets", {}) == 1
 
 
 def test_httpcore_wire_loggers_are_disabled():
