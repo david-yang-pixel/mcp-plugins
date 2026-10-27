@@ -156,6 +156,41 @@ def test_errors_do_not_leak_credentials_or_signed_url(client, monkeypatch, caplo
     assert "signature=" not in output and captured[0] not in output
 
 
+@pytest.mark.parametrize("status,body,code,hint", [
+    (400, {"code": -1021, "msg": "synthetic-binance-key Timestamp outside recvWindow"}, -1021, "server clock"),
+    (401, {"code": -2015, "msg": "Invalid API-key, IP, or permissions for action."}, -2015, "IP allowlist"),
+    (400, {"code": -1100, "msg": "Illegal characters"}, -1100, None),
+    (451, None, None, "this server's location"),
+    (400, {"code": "-1021", "msg": "x"}, None, None),
+    (400, {"code": True, "msg": "x"}, None, None),
+    (400, [{"code": -1021}], None, None),
+])
+def test_http_errors_return_binance_code_without_message(client, monkeypatch, status, body, code, hint):
+    monkeypatch.setenv("BINANCE_API_KEY", "synthetic-binance-key")
+    monkeypatch.setenv("BINANCE_API_SECRET", "synthetic-binance-secret")
+    mock_binance(monkeypatch, lambda req: httpx.Response(status, json=body) if body is not None else httpx.Response(status))
+    payload = call(client, "account")["structuredContent"]
+    assert payload["success"] is False and payload["code"] == "BINANCE_HTTP_ERROR"
+    assert payload["http_status"] == status and payload.get("binance_code") == code
+    assert (hint in payload["error"]) if hint else (":" not in payload["error"])
+    assert "msg" not in payload and "synthetic-binance-key" not in json.dumps(payload)
+    assert "Timestamp outside" not in json.dumps(payload) and "Illegal" not in json.dumps(payload)
+
+
+def test_oversized_error_body_is_not_parsed(client, monkeypatch):
+    body = json.dumps({"code": -1021, "pad": "x" * 70_000})
+    mock_binance(monkeypatch, lambda req: httpx.Response(400, text=body))
+    payload = call(client, "price", {"symbol": "BTCUSDT"})["structuredContent"]
+    assert payload["http_status"] == 400 and "binance_code" not in payload
+
+
+def test_success_status_with_error_body_returns_binance_code(client, monkeypatch):
+    mock_binance(monkeypatch, lambda req: httpx.Response(200, json={"code": -1121, "msg": "Invalid symbol."}))
+    payload = call(client, "price", {"symbol": "BTCUSDT"})["structuredContent"]
+    assert payload == {"success": False, "code": "BINANCE_RESPONSE_ERROR",
+                       "error": "Binance returned an error", "binance_code": -1121}
+
+
 def test_httpcore_wire_loggers_are_disabled():
     for name in ("httpx", "httpcore.http11", "httpcore.http2", "httpcore.connection", "httpcore.proxy", "httpcore.socks"):
         assert logging.getLogger(name).disabled

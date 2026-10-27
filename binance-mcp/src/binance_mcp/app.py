@@ -254,6 +254,43 @@ class RateLimiter:
 rate_limiter = RateLimiter()
 
 
+# Only Binance's numeric error code is returned; its msg text is never echoed.
+BINANCE_ERROR_HINTS = {
+    -1021: "request timestamp is outside recvWindow; check the server clock",
+    -1022: "signature rejected; check BINANCE_API_SECRET",
+    -2008: "API key rejected; check BINANCE_API_KEY",
+    -2014: "API key format rejected; check BINANCE_API_KEY",
+    -2015: "API key, IP allowlist, or permissions rejected",
+}
+HTTP_ERROR_HINTS = {
+    403: "request blocked by Binance WAF",
+    451: "Binance is unavailable from this server's location",
+}
+
+
+def binance_error_code(raw: bytes) -> int | None:
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeError, RecursionError):
+        return None
+    code = body.get("code") if isinstance(body, dict) else None
+    if isinstance(code, int) and not isinstance(code, bool) and -99999 <= code < 0:
+        return code
+    return None
+
+
+def binance_error(message: str, status: int | None, code: int | None) -> dict:
+    hint = BINANCE_ERROR_HINTS.get(code) or HTTP_ERROR_HINTS.get(status)
+    extra = {}
+    if status is not None:
+        extra["http_status"] = status
+    if code is not None:
+        extra["binance_code"] = code
+    if hint:
+        message += f": {hint}"
+    return error("BINANCE_HTTP_ERROR" if status is not None else "BINANCE_RESPONSE_ERROR", message, **extra)
+
+
 def contains_sensitive(value, secrets):
     if isinstance(value, str):
         return any(secret and secret in value for secret in secrets)
@@ -310,7 +347,14 @@ async def call_tool(name, arguments):
                             return error("IP_BANNED", "Binance IP ban triggered (HTTP 418)", retry_after=retry_after)
                         return error("RATE_LIMITED", "Binance rate limit exceeded (HTTP 429)", retry_after=retry_after)
                     if response.status_code != 200:
-                        return error("BINANCE_HTTP_ERROR", f"Binance request failed (HTTP {response.status_code})")
+                        raw = bytearray()
+                        async for chunk in response.aiter_bytes():
+                            raw.extend(chunk)
+                            if len(raw) > 64_000:
+                                break
+                        code = binance_error_code(raw) if len(raw) <= 64_000 else None
+                        return binance_error(f"Binance request failed (HTTP {response.status_code})",
+                                             response.status_code, code)
                     chunks = bytearray()
                     async for chunk in response.aiter_bytes():
                         chunks.extend(chunk)
@@ -320,7 +364,7 @@ async def call_tool(name, arguments):
         if not isinstance(data, (dict, list)) or contains_sensitive(data, (api_key, api_secret, signature)):
             return error("BINANCE_RESPONSE_ERROR", "Invalid Binance response")
         if isinstance(data, dict) and isinstance(data.get("code"), int) and data["code"] < 0:
-            return error("BINANCE_RESPONSE_ERROR", "Binance returned an error")
+            return binance_error("Binance returned an error", None, binance_error_code(chunks))
         return {"success": True, "data": data}
     except (httpx.HTTPError, ValueError, UnicodeError, RecursionError):
         return error("BINANCE_REQUEST_ERROR", "Binance request or response failed")
