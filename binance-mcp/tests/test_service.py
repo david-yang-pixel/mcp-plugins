@@ -13,6 +13,7 @@ from binance_mcp import app as service
 
 @pytest.fixture
 def client(monkeypatch):
+    service.rate_limiter.reset()
     monkeypatch.setenv("BINANCE_MCP_API_KEY", "synthetic-mcp")
     monkeypatch.delenv("BINANCE_API_KEY", raising=False)
     monkeypatch.delenv("BINANCE_API_SECRET", raising=False)
@@ -30,10 +31,11 @@ def call(client, name, arguments=None):
 
 
 def mock_binance(monkeypatch, handler):
-    original = httpx.AsyncClient
+    original = getattr(service.httpx.AsyncClient, "_original", service.httpx.AsyncClient)
     def make_client(**kwargs):
         assert kwargs["trust_env"] is False and kwargs["follow_redirects"] is False
         return original(transport=httpx.MockTransport(handler), **kwargs)
+    make_client._original = original
     monkeypatch.setattr(service.httpx, "AsyncClient", make_client)
 
 
@@ -119,7 +121,9 @@ def test_invalid_inputs_never_reach_network(client, monkeypatch, name, args):
 
 
 def test_unknown_tool_is_not_executable(client):
-    assert call(client, "place_order", {"symbol": "BTCUSDT"})["structuredContent"]["code"] == "UNKNOWN_TOOL"
+    response = rpc(client, "tools/call", {"name": "place_order", "arguments": {"symbol": "BTCUSDT"}}).json()
+    assert response["error"]["code"] == -32602
+    assert "Unknown tool" in response["error"]["message"]
 
 
 @pytest.mark.parametrize("kind", ["http", "network", "json", "echo", "redirect", "huge"])
@@ -152,3 +156,165 @@ def test_errors_do_not_leak_credentials_or_signed_url(client, monkeypatch, caplo
 def test_httpcore_wire_loggers_are_disabled():
     for name in ("httpx", "httpcore.http11", "httpcore.http2", "httpcore.connection", "httpcore.proxy", "httpcore.socks"):
         assert logging.getLogger(name).disabled
+
+
+def test_bearer_scheme_case_insensitive(client):
+    for header_val in ["Bearer synthetic-mcp", "bearer synthetic-mcp", "BEARER synthetic-mcp", "bEaReR synthetic-mcp"]:
+        resp = client.post("/mcp", headers={"Authorization": header_val}, json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        assert resp.status_code == 200 and resp.json()["result"] == {}
+    for header_val in ["Basic synthetic-mcp", "Token synthetic-mcp", "Bearer wrong-key", "Bearer"]:
+        resp = client.post("/mcp", headers={"Authorization": header_val}, json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        assert resp.status_code == 401
+
+
+def test_origin_validation_and_default_bind(client, monkeypatch):
+    # Allowed origins
+    for origin in ["https://zendesk.smlershou.top", "http://localhost:8124", "http://127.0.0.1:8124", "http://[::1]:8124"]:
+        resp = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp", "Origin": origin},
+                           json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        assert resp.status_code == 200
+    # Custom origin via env
+    monkeypatch.setenv("BINANCE_MCP_ALLOWED_ORIGINS", "https://custom.example.com")
+    resp = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp", "Origin": "https://custom.example.com"},
+                       json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    assert resp.status_code == 200
+    # Disallowed origins
+    for origin in ["https://attacker.example.com", "http://malicious.org", "null"]:
+        resp = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp", "Origin": origin},
+                           json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        assert resp.status_code == 403
+
+    # Default bind host in main is 127.0.0.1
+    calls = []
+    monkeypatch.delenv("BINANCE_MCP_HOST", raising=False)
+    monkeypatch.delenv("BINANCE_MCP_PORT", raising=False)
+    monkeypatch.setattr(service.uvicorn, "run", lambda app, host, port, access_log: calls.append((host, port)))
+    service.main()
+    assert calls == [("127.0.0.1", 8124)]
+
+
+def test_jsonrpc_batch_and_notifications(client):
+    # Batch with multiple calls
+    batch_req = [
+        {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+        {"jsonrpc": "2.0", "id": 2, "method": "initialize"},
+    ]
+    resp = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp"}, json=batch_req)
+    assert resp.status_code == 200
+    results = resp.json()
+    assert len(results) == 2
+    assert results[0] == {"jsonrpc": "2.0", "id": 1, "result": {}}
+    assert results[1]["result"]["serverInfo"]["name"] == "binance-mcp"
+
+    # Batch with mixed notifications and requests
+    batch_mixed = [
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 10, "method": "ping"},
+    ]
+    resp = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp"}, json=batch_mixed)
+    assert resp.status_code == 200
+    results = resp.json()
+    assert len(results) == 1
+    assert results[0] == {"jsonrpc": "2.0", "id": 10, "result": {}}
+
+    # Batch with only notifications -> 202
+    batch_notif = [
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "method": "notifications/progress"},
+    ]
+    resp = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp"}, json=batch_notif)
+    assert resp.status_code == 202
+
+    # Single notification -> 202
+    resp = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp"},
+                       json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+    assert resp.status_code == 202
+
+    # Batch with invalid items
+    batch_invalid = [
+        {"invalid": "item"},
+        {"jsonrpc": "2.0", "id": 99, "method": "ping"},
+    ]
+    resp = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp"}, json=batch_invalid)
+    assert resp.status_code == 200
+    results = resp.json()
+    assert len(results) == 2
+    assert results[0]["error"]["code"] == -32600
+    assert results[1]["result"] == {}
+
+
+def test_rate_limiting_retry_after_and_circuit_breaker(client, monkeypatch):
+    # Test 429 returns RATE_LIMITED and safe retry_after
+    calls = []
+    def handler_429(req):
+        calls.append(req)
+        return httpx.Response(429, headers={"Retry-After": "45"}, text="Too Many Requests")
+    mock_binance(monkeypatch, handler_429)
+
+    res = call(client, "price", {"symbol": "BTCUSDT"})
+    assert res["isError"]
+    assert res["structuredContent"]["code"] == "RATE_LIMITED"
+    assert res["structuredContent"]["retry_after"] == 45
+    assert len(calls) == 1
+
+    # While cooldown is active, subsequent requests return RATE_LIMITED without hitting network
+    res2 = call(client, "price", {"symbol": "BTCUSDT"})
+    assert res2["isError"]
+    assert res2["structuredContent"]["code"] == "RATE_LIMITED"
+    assert len(calls) == 1  # No new network call!
+
+    # Test 418 IP ban triggers circuit breaker without auto-retry
+    service.rate_limiter.reset()
+    calls.clear()
+    def handler_418(req):
+        calls.append(req)
+        return httpx.Response(418, headers={"Retry-After": "120"}, text="I'm a teapot (IP banned)")
+    mock_binance(monkeypatch, handler_418)
+
+    res_ban = call(client, "price", {"symbol": "BTCUSDT"})
+    assert res_ban["isError"]
+    assert res_ban["structuredContent"]["code"] == "IP_BANNED"
+    assert res_ban["structuredContent"]["retry_after"] == 120
+    assert len(calls) == 1
+
+    # Circuit breaker blocks subsequent requests immediately without contacting Binance
+    res_blocked = call(client, "price", {"symbol": "BTCUSDT"})
+    assert res_blocked["isError"]
+    assert res_blocked["structuredContent"]["code"] == "IP_BANNED"
+    assert len(calls) == 1  # Still 1! No network call.
+
+
+def test_request_weight_tracking_and_high_weight_limiting(client, monkeypatch):
+    service.rate_limiter.reset()
+    monkeypatch.setattr(service.rate_limiter, "_get_max_weight", lambda: 60)
+    calls = []
+    def handler(req):
+        calls.append(req)
+        return httpx.Response(200, json={"bids": [], "asks": []})
+    mock_binance(monkeypatch, handler)
+
+    # depth with limit=5000 has weight 50
+    res1 = call(client, "depth", {"symbol": "BTCUSDT", "limit": 5000})
+    assert not res1["isError"]
+    assert len(calls) == 1
+
+    # Another depth with limit=5000 needs 50 weight, but only 10 remains in budget (60 - 50 = 10)
+    res2 = call(client, "depth", {"symbol": "BTCUSDT", "limit": 5000})
+    assert res2["isError"]
+    assert res2["structuredContent"]["code"] == "RATE_LIMITED"
+    assert "rate limit reached" in res2["structuredContent"]["error"]
+    assert len(calls) == 1  # Blocked before network!
+
+    # But a lower weight request (e.g. price has weight 2) fits in the remaining 10 budget
+    def handler_price(req):
+        calls.append(req)
+        return httpx.Response(200, json={"symbol": "BTCUSDT", "price": "50000"})
+    mock_binance(monkeypatch, handler_price)
+    res3 = call(client, "price", {"symbol": "BTCUSDT"})
+    assert not res3["isError"]
+    assert len(calls) == 2
+
+
+def test_concurrency_cap():
+    limiter = service.RateLimiter(max_concurrency=2)
+    assert limiter.semaphore._value == 2
