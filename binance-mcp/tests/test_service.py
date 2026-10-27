@@ -323,6 +323,16 @@ def test_position_cost_without_trades(client, monkeypatch):
     assert data["unrealized_pnl"] == "0.00000000" and data["unrealized_pnl_pct"] is None
 
 
+def test_position_cost_truncates_lots_keeping_fifo_head(client, monkeypatch):
+    count = service.MAX_OPEN_LOTS + 50
+    mock_position(monkeypatch, [[trade(i, True, "1", str(i + 1), "0", "USDT", 1789436098000 + i * 1000) for i in range(count)]])
+    data = call(client, "position_cost", {"symbol": "MRVLBUSDT"})["structuredContent"]["data"]
+    assert data["open_lots_truncated"] is True and len(data["open_lots"]) == service.MAX_OPEN_LOTS
+    assert data["open_lots"][0]["unit_cost"] == "1.00000000"
+    assert data["open_lots"][-1]["unit_cost"] == f"{service.MAX_OPEN_LOTS}.00000000"
+    assert data["open_quantity"] == f"{count}.00000000"
+
+
 def test_position_cost_stops_at_page_limit(client, monkeypatch):
     pages = [[trade(p * 1000 + i, True, "1", "1", "0", "USDT") for i in range(1000)] for p in range(service.MAX_TRADE_PAGES)]
     requests = []

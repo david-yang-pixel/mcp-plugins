@@ -506,7 +506,8 @@ async def position_cost(symbol: str) -> dict:
         "realized_pnl": _num(position["realized_pnl"]),
         "unmatched_sell_quantity": _num(position["unmatched_sell_quantity"]),
         "fees_in_other_assets": position["fees_in_other_assets"],
-        "open_lots": lots[-MAX_OPEN_LOTS:], "open_lots_truncated": len(lots) > MAX_OPEN_LOTS,
+        # Oldest first: the FIFO head is what the next sell consumes.
+        "open_lots": lots[:MAX_OPEN_LOTS], "open_lots_truncated": len(lots) > MAX_OPEN_LOTS,
         "current_price": None, "market_value": None, "unrealized_pnl": None, "unrealized_pnl_pct": None,
         "note": ("Only trades on this pair are counted: transfers between wallets, Convert, and dust "
                  "conversion are not, so open_quantity can differ from wallet balances."),
