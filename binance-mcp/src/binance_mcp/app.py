@@ -68,29 +68,24 @@ TOOLS = {
 }
 
 
-DEFAULT_ALLOWED_HOSTS = {
-    "zendesk.smlershou.top",
-    "127.0.0.1",
-    "localhost",
-    "[::1]",
-    "::1",
-}
+PUBLIC_ORIGIN_HOST = "zendesk.smlershou.top"
+LOCAL_ORIGIN_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 def is_allowed_origin(origin: str) -> bool:
     custom_origins = os.environ.get("BINANCE_MCP_ALLOWED_ORIGINS")
     if custom_origins:
-        allowed = {o.strip() for o in custom_origins.split(",") if o.strip()}
+        allowed = {item.strip() for item in custom_origins.split(",") if item.strip()}
         if origin in allowed:
             return True
     try:
         parsed = urlsplit(origin)
     except Exception:
         return False
-    if parsed.scheme in ("http", "https"):
-        if parsed.hostname in DEFAULT_ALLOWED_HOSTS:
-            return True
-    return False
+    host = parsed.hostname
+    if parsed.scheme == "https" and host == PUBLIC_ORIGIN_HOST:
+        return True
+    return parsed.scheme in ("http", "https") and host in LOCAL_ORIGIN_HOSTS
 
 
 def tool_list():
@@ -106,15 +101,16 @@ def error(code, message, **extra):
 
 
 def get_tool_weight(name: str, params: dict) -> int:
+    # Spot REQUEST_WEIGHT. depth follows the documented brackets, including 250 for limit 5000.
     if name == "depth":
         limit = params.get("limit", 100)
-        if limit == 5000:
-            return 50
-        if limit > 500:
+        if limit <= 100:
+            return 5
+        if limit <= 500:
             return 25
-        if limit > 100:
-            return 10
-        return 5
+        if limit <= 1000:
+            return 50
+        return 250
     weights = {
         "exchange_info": 20,
         "price": 2,
@@ -127,16 +123,23 @@ def get_tool_weight(name: str, params: dict) -> int:
     return weights.get(name, 1)
 
 
+# Binance IP bans last from 2 minutes up to 3 days. Retry-After is a delta in seconds.
+MAX_RETRY_AFTER = 3 * 24 * 60 * 60
+
+
 def parse_retry_after(header_val: str | None, default: int = 60) -> int:
     if not header_val:
         return default
+    token = header_val.strip()
+    if len(token) > 16:
+        return default
     try:
-        val = int(header_val.strip())
-        if 1 <= val <= 86400:
-            return val
+        val = int(token)
     except (ValueError, TypeError):
-        pass
-    return default
+        return default
+    if val < 1:
+        return default
+    return min(val, MAX_RETRY_AFTER)
 
 
 class RateLimiter:
@@ -191,8 +194,11 @@ class RateLimiter:
 
     def record_cooldown(self, status_code: int, retry_after: int):
         now = time.time()
-        self.circuit_break_until = now + retry_after
-        self.is_banned = (status_code == 418)
+        until = now + retry_after
+        ban_active = self.is_banned and now < self.circuit_break_until
+        self.is_banned = status_code == 418 or ban_active
+        if until > self.circuit_break_until:
+            self.circuit_break_until = until
 
 
 rate_limiter = RateLimiter()
@@ -216,6 +222,10 @@ async def call_tool(name, arguments):
         params = model.model_validate(arguments).model_dump()
     except ValidationError:
         return error("BAD_ARGUMENTS", "Invalid tool arguments; see the tool input schema")
+    api_key = os.environ.get("BINANCE_API_KEY", "")
+    api_secret = os.environ.get("BINANCE_API_SECRET", "")
+    if signed and (not api_key or not api_secret):
+        return error("CREDENTIALS_MISSING", "Binance API key and secret are required for account tools")
 
     cb_error = await rate_limiter.check_circuit_breaker()
     if cb_error:
@@ -226,10 +236,6 @@ async def call_tool(name, arguments):
     if weight_error:
         return weight_error
 
-    api_key = os.environ.get("BINANCE_API_KEY", "")
-    api_secret = os.environ.get("BINANCE_API_SECRET", "")
-    if signed and (not api_key or not api_secret):
-        return error("CREDENTIALS_MISSING", "Binance API key and secret are required for account tools")
     headers = {}
     signature = ""
     if signed:

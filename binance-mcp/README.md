@@ -26,6 +26,6 @@ uv run --locked binance-mcp
 uv run --locked pytest -q
 ```
 
-`BINANCE_MCP_API_KEY` 为必需的 MCP Bearer 鉴权密钥；`BINANCE_API_KEY` 和 `BINANCE_API_SECRET` 均可选，但账户工具要求二者同时存在，不配置时公开行情仍可用。建议使用仅具读取权限、禁用交易和提现且有 IP 限制的 Binance API key，切勿提交凭据。`.env.example` 仅作变量说明，服务不会自动加载该文件。服务默认监听 `0.0.0.0:8124`，可用 `BINANCE_MCP_HOST` / `BINANCE_MCP_PORT` 调整；`GET /health` 返回 JSON，`POST /mcp` 使用 `Authorization: Bearer <MCP密钥>`。应在可信环境或 HTTPS 反向代理后使用；MCP 认证密钥不同于 Binance 凭据。
+`BINANCE_MCP_API_KEY` 为必需的 MCP Bearer 鉴权密钥；`BINANCE_API_KEY` 和 `BINANCE_API_SECRET` 均可选，但账户工具要求二者同时存在，不配置时公开行情仍可用。建议使用仅具读取权限、禁用交易和提现且有 IP 限制的 Binance API key，切勿提交凭据。`.env.example` 仅作变量说明，服务不会自动加载该文件。本地默认监听 `127.0.0.1:8124`（容器与 `deploy/runtime.json` 显式设置 `BINANCE_MCP_HOST=0.0.0.0`），可用 `BINANCE_MCP_HOST` / `BINANCE_MCP_PORT` 调整；`GET /health` 返回 JSON，`POST /mcp` 使用 `Authorization: Bearer <MCP密钥>`。应在可信环境或 HTTPS 反向代理后使用；MCP 认证密钥不同于 Binance 凭据。
 
 `deploy/runtime.json` 按仓库契约声明必需 MCP Secret 和两个可选 Binance Secret，固定容器端口 8124、主机端口自动分配。容器冒烟测试只需合成 MCP 密钥，不需 Binance 凭据或联网查询行情。此目录仅供本地开发，不代表已配置 Secrets 或部署。

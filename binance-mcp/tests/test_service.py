@@ -169,7 +169,10 @@ def test_bearer_scheme_case_insensitive(client):
 
 def test_origin_validation_and_default_bind(client, monkeypatch):
     # Allowed origins
-    for origin in ["https://zendesk.smlershou.top", "http://localhost:8124", "http://127.0.0.1:8124", "http://[::1]:8124"]:
+    resp = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp"},
+                       json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    assert resp.status_code == 200
+    for origin in ["https://zendesk.smlershou.top", "http://localhost:8124", "https://127.0.0.1:8124", "http://[::1]:8124"]:
         resp = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp", "Origin": origin},
                            json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
         assert resp.status_code == 200
@@ -179,7 +182,8 @@ def test_origin_validation_and_default_bind(client, monkeypatch):
                        json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
     assert resp.status_code == 200
     # Disallowed origins
-    for origin in ["https://attacker.example.com", "http://malicious.org", "null"]:
+    for origin in ["https://attacker.example.com", "http://malicious.org", "null",
+                   "http://zendesk.smlershou.top", "https://zendesk.smlershou.top.evil.com"]:
         resp = client.post("/mcp", headers={"Authorization": "Bearer synthetic-mcp", "Origin": origin},
                            json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
         assert resp.status_code == 403
@@ -285,27 +289,31 @@ def test_rate_limiting_retry_after_and_circuit_breaker(client, monkeypatch):
 
 
 def test_request_weight_tracking_and_high_weight_limiting(client, monkeypatch):
+    assert service.get_tool_weight("depth", {"limit": 100}) == 5
+    assert service.get_tool_weight("depth", {"limit": 500}) == 25
+    assert service.get_tool_weight("depth", {"limit": 1000}) == 50
+    assert service.get_tool_weight("depth", {"limit": 5000}) == 250
     service.rate_limiter.reset()
-    monkeypatch.setattr(service.rate_limiter, "_get_max_weight", lambda: 60)
+    monkeypatch.setattr(service.rate_limiter, "_get_max_weight", lambda: 300)
     calls = []
     def handler(req):
         calls.append(req)
         return httpx.Response(200, json={"bids": [], "asks": []})
     mock_binance(monkeypatch, handler)
 
-    # depth with limit=5000 has weight 50
+    # depth limit=5000 weighs 250, so one call fits in a 300 budget.
     res1 = call(client, "depth", {"symbol": "BTCUSDT", "limit": 5000})
     assert not res1["isError"]
     assert len(calls) == 1
 
-    # Another depth with limit=5000 needs 50 weight, but only 10 remains in budget (60 - 50 = 10)
+    # A second depth call needs another 250, and only 50 remains.
     res2 = call(client, "depth", {"symbol": "BTCUSDT", "limit": 5000})
     assert res2["isError"]
     assert res2["structuredContent"]["code"] == "RATE_LIMITED"
     assert "rate limit reached" in res2["structuredContent"]["error"]
-    assert len(calls) == 1  # Blocked before network!
+    assert len(calls) == 1
 
-    # But a lower weight request (e.g. price has weight 2) fits in the remaining 10 budget
+    # price weighs 2 and still fits in the remaining budget.
     def handler_price(req):
         calls.append(req)
         return httpx.Response(200, json={"symbol": "BTCUSDT", "price": "50000"})
@@ -313,6 +321,69 @@ def test_request_weight_tracking_and_high_weight_limiting(client, monkeypatch):
     res3 = call(client, "price", {"symbol": "BTCUSDT"})
     assert not res3["isError"]
     assert len(calls) == 2
+
+
+def test_binance_ban_duration_is_taken_from_retry_after(client, monkeypatch):
+    service.rate_limiter.reset()
+    calls = []
+    def handler(req):
+        calls.append(req)
+        return httpx.Response(418, headers={"Retry-After": "172800"}, text="banned")
+    mock_binance(monkeypatch, handler)
+    banned = call(client, "price", {"symbol": "BTCUSDT"})
+    assert banned["structuredContent"]["code"] == "IP_BANNED"
+    assert banned["structuredContent"]["retry_after"] == 172800
+    assert call(client, "price", {"symbol": "BTCUSDT"})["structuredContent"]["code"] == "IP_BANNED"
+    assert len(calls) == 1
+
+    service.rate_limiter.reset()
+    calls.clear()
+    def handler_missing(req):
+        calls.append(req)
+        return httpx.Response(429, text="slow down")
+    mock_binance(monkeypatch, handler_missing)
+    limited = call(client, "price", {"symbol": "BTCUSDT"})
+    assert limited["structuredContent"]["code"] == "RATE_LIMITED"
+    assert limited["structuredContent"]["retry_after"] == 60
+    assert "slow down" not in json.dumps(limited)
+
+
+def test_retry_after_header_is_parsed_safely(client, monkeypatch):
+    service.rate_limiter.reset()
+    def handler(req):
+        return httpx.Response(429, headers={"Retry-After": "not-a-number"}, text="upstream-secret")
+    mock_binance(monkeypatch, handler)
+    result = call(client, "price", {"symbol": "BTCUSDT"})
+    rendered = json.dumps(result)
+    assert result["structuredContent"]["retry_after"] == 60
+    assert "not-a-number" not in rendered and "upstream-secret" not in rendered
+    assert service.parse_retry_after("999999999") == service.MAX_RETRY_AFTER
+    assert service.parse_retry_after("45\r\nSet-Cookie: x") == 60
+    assert service.parse_retry_after(None, default=120) == 120
+
+
+def test_active_ip_ban_is_not_replaced_by_shorter_429():
+    limiter = service.RateLimiter()
+    limiter.record_cooldown(418, 300)
+    until = limiter.circuit_break_until
+    limiter.record_cooldown(429, 30)
+    assert limiter.is_banned and limiter.circuit_break_until == until
+    limiter.record_cooldown(429, 3000)
+    assert limiter.is_banned and limiter.circuit_break_until > until
+
+
+def test_missing_credentials_do_not_consume_weight_or_mask_ban(client, monkeypatch):
+    service.rate_limiter.reset()
+    service.rate_limiter.record_cooldown(418, 120)
+    denied = call(client, "account")
+    assert denied["isError"] and denied["structuredContent"]["code"] == "CREDENTIALS_MISSING"
+    service.rate_limiter.reset()
+    monkeypatch.setattr(service.rate_limiter, "_get_max_weight", lambda: 5)
+    assert call(client, "account")["structuredContent"]["code"] == "CREDENTIALS_MISSING"
+    def handler(req):
+        return httpx.Response(200, json={"symbol": "BTCUSDT", "price": "42"})
+    mock_binance(monkeypatch, handler)
+    assert not call(client, "price", {"symbol": "BTCUSDT"})["isError"]
 
 
 def test_concurrency_cap():
