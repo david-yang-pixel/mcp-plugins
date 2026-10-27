@@ -1,0 +1,17 @@
+{
+  "deployment": {
+    "container_port": 8124,
+    "auth_key": "BINANCE_MCP_API_KEY",
+    "health_path": "/health"
+  },
+  "environment": {
+    "BINANCE_MCP_HOST": "0.0.0.0",
+    "BINANCE_MCP_PORT": "8124"
+  },
+  "secrets": {
+    "BINANCE_MCP_API_KEY": {"name": "MCP_BINANCE_MCP__BINANCE_MCP_API_KEY", "required": true},
+    "BINANCE_API_KEY": {"name": "MCP_BINANCE_MCP__BINANCE_API_KEY", "required": false},
+    "BINANCE_API_SECRET": {"name": "MCP_BINANCE_MCP__BINANCE_API_SECRET", "required": false}
+  },
+  "secret_files": {}
+}
