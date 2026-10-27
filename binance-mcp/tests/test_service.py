@@ -65,7 +65,8 @@ def test_public_works_without_credentials_and_accounts_fail(client, monkeypatch)
     mock_binance(monkeypatch, handler)
     assert call(client, "price", {"symbol": "BTCUSDT"})["structuredContent"]["data"]["price"] == "42"
     for tool, args in [("account", {}), ("open_orders", {"symbol": "BTCUSDT"}), ("all_orders", {"symbol": "BTCUSDT"}),
-                       ("wallet_balance", {}), ("funding_assets", {})]:
+                       ("wallet_balance", {}), ("funding_assets", {}), ("my_trades", {"symbol": "BTCUSDT"}),
+                       ("position_cost", {"symbol": "BTCUSDT"})]:
         result = call(client, tool, args)
         assert result["isError"] and result["structuredContent"]["code"] == "CREDENTIALS_MISSING"
     assert len(requests) == 1 and "X-MBX-APIKEY" not in requests[0].headers
@@ -84,6 +85,7 @@ def test_public_works_without_credentials_and_accounts_fail(client, monkeypatch)
     ("all_orders", {"symbol": "BTCUSDT", "limit": 1000}, "/api/v3/allOrders", True, "GET"),
     ("wallet_balance", {"quoteAsset": "BTC"}, "/sapi/v1/asset/wallet/balance", True, "GET"),
     ("funding_assets", {"asset": "USDT"}, "/sapi/v1/asset/get-funding-asset", True, "POST"),
+    ("my_trades", {"symbol": "BTCUSDT", "limit": 1000, "fromId": 0}, "/api/v3/myTrades", True, "GET"),
 ])
 def test_endpoints_methods_and_signature(client, monkeypatch, name, args, path, signed, method):
     monkeypatch.setenv("BINANCE_API_KEY", "synthetic-binance-key")
@@ -122,6 +124,10 @@ def test_endpoints_methods_and_signature(client, monkeypatch, name, args, path, 
     ("wallet_balance", {"quoteAsset": "USDT", "needBtcValuation": True}),
     ("funding_assets", {"asset": "USD T"}), ("funding_assets", {"asset": 1}),
     ("funding_assets", {"needBtcValuation": "true"}), ("funding_assets", {"needBtcValuation": 1}),
+    ("my_trades", {}), ("my_trades", {"symbol": "BTCUSDT", "fromId": -1}),
+    ("my_trades", {"symbol": "BTCUSDT", "fromId": "1"}), ("my_trades", {"symbol": "BTCUSDT", "fromId": True}),
+    ("my_trades", {"symbol": "BTCUSDT", "limit": 1001}),
+    ("position_cost", {}), ("position_cost", {"symbol": "BTCUSDT", "fromId": 0}),
 ])
 def test_invalid_inputs_never_reach_network(client, monkeypatch, name, args):
     mock_binance(monkeypatch, lambda request: pytest.fail("unexpected network call"))
@@ -224,6 +230,126 @@ def test_wallet_tools_are_listed_read_only(client):
         assert tools[name]["annotations"]["readOnlyHint"] and not tools[name]["annotations"]["destructiveHint"]
     assert service.get_tool_weight("wallet_balance", {}) == 60
     assert service.get_tool_weight("funding_assets", {}) == 1
+
+
+def trade(trade_id, is_buyer, qty, quote_qty, fee, fee_asset, at=1789436098292):
+    return {"id": trade_id, "isBuyer": is_buyer, "qty": qty, "quoteQty": quote_qty, "price": "0",
+            "commission": fee, "commissionAsset": fee_asset, "time": at}
+
+
+def mock_position(monkeypatch, pages, price="233.76", requests=None):
+    monkeypatch.setenv("BINANCE_API_KEY", "synthetic-binance-key")
+    monkeypatch.setenv("BINANCE_API_SECRET", "synthetic-binance-secret")
+    pages = list(pages)
+    def handler(req):
+        if req.url.path == "/api/v3/exchangeInfo":
+            return httpx.Response(200, json={"symbols": [{"symbol": "MRVLBUSDT", "baseAsset": "MRVLB", "quoteAsset": "USDT"}]})
+        if req.url.path == "/api/v3/myTrades":
+            if requests is not None:
+                requests.append(parse_qs(req.url.query.decode().rsplit("&signature=", 1)[0]))
+            return httpx.Response(200, json=pages.pop(0))
+        if req.url.path == "/api/v3/ticker/price":
+            return httpx.Response(200, json={"symbol": "MRVLBUSDT", "price": price}) if price else httpx.Response(500)
+        pytest.fail(f"unexpected path {req.url.path}")
+    mock_binance(monkeypatch, handler)
+
+
+def test_position_cost_fifo_lots_fees_and_pnl(client, monkeypatch):
+    from decimal import Decimal as D
+    trades = [
+        trade(1, True, "0.707", "156.21872", "0.000707", "MRVLB", 1789436098292),
+        trade(2, False, "0.042", "9.6957", "0.0096957", "USDT", 1789567618653),
+        trade(3, False, "0.393", "90.72405", "0.0001", "BNB", 1789567618654),
+        trade(4, False, "0.271", "62.56035", "0", "BNB", 1789567618655),
+        trade(5, True, "0.042", "9.88428", "0.000042", "MRVLB", 1792378252000),
+        trade(6, True, "0.134", "31.53556", "0", "BNB", 1792387698092),
+        trade(7, True, "0.122", "28.71148", "0.0002", "BNB", 1792387698870),
+        trade(8, True, "0.235", "55.30490", "0", "BNB", 1792387698871),
+    ]
+    requests = []
+    mock_position(monkeypatch, [list(reversed(trades))], requests=requests)
+    result = call(client, "position_cost", {"symbol": "MRVLBUSDT"})
+    assert not result["isError"]
+    data = result["structuredContent"]["data"]
+    assert requests == [{"symbol": ["MRVLBUSDT"], "limit": ["1000"], "fromId": ["0"],
+                         "timestamp": requests[0]["timestamp"], "recvWindow": ["5000"]}]
+
+    first_unit = D("156.21872") / D("0.706293")
+    realized = D("9.6957") - D("0.0096957") + D("90.72405") + D("62.56035") - first_unit * D("0.706")
+    open_cost = first_unit * D("0.000293") + D("9.88428") + D("31.53556") + D("28.71148") + D("55.30490")
+    open_qty = D("0.000293") + D("0.041958") + D("0.134") + D("0.122") + D("0.235")
+    q = lambda d: str(d.quantize(D("0.00000001")))
+    assert data["base_asset"] == "MRVLB" and data["quote_asset"] == "USDT" and data["method"] == "FIFO"
+    assert data["trade_count"] == 8 and data["first_trade_at"] == "2026-09-15T01:34:58Z"
+    assert data["open_quantity"] == q(open_qty) and data["open_cost"] == q(open_cost)
+    assert data["average_cost"] == q(open_cost / open_qty) and data["realized_pnl"] == q(realized)
+    assert data["unmatched_sell_quantity"] == "0.00000000"
+    assert data["fees_in_other_assets"] == {"BNB": "0.00030000"}
+    assert [lot["bought_at"] for lot in data["open_lots"]] == [
+        "2026-09-15T01:34:58Z", "2026-10-19T02:50:52Z", "2026-10-19T05:28:18Z",
+        "2026-10-19T05:28:18Z", "2026-10-19T05:28:18Z"]
+    assert data["open_lots"][0]["quantity"] == "0.00029300" and data["open_lots"][1]["quantity"] == "0.04195800"
+    value = open_qty * D("233.76")
+    assert data["current_price"] == "233.76000000" and data["market_value"] == q(value)
+    assert data["unrealized_pnl"] == q(value - open_cost)
+    assert data["unrealized_pnl_pct"] == q((value - open_cost) / open_cost * 100)
+
+
+def test_position_cost_pages_through_full_history(client, monkeypatch):
+    first = [trade(i, True, "1", "10", "0", "USDT") for i in range(1, 1001)]
+    second = [trade(5000, False, "1000", "20000", "0", "USDT"), trade(5001, True, "2", "60", "0", "USDT")]
+    requests = []
+    mock_position(monkeypatch, [first, second], price="40", requests=requests)
+    data = call(client, "position_cost", {"symbol": "MRVLBUSDT"})["structuredContent"]["data"]
+    assert [r["fromId"] for r in requests] == [["0"], ["1001"]]
+    assert data["trade_count"] == 1002 and data["realized_pnl"] == "10000.00000000"
+    assert data["open_quantity"] == "2.00000000" and data["average_cost"] == "30.00000000"
+    assert data["unrealized_pnl"] == "20.00000000"
+
+
+def test_position_cost_unmatched_sells_and_missing_price(client, monkeypatch):
+    mock_position(monkeypatch, [[trade(1, True, "1", "10", "0", "USDT"), trade(2, False, "3", "60", "0", "USDT")]], price=None)
+    data = call(client, "position_cost", {"symbol": "MRVLBUSDT"})["structuredContent"]["data"]
+    # Only the 1 unit bought here has a cost; the other 2 came from elsewhere.
+    assert data["realized_pnl"] == "10.00000000" and data["unmatched_sell_quantity"] == "2.00000000"
+    assert data["open_quantity"] == "0.00000000" and data["average_cost"] is None and data["open_lots"] == []
+    assert data["current_price"] is None and data["unrealized_pnl"] is None and data["price_error"] == "BINANCE_HTTP_ERROR"
+
+
+def test_position_cost_without_trades(client, monkeypatch):
+    mock_position(monkeypatch, [[]])
+    data = call(client, "position_cost", {"symbol": "MRVLBUSDT"})["structuredContent"]["data"]
+    assert data["trade_count"] == 0 and data["first_trade_at"] is None and data["open_quantity"] == "0.00000000"
+    assert data["unrealized_pnl"] == "0.00000000" and data["unrealized_pnl_pct"] is None
+
+
+def test_position_cost_stops_at_page_limit(client, monkeypatch):
+    pages = [[trade(p * 1000 + i, True, "1", "1", "0", "USDT") for i in range(1000)] for p in range(service.MAX_TRADE_PAGES)]
+    requests = []
+    mock_position(monkeypatch, pages, requests=requests)
+    payload = call(client, "position_cost", {"symbol": "MRVLBUSDT"})["structuredContent"]
+    assert payload["code"] == "TOO_MANY_TRADES" and len(requests) == service.MAX_TRADE_PAGES
+
+
+@pytest.mark.parametrize("bad", [
+    {"qty": "abc"}, {"isBuyer": "true"}, {"time": "1789436098292"}, {"qty": "-1"}, {"commissionAsset": None, "commission": None},
+])
+def test_position_cost_rejects_malformed_trades(client, monkeypatch, bad):
+    mock_position(monkeypatch, [[{**trade(1, True, "1", "10", "0", "USDT"), **bad}]])
+    payload = call(client, "position_cost", {"symbol": "MRVLBUSDT"})["structuredContent"]
+    assert payload == {"success": False, "code": "BINANCE_RESPONSE_ERROR", "error": "Invalid Binance trade data"}
+
+
+def test_position_cost_propagates_binance_errors(client, monkeypatch):
+    monkeypatch.setenv("BINANCE_API_KEY", "synthetic-binance-key")
+    monkeypatch.setenv("BINANCE_API_SECRET", "synthetic-binance-secret")
+    def handler(req):
+        if req.url.path == "/api/v3/exchangeInfo":
+            return httpx.Response(200, json={"symbols": [{"baseAsset": "MRVLB", "quoteAsset": "USDT"}]})
+        return httpx.Response(401, json={"code": -2015, "msg": "Invalid API-key"})
+    mock_binance(monkeypatch, handler)
+    payload = call(client, "position_cost", {"symbol": "MRVLBUSDT"})["structuredContent"]
+    assert payload["code"] == "BINANCE_HTTP_ERROR" and payload["binance_code"] == -2015
 
 
 def test_httpcore_wire_loggers_are_disabled():

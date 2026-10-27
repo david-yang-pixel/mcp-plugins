@@ -14,10 +14,14 @@
 | `account` | 无 | 现货账户信息及余额 |
 | `open_orders` | `symbol` | 当前订单 |
 | `all_orders` | `symbol`, `limit` | 历史订单，limit 1–1000，默认 500 |
+| `my_trades` | `symbol`, `limit`, `fromId` | 成交明细（含手续费），limit 1–1000，默认 500；不传 `fromId` 返回最近成交，`fromId=0` 从第一笔开始，翻页时传上一页最后一笔 `id + 1` |
+| `position_cost` | `symbol` | 按 FIFO 由该交易对全部成交计算持仓：每批未卖出买入的时间、数量和单位成本，持仓均价、已实现盈亏，以及按现价计算的市值和浮动盈亏 |
 | `wallet_balance` | `quoteAsset` | 各钱包（现货、资金、理财、杠杆、合约等）总额，按 `quoteAsset` 计价，默认 `USDT` |
 | `funding_assets` | `asset`, `needBtcValuation` | 资金账户余额；`asset` 可选，只查指定币种；`needBtcValuation` 默认 `true` |
 
 交易对必须是 2–20 位、币种为 1–20 位大写英文字母或数字（如 `BTCUSDT`、`USDT`）；所有参数均严格校验，不接受其他参数。返回 JSON-RPC MCP 内容，失败为 `isError` 和通用错误码；上游失败时附带 `http_status` 与 Binance 数字错误码 `binance_code`（如 `-1021` 时钟偏差、`-2015` Key/IP 白名单/权限），常见错误附带排查提示，但不返回上游错误原文、密钥或签名 URL。账户数据本身敏感，MCP 调用者应妥善保护响应。
+
+`position_cost` 说明：以计价币计算成本与盈亏；以基础币或计价币收取的手续费计入数量或成本，以其他币种（如 BNB）收取的手续费单独列在 `fees_in_other_assets`，不计入成本。只统计该交易对的成交，钱包间划转、闪兑和小额兑换不计入，因此 `open_quantity` 可能与钱包余额不同；卖出数量超过已记录买入的部分记为 `unmatched_sell_quantity`，不计盈亏。成交按每页 1000 笔分页拉取，超过 10,000 笔时返回 `TOO_MANY_TRADES`，不给出不完整的结果。
 
 ## 本地运行
 
