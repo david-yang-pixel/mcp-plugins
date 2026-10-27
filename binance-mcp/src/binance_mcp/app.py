@@ -24,6 +24,7 @@ for logger_name in ("httpx", "httpcore", "httpcore.http11", "httpcore.http2",
 
 BASE_URL = "https://api.binance.com"
 Symbol = Annotated[str, Field(strict=True, min_length=2, max_length=20, pattern=r"^[A-Z0-9]+$")]
+Asset = Annotated[str, Field(strict=True, min_length=1, max_length=20, pattern=r"^[A-Z0-9]+$")]
 Limit = Annotated[int, Field(strict=True, ge=1, le=1000)]
 
 
@@ -61,16 +62,30 @@ class OrdersArgs(SymbolArgs):
     limit: Limit = 500
 
 
-# Every path is fixed and is a Binance Spot GET endpoint. No generic request tool.
+class WalletBalanceArgs(Arguments):
+    quoteAsset: Asset = "USDT"
+
+
+class FundingArgs(Arguments):
+    asset: Asset | None = None
+    needBtcValuation: Annotated[bool, Field(strict=True)] = True
+
+
+# Every path is fixed and read-only. No generic request tool. get-funding-asset is a
+# query that Binance only serves over POST; it is the one non-GET endpoint.
 TOOLS = {
-    "exchange_info": ("Get trading pair information", "/api/v3/exchangeInfo", SymbolArgs, False),
-    "price": ("Get the latest price for a pair", "/api/v3/ticker/price", SymbolArgs, False),
-    "ticker_24h": ("Get 24-hour statistics for a pair", "/api/v3/ticker/24hr", SymbolArgs, False),
-    "depth": ("Get the order book for a pair", "/api/v3/depth", DepthArgs, False),
-    "klines": ("Get candlesticks for a pair", "/api/v3/klines", KlineArgs, False),
-    "account": ("Get account information and balances", "/api/v3/account", Arguments, True),
-    "open_orders": ("Get current orders for a pair", "/api/v3/openOrders", SymbolArgs, True),
-    "all_orders": ("Get historical orders for a pair", "/api/v3/allOrders", OrdersArgs, True),
+    "exchange_info": ("Get trading pair information", "/api/v3/exchangeInfo", SymbolArgs, False, "GET"),
+    "price": ("Get the latest price for a pair", "/api/v3/ticker/price", SymbolArgs, False, "GET"),
+    "ticker_24h": ("Get 24-hour statistics for a pair", "/api/v3/ticker/24hr", SymbolArgs, False, "GET"),
+    "depth": ("Get the order book for a pair", "/api/v3/depth", DepthArgs, False, "GET"),
+    "klines": ("Get candlesticks for a pair", "/api/v3/klines", KlineArgs, False, "GET"),
+    "account": ("Get Spot account information and balances", "/api/v3/account", Arguments, True, "GET"),
+    "open_orders": ("Get current orders for a pair", "/api/v3/openOrders", SymbolArgs, True, "GET"),
+    "all_orders": ("Get historical orders for a pair", "/api/v3/allOrders", OrdersArgs, True, "GET"),
+    "wallet_balance": ("Get the total balance of every wallet (Spot, Funding, Earn, Futures, ...) in a quote asset",
+                       "/sapi/v1/asset/wallet/balance", WalletBalanceArgs, True, "GET"),
+    "funding_assets": ("Get Funding wallet balances, optionally for one asset",
+                       "/sapi/v1/asset/get-funding-asset", FundingArgs, True, "POST"),
 }
 
 
@@ -132,7 +147,7 @@ def is_allowed_origin(origin: str) -> bool:
 def tool_list():
     return [{"name": name, "description": description, "inputSchema": model.model_json_schema(),
              "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True}}
-            for name, (description, _, model, _) in TOOLS.items()]
+            for name, (description, _, model, _, _) in TOOLS.items()]
 
 
 def error(code, message, **extra):
@@ -160,6 +175,9 @@ def get_tool_weight(name: str, params: dict) -> int:
         "account": 20,
         "open_orders": 6,
         "all_orders": 20,
+        # SAPI weight is a separate Binance pool; counting it here only makes local limiting stricter.
+        "wallet_balance": 60,
+        "funding_assets": 1,
     }
     return weights.get(name, 1)
 
@@ -304,9 +322,9 @@ def contains_sensitive(value, secrets):
 async def call_tool(name, arguments):
     if name not in TOOLS:
         return error("UNKNOWN_TOOL", "Unknown tool")
-    _, path, model, signed = TOOLS[name]
+    _, path, model, signed, method = TOOLS[name]
     try:
-        params = model.model_validate(arguments).model_dump()
+        params = model.model_validate(arguments).model_dump(exclude_none=True)
     except ValidationError:
         raise InvalidToolArguments("Invalid tool arguments; see the tool input schema")
     api_key = os.environ.get("BINANCE_API_KEY", "")
@@ -328,7 +346,7 @@ async def call_tool(name, arguments):
             admit_error = await rate_limiter.acquire_admission(weight)
             if admit_error:
                 return admit_error
-            call_params = dict(params)
+            call_params = {k: str(v).lower() if isinstance(v, bool) else v for k, v in params.items()}
             if signed:
                 call_params["timestamp"] = int(time.time() * 1000)
                 call_params["recvWindow"] = 5000
@@ -339,7 +357,7 @@ async def call_tool(name, arguments):
             else:
                 query = urlencode(call_params)
             async with httpx.AsyncClient(timeout=10, follow_redirects=False, trust_env=False) as client:
-                async with client.stream("GET", BASE_URL + path + ("?" + query if query else ""), headers=headers) as response:
+                async with client.stream(method, BASE_URL + path + ("?" + query if query else ""), headers=headers) as response:
                     if response.status_code in (418, 429):
                         retry_after = parse_retry_after(response.headers.get("retry-after"), default=120 if response.status_code == 418 else 60)
                         rate_limiter.record_cooldown(response.status_code, retry_after)
