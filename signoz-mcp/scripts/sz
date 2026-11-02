@@ -16,8 +16,10 @@ Subcommands:
     schema      — describe a table (default: distributed_logs_v2)
     services    — list active k8s deployments in a time window
 
-Every subcommand accepts:
+Every subcommand except schema accepts:
     --hours N       lookback window in hours (default: 1; max: 168)
+    --start ISO     absolute window start (ISO 8601; no offset = UTC)
+    --end ISO       absolute window end (default: now; with only --end, start = end - --hours)
     --limit N       row cap (default: 30; max: 1000)
     --env E         deployment.environment filter (production / staging)
     --json          emit raw JSON; otherwise prints aligned human-readable text
@@ -31,7 +33,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 # ---- config -----------------------------------------------------------------
@@ -116,6 +118,61 @@ def time_window(hours: float):
             start_s * 1000, end_s * 1000)
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def parse_iso_utc(value: str, name: str) -> datetime:
+    """ISO 8601 -> aware UTC datetime. Values without an offset are UTC."""
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        die(f"--{name} must be ISO 8601, e.g. 2026-10-01T08:00:00Z or 2026-10-01T16:00:00+08:00")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    parsed = parsed.astimezone(timezone.utc)
+    if parsed < _EPOCH:
+        die(f"--{name} must not be before 1970-01-01")
+    return parsed
+
+
+def dt_to_ns(value: datetime) -> int:
+    delta = value - _EPOCH
+    return (delta.days * 86400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1000
+
+
+def max_window_days() -> float:
+    try:
+        return max(1.0, float(os.environ.get("SZ_MAX_WINDOW_DAYS", "31")))
+    except ValueError:
+        return 31.0
+
+
+def resolve_window(args):
+    """Return (start_ns, end_ns, start_ms, end_ms, label).
+
+    Without --start/--end this is exactly time_window(args.hours). --start/--end
+    select an absolute window; a missing --end means now and a missing --start
+    means --end minus --hours.
+    """
+    start_raw = getattr(args, "start", None)
+    end_raw = getattr(args, "end", None)
+    if not start_raw and not end_raw:
+        start_ns, end_ns, start_ms, end_ms = time_window(args.hours)
+        return start_ns, end_ns, start_ms, end_ms, f"{args.hours}h window"
+    end = parse_iso_utc(end_raw, "end") if end_raw else datetime.fromtimestamp(time.time(), tz=timezone.utc)
+    start = parse_iso_utc(start_raw, "start") if start_raw else end - timedelta(hours=args.hours)
+    if start >= end:
+        die(f"--start ({start.isoformat()}) must be earlier than --end ({end.isoformat()})")
+    days = max_window_days()
+    if end - start > timedelta(days=days):
+        die(f"absolute window exceeds {days:g} days; split it into smaller --start/--end windows")
+    start_ns, end_ns = dt_to_ns(start), dt_to_ns(end)
+    start_ms = start_ns // 1_000_000
+    end_ms = -(-end_ns // 1_000_000)
+    label = f"{fmt_ts_ns(start_ns)} .. {fmt_ts_ns(end_ns)} UTC"
+    return start_ns, end_ns, start_ms, end_ms, label
+
+
 def fmt_ts_ns(ns: int) -> str:
     if not ns:
         return "?"
@@ -175,7 +232,7 @@ def emit(rows_list, args, columns=None):
 # ---- subcommands -------------------------------------------------------------
 
 def cmd_errors(args):
-    start_ns, end_ns, start_ms, end_ms = time_window(args.hours)
+    start_ns, end_ns, start_ms, end_ms, window_label = resolve_window(args)
 
     where = [f"timestamp >= {start_ns}", f"timestamp <= {end_ns}",
              f"severity_text IN ('ERROR','FATAL')"]
@@ -202,14 +259,14 @@ def cmd_errors(args):
         f"ORDER BY timestamp DESC LIMIT {args.limit}"
     )
 
-    info(f"[sz] {args.hours}h window | {len(where)} filters | limit={args.limit}", args)
+    info(f"[sz] {window_label} | {len(where)} filters | limit={args.limit}", args)
     data = post_query(sql, start_ms, end_ms)
     out = [r.get("data", {}) for r in rows(data)]
     emit(out, args, columns=["ts", "sev", "dep", "id", "body"])
 
 
 def cmd_traceback(args):
-    start_ns, end_ns, start_ms, end_ms = time_window(args.hours)
+    start_ns, end_ns, start_ms, end_ms, window_label = resolve_window(args)
 
     where = [f"timestamp >= {start_ns}", f"timestamp <= {end_ns}",
              "severity_text = 'ERROR'"]
@@ -236,7 +293,7 @@ def cmd_traceback(args):
         f"ORDER BY timestamp DESC LIMIT {args.limit}"
     )
 
-    info(f"[sz] traceback search | {args.hours}h window | limit={args.limit}", args)
+    info(f"[sz] traceback search | {window_label} | limit={args.limit}", args)
     data = post_query(sql, start_ms, end_ms)
     out = [r.get("data", {}) for r in rows(data)]
 
@@ -262,12 +319,12 @@ def cmd_traceback(args):
 
 
 def cmd_query(args):
-    start_ns, end_ns, start_ms, end_ms = time_window(args.hours)
+    start_ns, end_ns, start_ms, end_ms, window_label = resolve_window(args)
     sql = args.sql
     # Allow user to template {start_ns} / {end_ns} into their SQL
     sql = sql.replace("{start_ns}", str(start_ns)).replace("{end_ns}", str(end_ns))
 
-    info(f"[sz] running raw SQL | {args.hours}h window vars: start_ns={start_ns} end_ns={end_ns}", args)
+    info(f"[sz] running raw SQL | {window_label} vars: start_ns={start_ns} end_ns={end_ns}", args)
     data = post_query(sql, start_ms, end_ms, panel_type=args.panel)
     out = [r.get("data", {}) for r in rows(data)]
     emit(out, args)
@@ -285,7 +342,7 @@ def cmd_schema(args):
 
 
 def cmd_services(args):
-    start_ns, end_ns, start_ms, end_ms = time_window(args.hours)
+    start_ns, end_ns, start_ms, end_ms, window_label = resolve_window(args)
     where = [f"timestamp >= {start_ns}", f"timestamp <= {end_ns}"]
     if args.env:
         where.append(f"resources_string['deployment.environment'] = '{esc(args.env)}'")
@@ -307,6 +364,11 @@ def cmd_services(args):
 
 # ---- argparse ----------------------------------------------------------------
 
+def add_absolute_time(parser):
+    parser.add_argument("--start", help="absolute window start, ISO 8601 (no offset = UTC)")
+    parser.add_argument("--end", help="absolute window end, ISO 8601 (default: now)")
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         prog="sz",
@@ -326,6 +388,7 @@ def build_parser():
     pe.add_argument("--env", help="deployment.environment filter (e.g. production, staging). Omit = no filter.")
     pe.add_argument("--deployment", help="k8s.deployment.name (e.g. dify-api-oltp)")
     pe.add_argument("--hours", type=float, default=1.0, help="lookback hours (default: 1)")
+    add_absolute_time(pe)
     pe.add_argument("--limit", type=int, default=30, help="row limit (default: 30)")
     pe.set_defaults(func=cmd_errors)
 
@@ -336,6 +399,7 @@ def build_parser():
     pt.add_argument("--grep", help="generic body substring filter")
     pt.add_argument("--env", help="deployment.environment filter (omit = no filter)")
     pt.add_argument("--hours", type=float, default=24.0, help="lookback hours (default: 24)")
+    add_absolute_time(pt)
     pt.add_argument("--limit", type=int, default=5, help="row limit (default: 5)")
     pt.set_defaults(func=cmd_traceback)
 
@@ -343,6 +407,7 @@ def build_parser():
     pq = sub.add_parser("query", parents=[common], help="run a raw ClickHouse SQL")
     pq.add_argument("sql", help="ClickHouse SQL. Use {start_ns}/{end_ns} placeholders if you want auto window.")
     pq.add_argument("--hours", type=float, default=1.0, help="lookback hours window (for {start_ns}/{end_ns})")
+    add_absolute_time(pq)
     pq.add_argument("--panel", default="list", choices=["list", "table", "graph"], help="panel type")
     pq.set_defaults(func=cmd_query)
 
@@ -356,15 +421,16 @@ def build_parser():
     psv = sub.add_parser("services", parents=[common], help="list active services / deployments")
     psv.add_argument("--env", help="deployment.environment filter")
     psv.add_argument("--hours", type=float, default=1.0, help="lookback hours (default: 1)")
+    add_absolute_time(psv)
     psv.add_argument("--limit", type=int, default=30, help="row limit (default: 30)")
     psv.set_defaults(func=cmd_services)
 
     return p
 
 
-def main():
+def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     # clamp safety bounds
     if hasattr(args, "hours"):
         args.hours = max(0.01, min(args.hours, 168.0))

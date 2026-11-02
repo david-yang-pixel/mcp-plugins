@@ -434,3 +434,225 @@ async def test_mcp_limits_concurrent_sz_runs(monkeypatch):
 
     assert len(results) == 5
     assert max_active <= 2
+
+
+# ---- compatibility, help, absolute windows, chunking -------------------------
+
+import json  # noqa: E402
+
+
+SOURCE_MCP_SQL = (
+    "SELECT resources_string['container.image.tag'] AS image_tag, count() AS log_count "
+    "FROM signoz_logs.distributed_logs_v2 WHERE timestamp >= {start_ns} "
+    "AND resources_string['k8s.deployment.name'] = 'dify-api' GROUP BY image_tag"
+)
+
+
+def _tools_call(client, name, arguments, request_id=1):
+    response = client.post(
+        "/mcp",
+        headers=AUTH_HEADER,
+        json={
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        },
+    )
+    assert response.status_code == 200
+    return response.json()["result"]
+
+
+def test_source_mcp_sz_run_query_contract_is_unchanged(monkeypatch, tmp_path):
+    """source-mcp calls sz_run ["query", <sql>, "--hours", "3"] and parses
+    content[0].text as {"success": true, "data": [rows...]}. Keep it byte-stable."""
+    argv_file = tmp_path / "argv.json"
+    script = tmp_path / "fake_sz.py"
+    script.write_text(
+        "import json, sys\n"
+        f"open({str(argv_file)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+        "print(json.dumps([{'image_tag': '1.2.3', 'log_count': 42}]))\n"
+    )
+    app = _app(monkeypatch)
+    monkeypatch.setenv("SIGNOZ_MCP_SZ_PATH", str(script))
+    from signoz_mcp.settings import get_settings
+
+    get_settings.cache_clear()
+    client = TestClient(app)
+
+    result = _tools_call(client, "sz_run", {"args": ["query", SOURCE_MCP_SQL, "--hours", "3"]})
+
+    assert json.loads(argv_file.read_text()) == ["query", SOURCE_MCP_SQL, "--hours", "3", "--json", "-q"]
+    assert result["isError"] is False
+    assert len(result["content"]) == 1
+    assert result["content"][0]["type"] == "text"
+    expected = {"success": True, "data": [{"image_tag": "1.2.3", "log_count": 42}]}
+    assert result["content"][0]["text"] == json.dumps(expected, ensure_ascii=False)
+    assert result["structuredContent"] == expected
+
+
+def test_source_mcp_query_runs_through_real_sz_script_with_hours(monkeypatch):
+    """End-to-end through scripts/sz (HTTP replaced) to pin the --hours window."""
+    from pathlib import Path
+
+    sz_path = Path(__file__).resolve().parents[1] / "scripts" / "sz"
+    app = _app(monkeypatch)
+    monkeypatch.setenv("SIGNOZ_MCP_SZ_PATH", str(sz_path))
+    from signoz_mcp.settings import get_settings
+
+    get_settings.cache_clear()
+    captured = {}
+
+    async def fake_run_sz(args, settings):
+        import importlib.machinery
+        import importlib.util
+        import io
+        from contextlib import redirect_stdout
+
+        loader = importlib.machinery.SourceFileLoader("sz_compat", str(sz_path))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        monkeypatch.setattr(module.time, "time", lambda: 1_790_000_000)
+
+        def fake_post(sql, start_ms, end_ms, panel_type="list"):
+            captured.update(sql=sql, start_ms=start_ms, end_ms=end_ms)
+            return {"data": {"result": [{"list": [{"data": {"image_tag": "1.2.3"}}]}]}}
+
+        module.post_query = fake_post
+        out = io.StringIO()
+        with redirect_stdout(out):
+            module.main([*args, "--json", "-q"])
+        return {"success": True, "data": json.loads(out.getvalue())}
+
+    monkeypatch.setattr("signoz_mcp.app.run_sz", fake_run_sz)
+    client = TestClient(app)
+
+    result = _tools_call(client, "sz_run", {"args": ["query", SOURCE_MCP_SQL, "--hours", "3"]})
+
+    assert json.loads(result["content"][0]["text"]) == {"success": True, "data": [{"image_tag": "1.2.3"}]}
+    assert f"timestamp >= {(1_790_000_000 - 3 * 3600) * 1_000_000_000} " in captured["sql"]
+    assert captured["end_ms"] == 1_790_000_000 * 1000
+
+
+@pytest.mark.parametrize("args", [["--help"], ["help"], ["services", "--help"]])
+def test_sz_run_help_returns_command_list_without_running_sz(monkeypatch, args):
+    client = _client(monkeypatch)
+
+    async def fake_run_sz(args, settings):
+        raise AssertionError("help must not spawn sz")
+
+    monkeypatch.setattr("signoz_mcp.app.run_sz", fake_run_sz)
+
+    result = _tools_call(client, "sz_run", {"args": args})
+
+    assert result["isError"] is False
+    names = [command["name"] for command in result["structuredContent"]["data"]["commands"]]
+    assert names == (["services"] if args[0] == "services" else ["errors", "traceback", "query", "schema", "services"])
+
+
+def test_sz_run_tool_description_lists_commands(monkeypatch):
+    client = _client(monkeypatch)
+    response = client.post(
+        "/mcp", headers=AUTH_HEADER, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    )
+    tools = {tool["name"]: tool for tool in response.json()["result"]["tools"]}
+
+    description = tools["sz_run"]["description"]
+    for name in ("errors", "traceback", "query <SQL>", "schema", "services"):
+        assert name in description
+    assert "--start ISO" in description
+
+
+def test_sz_run_unsupported_command_explains_alternatives(monkeypatch):
+    client = _client(monkeypatch)
+
+    result = _tools_call(client, "sz_run", {"args": ["drop"]})
+
+    assert result["isError"] is True
+    assert result["structuredContent"]["code"] == "BAD_ARGUMENTS"
+    assert "query" in result["structuredContent"]["error"]
+
+
+def test_structured_tool_accepts_absolute_window_and_echoes_utc(monkeypatch):
+    client = _client(monkeypatch)
+    captured = []
+
+    async def fake_run_sz(args, settings):
+        captured.append(args)
+        return {"success": True, "data": [{"value": 3}]}
+
+    monkeypatch.setattr("signoz_mcp.app.run_sz", fake_run_sz)
+
+    result = _tools_call(
+        client,
+        "signoz_aggregate_logs",
+        {"start": "2026-10-01T08:00:00+08:00", "end": "2026-10-01T06:00:00"},
+    )
+
+    assert result["isError"] is False
+    assert captured[0][-4:] == ["--start", "2026-10-01T00:00:00Z", "--end", "2026-10-01T06:00:00Z"]
+    assert result["structuredContent"]["window"]["start"] == "2026-10-01T00:00:00Z"
+    assert result["structuredContent"]["window"]["end"] == "2026-10-01T06:00:00Z"
+
+
+def test_structured_tool_rejects_reversed_window(monkeypatch):
+    client = _client(monkeypatch)
+
+    result = _tools_call(
+        client, "signoz_search_logs", {"start": "2026-10-02T00:00:00Z", "end": "2026-10-01T00:00:00Z"}
+    )
+
+    assert result["isError"] is True
+    assert result["structuredContent"]["code"] == "BAD_ARGUMENTS"
+    assert "earlier" in result["structuredContent"]["error"]
+
+
+def test_long_aggregate_is_chunked_through_the_app(monkeypatch):
+    client = _client(monkeypatch)
+    calls = []
+
+    async def fake_run_sz(args, settings):
+        calls.append(args)
+        return {"success": True, "data": [{"value": 1}]}
+
+    monkeypatch.setattr("signoz_mcp.app.run_sz", fake_run_sz)
+
+    result = _tools_call(
+        client,
+        "signoz_aggregate_logs",
+        {"start": "2026-10-01T00:00:00Z", "end": "2026-10-31T00:00:00Z", "deployment": "dify-api-oltp"},
+    )
+
+    assert result["isError"] is False
+    assert len(calls) == 30
+    assert result["structuredContent"]["data"] == [{"value": 30}]
+    assert result["structuredContent"]["chunking"]["chunks"] == 30
+
+
+@pytest.mark.asyncio
+async def test_run_sz_kills_process_when_cancelled(tmp_path, monkeypatch):
+    from signoz_mcp.settings import Settings
+    from signoz_mcp.sz_runner import run_sz
+
+    marker = tmp_path / "marker.txt"
+    script = tmp_path / "slow_sz.py"
+    script.write_text(
+        "import os, pathlib, time\n"
+        "time.sleep(0.5)\n"
+        "pathlib.Path(os.environ['MARKER']).write_text('still-running')\n"
+    )
+    monkeypatch.setenv("MARKER", str(marker))
+    settings = Settings(
+        SIGNOZ_MCP_API_KEY="x" * 32,
+        SIGNOZ_MCP_SZ_PATH=str(script),
+        SIGNOZ_MCP_TIMEOUT_SECONDS=5,
+    )
+
+    task = asyncio.create_task(run_sz(["services"], settings))
+    await asyncio.sleep(0.15)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.6)
+
+    assert not marker.exists()

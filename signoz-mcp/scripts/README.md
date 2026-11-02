@@ -19,6 +19,7 @@
 ### 通用参数
 
 - `--hours N` — lookback 窗口（默认 1，最大 168）
+- `--start ISO` / `--end ISO` — 绝对时间窗口（ISO 8601，不带时区按 UTC；`schema` 除外）。只给 `--start` 时截止到当前时间；只给 `--end` 时向前推 `--hours`；要求 start < end，窗口上限 `SZ_MAX_WINDOW_DAYS`（默认 31 天）。不传时 `--hours` 行为不变
 - `--limit N` — row 上限（默认 30，最大 1000）
 - `--env E` — `deployment.environment` 过滤（`production` / `staging`）
 - `--json` — 输出原始 JSON（适合 agent 管道处理）
@@ -29,7 +30,7 @@
 - **`--tenant <uuid>`** 走 `attributes_string['tenant_id']` 精确匹配（dify 后端把 tenant_id 作为结构化 log attribute，不是 body 子串）
 - **`--grep <substring>`** 走 `body LIKE '%substring%'`，适合按 dataset_id / 路径子串过滤
 - **traceback 数据**在 `attributes_string['exception.stacktrace']` 字段，不在 body
-- 时间字段是 UInt64 **纳秒**，SQL 用 `{start_ns}` / `{end_ns}` 占位符可自动替换
+- 时间字段是 UInt64 **纳秒**，SQL 用 `{start_ns}` / `{end_ns}` 占位符可自动替换（`--hours` 或 `--start`/`--end` 决定取值）
 - 表名前缀 `signoz_logs.` 缺省自动补
 
 ## 配置
@@ -66,7 +67,10 @@ sz errors --tenant d9008497-b4f0-4993-9a65-61a87e084566 --hours 24
 # 2. 看完整 stacktrace（这里 body 字段太短，必须用 traceback）
 sz traceback --grep "datasets/33933658" --hours 24 --limit 1
 
-# 3. 任意聚合统计
+# 3. 绝对时间窗口（查旧事故）
+sz query "SELECT count() FROM signoz_logs.distributed_logs_v2 WHERE timestamp >= {start_ns} AND timestamp <= {end_ns}" --start 2026-10-01T00:00:00Z --end 2026-10-02T00:00:00Z
+
+# 4. 任意聚合统计（相对窗口）
 sz query "SELECT count(*) AS cnt, substring(body,1,80) AS body_head FROM signoz_logs.distributed_logs_v2 WHERE timestamp >= {start_ns} AND severity_text = 'ERROR' AND attributes_string['tenant_id'] = 'd9008497-b4f0-4993-9a65-61a87e084566' GROUP BY body_head ORDER BY cnt DESC" --hours 24
 ```
 

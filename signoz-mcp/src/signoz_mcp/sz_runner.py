@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from .settings import Settings
+from .sz_commands import ALLOWED_COMMANDS
 
 
-_ALLOWED_COMMANDS = {"errors", "traceback", "query", "schema", "services"}
+_ALLOWED_COMMANDS = ALLOWED_COMMANDS
 _READ_ONLY_SQL_START_RE = re.compile(r"^(SELECT|WITH|SHOW|DESCRIBE|EXPLAIN)\b", re.IGNORECASE)
 _SCHEMA_TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
 
@@ -39,7 +40,10 @@ def _validate_args(args: Any) -> list[str]:
 
     command = validated[0]
     if command not in _ALLOWED_COMMANDS:
-        raise ValueError(f"unsupported sz command: {command}")
+        raise ValueError(
+            f"unsupported sz command: {command}; supported: "
+            f"{', '.join(sorted(_ALLOWED_COMMANDS))}; pass [\"help\"] for usage"
+        )
     if command == "query":
         if len(validated) < 2:
             raise ValueError("query requires SQL")
@@ -70,8 +74,10 @@ async def run_sz(args: Any, settings: Settings) -> dict[str, Any]:
         env["SIGNOZ_URL"] = settings.signoz_url
     if settings.signoz_api_key:
         env["SIGNOZ_API_KEY"] = settings.signoz_api_key
+    env["SZ_MAX_WINDOW_DAYS"] = str(settings.max_window_days)
 
     cmd = [*_base_command(settings.sz_path), *validated_args, "--json", "-q"]
+    proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -83,8 +89,14 @@ async def run_sz(args: Any, settings: Settings) -> dict[str, Any]:
             proc.communicate(),
             timeout=settings.timeout_seconds,
         )
+    except asyncio.CancelledError:
+        # A cancelled caller (e.g. an aborted chunked query) must not leave sz running.
+        if proc is not None:
+            await _kill_process(proc)
+        raise
     except asyncio.TimeoutError:
-        await _kill_process(proc)
+        if proc is not None:
+            await _kill_process(proc)
         return {
             "success": False,
             "code": "SZ_TIMEOUT",
