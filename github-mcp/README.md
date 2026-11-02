@@ -55,6 +55,8 @@ uv run --locked github-mcp
 
 使用 Python 3.12。单元测试用 `httpx.MockTransport` 模拟 GitHub API，不需要网络或真实凭据。
 
+所有工具都在 `tools/list` 中声明 `annotations.readOnlyHint: true`、`destructiveHint: false`。OpenConnector 等客户端据此判断读写，未声明时新工具会被当作 write 并要求确认。
+
 ## 构建
 
 ```bash

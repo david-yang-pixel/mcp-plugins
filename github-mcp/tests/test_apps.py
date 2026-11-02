@@ -82,3 +82,24 @@ def test_get_issue_uses_issue_endpoint() -> None:
 
     assert result["success"] is True
     assert request.await_args.args[1] == "/repos/langgenius/dify/issues/123"
+
+
+def test_every_github_tool_is_annotated_read_only(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_MCP_API_KEY", "github-secret")
+    from github_mcp.settings import get_settings
+
+    get_settings.cache_clear()
+    from github_mcp.app import create_service_app
+
+    client = TestClient(create_service_app("github-mcp"))
+    response = client.post(
+        "/mcp",
+        headers=_auth("github-secret"),
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+    )
+
+    tools = response.json()["result"]["tools"]
+    assert len(tools) == 11
+    for tool in tools:
+        assert tool["annotations"]["readOnlyHint"] is True, tool["name"]
+        assert tool["annotations"]["destructiveHint"] is False, tool["name"]
