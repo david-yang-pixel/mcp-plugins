@@ -34,6 +34,12 @@ def test_github_mcp_exposes_only_github_tools(monkeypatch) -> None:
         "github_search_issues",
         "github_get_issue",
         "github_code_search",
+        "github_get_pr_files",
+        "github_list_pr_commits",
+        "github_compare",
+        "github_list_issue_comments",
+        "github_list_releases",
+        "github_get_release",
     }
 
 
@@ -52,8 +58,9 @@ def test_search_issues_uses_issue_qualifier() -> None:
         )
 
     assert result["success"] is True
-    assert request.await_args.args[1] == "/search/issues"
-    assert request.await_args.kwargs["params"] == {
+    search_call = request.await_args_list[0]
+    assert search_call.args[1] == "/search/issues"
+    assert search_call.kwargs["params"] == {
         "q": "repo:langgenius/dify is:issue workflow timeout",
         "per_page": "4",
     }
