@@ -65,11 +65,17 @@ async def handle_query(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "invalid json"}, status=400)
 
+    if not isinstance(body, dict):
+        return web.json_response({"error": "invalid json"}, status=400)
+
     result = await execute_gateway_query(
         cfg=cfg,
         database=str(body.get("database") or ""),
         sql=str(body.get("sql") or ""),
         ticket_id=str(body.get("ticket_id") or ""),
+        offset=body.get("offset"),
+        limit=body.get("limit"),
+        output_format=body.get("format") or "csv",
     )
     status = 200 if result.success else 400
     if result.code == "TELEPORT_EXPIRED":

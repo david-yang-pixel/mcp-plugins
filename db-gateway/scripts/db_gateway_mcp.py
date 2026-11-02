@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Minimal stdio MCP server for DB Gateway.
 
-Exposes one tool:
-  - db_gateway_query(database, sql, ticket_id="")
+Exposes one tool (schema shared with the HTTP MCP endpoint):
+  - db_gateway_query(database, sql, ticket_id="", offset=0, limit=None, format="csv")
 
 The MCP server itself does not hold Teleport credentials. It forwards requests
 to the DB Gateway HTTP API, which owns Teleport, DB proxy, renewal, SQL safety,
@@ -40,7 +40,8 @@ def _error(req_id: Any, code: int, message: str) -> None:
 def _gateway_query(args: dict[str, Any]) -> dict[str, Any]:
     base_url = os.environ.get("DB_GATEWAY_URL", "").rstrip("/")
     api_key = os.environ.get("DB_GATEWAY_API_KEY", "")
-    timeout = float(os.environ.get("DB_GATEWAY_TIMEOUT", "35"))
+    # Gateway budget = query_timeout_seconds (30) + count_timeout_seconds (5) + connect.
+    timeout = float(os.environ.get("DB_GATEWAY_TIMEOUT", "45"))
     if not base_url:
         return {
             "success": False,
@@ -55,13 +56,16 @@ def _gateway_query(args: dict[str, Any]) -> dict[str, Any]:
         }
 
     headers = {"X-API-Key": api_key}
-    body = json.dumps(
-        {
-            "database": args.get("database"),
-            "sql": args.get("sql"),
-            "ticket_id": args.get("ticket_id") or "",
-        },
-    ).encode("utf-8")
+    payload: dict[str, Any] = {
+        "database": args.get("database"),
+        "sql": args.get("sql"),
+        "ticket_id": args.get("ticket_id") or "",
+    }
+    # Only forward optional paging/format args when given, so older gateways keep working.
+    for key in ("offset", "limit", "format"):
+        if args.get(key) is not None:
+            payload[key] = args[key]
+    body = json.dumps(payload).encode("utf-8")
     req = request.Request(
         f"{base_url}/query",
         data=body,

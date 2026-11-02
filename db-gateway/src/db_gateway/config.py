@@ -31,6 +31,8 @@ class PostgresConfig(BaseModel):
     teleport_retry_attempts: int = 1
     teleport_retry_delay_seconds: float = 0.25
     singleflight_enabled: bool = True
+    # total_rows 计数预算（秒）：在同一游标上 MOVE ALL，超时则 total_rows=null；0 关闭计数。
+    count_timeout_seconds: float = 5
 
 
 class DbGatewayConfig(BaseModel):
@@ -38,6 +40,10 @@ class DbGatewayConfig(BaseModel):
     listen_host: str = "127.0.0.1"
     listen_port: int = 18081
     request_timeout_seconds: int = 35
+    # true 时缺少 ticket_id 的查询直接拒绝（TICKET_ID_REQUIRED）；默认 false 兼容现有调用方。
+    require_ticket_id: bool = False
+    # >0 时缺少 ticket_id 会发飞书提醒，同类提醒至少间隔该秒数；0 关闭。
+    missing_ticket_alert_interval_seconds: int = 0
 
 
 class TeleportConfig(BaseModel):
@@ -74,6 +80,7 @@ class EnvSettings(BaseSettings):
     db_gateway_api_key: str = ""
     db_gateway_listen_host: str | None = None
     db_gateway_listen_port: int | None = None
+    db_gateway_require_ticket_id: bool | None = None
     teleport_user: str = ""
     teleport_public_base_url: str = ""
     teleport_password: str = ""
@@ -111,6 +118,8 @@ def load_config(config_path: str = "config.yaml") -> AppConfig:
         cfg.db_gateway.listen_host = env.db_gateway_listen_host
     if env.db_gateway_listen_port is not None:
         cfg.db_gateway.listen_port = env.db_gateway_listen_port
+    if env.db_gateway_require_ticket_id is not None:
+        cfg.db_gateway.require_ticket_id = env.db_gateway_require_ticket_id
     if env.teleport_user:
         cfg.teleport.user = env.teleport_user
     if env.teleport_public_base_url:

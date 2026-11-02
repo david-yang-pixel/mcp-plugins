@@ -60,6 +60,9 @@ async def handle_mcp_message(message: dict[str, Any], *, cfg: Any) -> dict[str, 
             database=str(args.get("database") or ""),
             sql=str(args.get("sql") or ""),
             ticket_id=str(args.get("ticket_id") or ""),
+            offset=args.get("offset"),
+            limit=args.get("limit"),
+            output_format=args.get("format") or "csv",
         )
         payload = data.to_json()
         return _jsonrpc_result(req_id, {

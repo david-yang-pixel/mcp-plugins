@@ -9,9 +9,14 @@ postgres:
   db_prod: your-production-database
   db_billing: your-billing-database
   db_plugin: your-plugin-database
+  max_rows: 1000
+  query_timeout_seconds: 30
+  count_timeout_seconds: 5
 db_gateway:
   listen_host: 127.0.0.1
   listen_port: 18081
+  require_ticket_id: false
+  missing_ticket_alert_interval_seconds: 0
 teleport:
   proxy: teleport.example.com:443
   auth_home: ./.tsh
