@@ -173,7 +173,33 @@ def test_list_runtime_deployments_reports_rows_and_mappings(monkeypatch):
     assert data["deployments"][1]["repos"] == ["dify"]
     assert data["deployment_repos"]["dify-api-oltp"] == ["dify"]
     assert data["configured_repo_deployments"]["dify-sandbox"] == ["dify-sandbox"]
-    assert "dify-api-oltp" in data["configured_without_logs"]
+    # The listing was truncated, so absence of a configured deployment proves nothing.
+    assert data["configured_without_logs"] is None
+
+
+def test_configured_without_logs_respects_name_filter(monkeypatch):
+    monkeypatch.setenv("SOURCE_MCP_SIGNOZ_MCP_URL", "http://signoz.invalid")
+    monkeypatch.delenv("SOURCE_MCP_RUNTIME_DEPLOYMENTS", raising=False)
+    monkeypatch.delenv("SOURCE_MCP_RUNTIME_PATH_DEPLOYMENTS", raising=False)
+    rows = [
+        {
+            "deployment": "dify-marketplace-backend",
+            "environment": "production",
+            "image_tag": "2.3.2",
+            "log_count": 5,
+        },
+    ]
+    monkeypatch.setattr(runtime, "_post_json", lambda *_args: (200, _signoz_response(rows)))
+
+    async def call() -> dict[str, Any]:
+        return await runtime.list_runtime_deployments(
+            settings=Settings(_env_file=None), name_contains="marketplace"
+        )
+
+    data = anyio.run(call)
+
+    # dify-web runs but does not match name_contains, so it must not be reported.
+    assert data["configured_without_logs"] == ["dify-marketplace-ops-backend"]
 
 
 def test_list_runtime_deployments_filters_environment(monkeypatch):

@@ -56,6 +56,8 @@ uv run --locked docs-tool-service
 - 建索引及 `official_docs_read` 返回前会去掉 llms 的 "Documentation Index" 说明块、markdown 图片 `![..](..)`、指向图片的链接（保留链接文字）、图片引用定义、HTML `<img>`、空的 `<Frame>` 以及裸图片 URL（png/jpg/gif/webp/svg 等）；非图片链接保留。
 - `official_docs_read` 的标题依次取 frontmatter `title`、`<title>`、第一个 H1（markdown `# `，跳过代码块；或 HTML `<h1>`）。
 
+所有工具都在 `tools/list` 中声明 `annotations.readOnlyHint: true`、`destructiveHint: false`。OpenConnector 等客户端据此判断读写，未声明时新工具会被当作 write 并要求确认。
+
 ## 构建
 
 ```bash

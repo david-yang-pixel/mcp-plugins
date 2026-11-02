@@ -67,6 +67,8 @@ uv run --locked signoz-mcp
 | `SIGNOZ_MCP_LOG_COMPACT_DENYLIST` | 见 `settings.py` | compact 时删除的属性键，逗号分隔 |
 | `SIGNOZ_MCP_LOG_MAX_FIELD_CHARS` | `4000` | compact 时单个字符串截断长度 |
 
+所有工具都在 `tools/list` 中声明 `annotations.readOnlyHint: true`、`destructiveHint: false`。OpenConnector 等客户端据此判断读写，未声明时新工具会被当作 write 并要求确认。
+
 ## 构建
 
 ```bash

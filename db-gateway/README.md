@@ -88,6 +88,8 @@ HTTP `POST /query` 与 MCP `tools/call`（`/mcp`，以及 `scripts/db_gateway_mc
 
 未开启 `require_ticket_id` 时，缺少 ticket_id 的查询照常执行，但返回 warning，审计日志记录 `"ticket_id_missing": true`。审计日志每条都带 `ticket_id_missing`、`offset`、`limit`、`format` 字段，成功时另有 `total_rows`、`has_more`、`timing_ms`。stdio 客户端默认超时 `DB_GATEWAY_TIMEOUT=45` 秒。
 
+所有工具都在 `tools/list` 中声明 `annotations.readOnlyHint: true`、`destructiveHint: false`。OpenConnector 等客户端据此判断读写，未声明时新工具会被当作 write 并要求确认。
+
 ## 构建
 
 ```bash

@@ -63,8 +63,25 @@ def initialize_result(request_id: Any, *, service_name: str) -> dict[str, Any]:
     }
 
 
+# Every tool only reads external systems. Clients such as OpenConnector derive
+# read/write from these hints; without them unfamiliar tool names are treated as writes.
+READ_ONLY_ANNOTATIONS: dict[str, Any] = {
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": True,
+}
+
+
+def with_read_only_annotations(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {**tool, "annotations": {**READ_ONLY_ANNOTATIONS, **(tool.get("annotations") or {})}}
+        for tool in tools
+    ]
+
+
 def tools_list_result(request_id: Any, tools: list[dict[str, Any]]) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": tools}}
+    return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": with_read_only_annotations(tools)}}
 
 
 def success(data: Any = None, *, output: str = "") -> dict[str, Any]:

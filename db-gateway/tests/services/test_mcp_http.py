@@ -211,3 +211,16 @@ async def test_http_query_rejects_non_object_body(mcp_client):
     resp = await mcp_client.post("/query", json=[1, 2], headers={"X-API-Key": "secret"})
 
     assert resp.status == 400
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_is_annotated_read_only(mcp_client):
+    resp = await _post_mcp(
+        mcp_client,
+        {"jsonrpc": "2.0", "id": 9, "method": "tools/list", "params": {}},
+    )
+
+    assert resp.status == 200
+    tools = (await resp.json())["result"]["tools"]
+    assert tools[0]["annotations"]["readOnlyHint"] is True
+    assert tools[0]["annotations"]["destructiveHint"] is False

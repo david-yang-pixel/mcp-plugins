@@ -170,7 +170,37 @@ async def _require_auth(
     return settings
 
 
+# Clients such as OpenConnector derive read/write (and whether a call needs
+# confirmation) from these hints; without them unfamiliar tool names
+# (source_tree, list_runtime_deployments) were classified as writes.
+READ_ONLY_ANNOTATIONS: dict[str, Any] = {
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": True,
+}
+# refresh_repos clones, fetches, deepens and unshallows the shared on-server clone
+# cache (disk, CPU, network), so it must not be advertised as read-only. It never
+# deletes data, so it is not destructive either.
+_TOOL_ANNOTATION_OVERRIDES: dict[str, dict[str, Any]] = {
+    "refresh_repos": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False},
+}
+
+
 def _tools_list() -> list[dict[str, Any]]:
+    return [
+        {
+            **tool,
+            "annotations": {
+                **READ_ONLY_ANNOTATIONS,
+                **_TOOL_ANNOTATION_OVERRIDES.get(tool["name"], {}),
+            },
+        }
+        for tool in _tool_definitions()
+    ]
+
+
+def _tool_definitions() -> list[dict[str, Any]]:
     runtime_props = {
         "deployment": {"type": "string", "description": _DEPLOYMENT_DESCRIPTION},
         "environment": {"type": "string", "description": _ENVIRONMENT_DESCRIPTION},

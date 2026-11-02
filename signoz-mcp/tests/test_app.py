@@ -656,3 +656,19 @@ async def test_run_sz_kills_process_when_cancelled(tmp_path, monkeypatch):
     await asyncio.sleep(0.6)
 
     assert not marker.exists()
+
+
+def test_every_signoz_tool_is_annotated_read_only(monkeypatch):
+    client = _client(monkeypatch)
+
+    response = client.post(
+        "/mcp",
+        headers=AUTH_HEADER,
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+    )
+
+    tools = response.json()["result"]["tools"]
+    assert "sz_run" in {tool["name"] for tool in tools}
+    for tool in tools:
+        assert tool["annotations"]["readOnlyHint"] is True, tool["name"]
+        assert tool["annotations"]["destructiveHint"] is False, tool["name"]

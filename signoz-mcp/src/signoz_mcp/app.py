@@ -62,33 +62,44 @@ def _tool_result(
     }
 
 
+# Every tool only queries SigNoz. Clients such as OpenConnector derive read/write
+# from these hints; without them unfamiliar tool names are treated as writes.
+READ_ONLY_ANNOTATIONS: dict[str, Any] = {
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": True,
+}
+
+
 def _tools_list(request_id: Any) -> dict[str, Any]:
+    tools = [
+        {
+            "name": "sz_run",
+            "description": sz_run_description(),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Arguments passed to sz, excluding --json and -q, e.g. "
+                            '["query", "SELECT ... WHERE timestamp >= {start_ns}", "--hours", "3"] '
+                            'or ["help"].'
+                        ),
+                    },
+                },
+                "required": ["args"],
+            },
+        },
+        *STRUCTURED_TOOLS,
+    ]
     return {
         "jsonrpc": "2.0",
         "id": request_id,
         "result": {
-            "tools": [
-                {
-                    "name": "sz_run",
-                    "description": sz_run_description(),
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "args": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": (
-                                    "Arguments passed to sz, excluding --json and -q, e.g. "
-                                    '["query", "SELECT ... WHERE timestamp >= {start_ns}", "--hours", "3"] '
-                                    'or ["help"].'
-                                ),
-                            },
-                        },
-                        "required": ["args"],
-                    },
-                },
-                *STRUCTURED_TOOLS,
-            ],
+            "tools": [{**tool, "annotations": dict(READ_ONLY_ANNOTATIONS)} for tool in tools],
         },
     }
 

@@ -73,7 +73,7 @@ def test_deploy_runtime_config_matches_new_settings():
     assert deployments["dify"] == "dify-api-oltp"
     assert deployments["dify-sandbox"] == "dify-sandbox"
     assert "dify-marketplace-backend" not in deployments
-    assert deployments["dify-billing"] == "dify-saas-billing,billing"
+    assert deployments["dify-billing"] == "dify-billing,billing"
     assert deployments["rbac"] == "dify-rbac,rbac"
     assert deployments["dify-marketplace"] == "dify-marketplace-backend,dify-marketplace-ops-backend"
     assert json.loads(config["SOURCE_MCP_RUNTIME_PATH_DEPLOYMENTS"]) == {"dify": {"web/": "dify-web"}}

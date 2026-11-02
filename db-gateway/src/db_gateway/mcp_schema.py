@@ -6,6 +6,13 @@ from typing import Any
 
 TOOL_SCHEMA: dict[str, Any] = {
     "name": "db_gateway_query",
+    # Read-only SQL only. Clients such as OpenConnector derive read/write from these hints.
+    "annotations": {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
     "description": (
         "Run a read-only SELECT/WITH query through the DB Gateway. "
         "Databases: prod, billing, plugin. The gateway enforces read-only SQL "
