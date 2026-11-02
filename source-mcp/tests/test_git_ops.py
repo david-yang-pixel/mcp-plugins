@@ -77,7 +77,7 @@ def test_search_source_disables_lazy_fetch_and_reports_missing_blobs(monkeypatch
     async def ensure_repo(_repo: str, _settings: Settings) -> Path:
         return tmp_path
 
-    async def resolve_ref(_repo: str, _ref: str, _settings: Settings) -> dict[str, str]:
+    async def resolve_ref(_repo: str, _ref: str, _settings: Settings, **_kwargs: object) -> dict[str, str]:
         return {"repo": "dify", "ref": "runtime-ref", "commit": "a" * 40}
 
     async def run_git(
@@ -138,7 +138,7 @@ def test_full_repo_searches_respect_configured_concurrency(
     async def ensure_repo(_repo: str, _settings: Settings) -> Path:
         return tmp_path
 
-    async def resolve_ref(_repo: str, _ref: str, _settings: Settings) -> dict[str, str]:
+    async def resolve_ref(_repo: str, _ref: str, _settings: Settings, **_kwargs: object) -> dict[str, str]:
         return {"repo": "dify", "ref": "runtime-ref", "commit": "a" * 40}
 
     async def exercise() -> int:

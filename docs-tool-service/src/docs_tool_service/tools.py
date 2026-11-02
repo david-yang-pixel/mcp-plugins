@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
+import math
 import re
 import time
 import xml.etree.ElementTree as ET
+from collections import OrderedDict
 from dataclasses import dataclass
+from functools import lru_cache
 from html.parser import HTMLParser
 from typing import Any, Iterable
 from urllib.parse import urljoin, urlparse
@@ -33,6 +37,20 @@ DOCS_TRANSLATED_INDEXES = {
     ),
 }
 
+COMMUNITY_SOURCE = "official_docs_community"
+ENTERPRISE_SOURCE = "official_docs_enterprise"
+
+# Enterprise docs publish one llms index per version family and language, e.g.
+# https://enterprise-docs.dify.ai/_llms/en/3-5-x.txt. The root llms.txt lists the
+# published version families. Page URLs carry the family as a path segment
+# (/en/3.5.x/...), which is what search results are filtered on.
+ENTERPRISE_VERSIONS_INDEX_URL = "https://enterprise-docs.dify.ai/llms.txt"
+ENTERPRISE_VERSION_INDEX_TEMPLATE = "https://enterprise-docs.dify.ai/_llms/{language}/{slug}.txt"
+MAX_VERSION_CORPORA = 8
+
+DOC_LANGUAGES = ("en", "zh", "ja")
+DOC_EDITIONS = ("all", "cloud", "self-hosted")
+
 SITE_SITEMAP_INDEX_URL = "https://dify.ai/sitemap-index.xml"
 DOCS_HOSTS = {"enterprise-docs.dify.ai", "docs.dify.ai"}
 SITE_HOSTS = {"dify.ai", "www.dify.ai"}
@@ -48,7 +66,10 @@ TOOLS = [
         "name": "official_docs_search",
         "description": (
             "Full-text search of the latest Dify official documentation corpus in English, "
-            "Chinese, and Japanese. Uses Dify official feeds only, never Zendesk Help Center."
+            "Chinese, and Japanese. Uses Dify official feeds only, never Zendesk Help Center. "
+            "Results rank pages matching all query words first, then by matched-word count, "
+            "with title/path/heading hits and rare words weighted higher. Each result reports "
+            "its language, version family (Enterprise docs only), and edition."
         ),
         "inputSchema": {
             "type": "object",
@@ -59,6 +80,35 @@ TOOLS = [
                     "default": "auto",
                     "description": (
                         "auto, official_docs_community, or official_docs_enterprise"
+                    ),
+                },
+                "language": {
+                    "type": "string",
+                    "default": "auto",
+                    "description": (
+                        "auto, all, en, zh, or ja. auto infers the language from the query "
+                        "(kana: ja, Han characters: zh, otherwise en) and falls back to all "
+                        "languages when nothing matches"
+                    ),
+                },
+                "version": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Enterprise docs version family such as 3.5, 3.5.x, or v3.5.2, or "
+                        "latest. Empty means no version filter; a version written as 3.5.x "
+                        "or v3.5 in the query is detected automatically. Community docs are "
+                        "unversioned and are excluded while a version filter is active"
+                    ),
+                },
+                "edition": {
+                    "type": "string",
+                    "default": "all",
+                    "description": (
+                        "all, cloud, or self-hosted. Based on the community docs URL "
+                        "section (/cloud/ or /self-host/); shared pages such as API "
+                        "reference, plugin development, and learn are kept for both. "
+                        "Enterprise docs count as self-hosted"
                     ),
                 },
                 "limit": {
@@ -75,7 +125,9 @@ TOOLS = [
         "name": "official_docs_read",
         "description": (
             "Read a Dify official documentation page. Use offset and max_chars to read "
-            "long pages completely without permanent truncation."
+            "long pages completely without permanent truncation. Returns the page title, "
+            "language, version family, and edition; image links and the llms "
+            "Documentation Index notice are removed from the content."
         ),
         "inputSchema": {
             "type": "object",
@@ -165,6 +217,9 @@ class Document:
     url: str
     content: str
     source: str
+    language: str = ""
+    version: str = ""
+    edition: str = ""
 
 
 @dataclass(frozen=True)
@@ -180,35 +235,37 @@ class SearchResult:
     url: str
     description: str
     source: str
+    language: str = ""
+    version: str | None = None
+    edition: str = ""
+    matched_terms: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "title": self.title,
+            "url": self.url,
+            "description": self.description,
+            "source": self.source,
+            "language": self.language,
+            "version": self.version,
+            "edition": self.edition,
+            "matched_terms": list(self.matched_terms),
+        }
 
 
 _DOCS_CACHE: dict[str, tuple[float, float, list[Document]]] = {}
 _SITEMAP_CACHE: tuple[float, float, list[str]] | None = None
+_ENTERPRISE_VERSIONS_CACHE: tuple[float, list[str]] | None = None
+# (version family, language) -> (expires_at, documents or None when not published)
+_VERSION_CORPUS_CACHE: "OrderedDict[tuple[str, str], tuple[float, list[Document] | None]]" = (
+    OrderedDict()
+)
 
 
 async def handle(name: str, arguments: dict[str, Any], settings: Settings) -> dict[str, Any]:
     try:
         if name == "official_docs_search":
-            query = required_str(arguments, "query")
-            source = optional_str(arguments, "source", "auto") or "auto"
-            limit = optional_int(arguments, "limit", 5, minimum=1, maximum=20)
-            sources = _resolve_sources(source)
-            documents: list[Document] = []
-            refreshed_at: list[float] = []
-            for item in sources:
-                source_documents, source_refreshed_at = await _load_docs_corpus(item, settings)
-                documents.extend(source_documents)
-                refreshed_at.append(source_refreshed_at)
-            results = _search_documents(documents, query=query, limit=limit)
-            return success(
-                {
-                    "results": [result.__dict__ for result in results],
-                    "indexed_pages": len(documents),
-                    "sources": sources,
-                    "languages": ["en", "zh", "ja"],
-                    "refreshed_at_unix": min(refreshed_at) if refreshed_at else None,
-                }
-            )
+            return success(await _docs_search(arguments, settings))
 
         if name == "official_docs_read":
             url = required_str(arguments, "url")
@@ -266,6 +323,348 @@ async def handle(name: str, arguments: dict[str, Any], settings: Settings) -> di
         return failure("INTERNAL_ERROR", str(exc))
 
 
+async def _docs_search(arguments: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    query = required_str(arguments, "query")
+    source = optional_str(arguments, "source", "auto") or "auto"
+    limit = optional_int(arguments, "limit", 5, minimum=1, maximum=20)
+    language_arg = _normalize_language_arg(optional_str(arguments, "language", "auto"))
+    edition = _normalize_edition(optional_str(arguments, "edition", "all"))
+    version = _normalize_version(optional_str(arguments, "version", ""))
+    sources = _resolve_sources(source)
+
+    search_query = query
+    version_origin = "explicit" if version else None
+    if not version and ENTERPRISE_SOURCE in sources:
+        detected, remaining = _detect_query_version(
+            query, enterprise_only=sources == [ENTERPRISE_SOURCE]
+        )
+        if detected and remaining.strip():
+            version, search_query, version_origin = detected, remaining.strip(), "query"
+
+    if language_arg == "auto":
+        languages = [_infer_query_language(search_query)]
+    elif language_arg == "all":
+        languages = list(DOC_LANGUAGES)
+    else:
+        languages = [language_arg]
+
+    documents: list[Document] = []
+    refreshed_at: list[float] = []
+    for item in sources:
+        source_documents, source_refreshed_at = await _load_docs_corpus(item, settings)
+        documents.extend(source_documents)
+        refreshed_at.append(source_refreshed_at)
+    indexed_pages = len(documents)
+
+    notices: list[str] = []
+    available_versions: list[str] | None = None
+    if version:
+        if ENTERPRISE_SOURCE not in sources:
+            documents = []
+            notices.append(
+                "official_docs_community is unversioned (it only publishes the latest "
+                "docs), so a version filter matches nothing there. Use "
+                "source=official_docs_enterprise for versioned docs or omit version."
+            )
+        else:
+            available_versions = await _load_enterprise_versions(settings, documents)
+            if version == "latest":
+                version = available_versions[0] if available_versions else ""
+            if version not in available_versions:
+                notices.append(
+                    f"Enterprise docs version {version or 'latest'} is not published. "
+                    f"Available versions: {', '.join(available_versions) or 'none'}."
+                )
+                documents = []
+            else:
+                documents = await _enterprise_version_documents(
+                    version, languages, documents, settings, notices
+                )
+                if COMMUNITY_SOURCE in sources:
+                    notices.append(
+                        "official_docs_community is unversioned and was excluded because a "
+                        "version filter is active."
+                    )
+
+    edition_pool = [document for document in documents if _matches_edition(document, edition)]
+    pool = [document for document in edition_pool if document.language in languages]
+    results = _search_documents(pool, query=search_query, limit=limit)
+    applied_language = language_arg if language_arg != "auto" else languages[0]
+    if not results and language_arg == "auto" and len(pool) != len(edition_pool):
+        fallback = _search_documents(edition_pool, query=search_query, limit=limit)
+        if fallback:
+            notices.append(
+                f"No {languages[0]} results for this query; showing results from all languages."
+            )
+            results, pool, applied_language = fallback, edition_pool, "all"
+    if version and not results and available_versions is not None:
+        if pool:
+            notices.append(f"No pages in Enterprise docs {version} match this query.")
+        elif version in available_versions:
+            notices.append(
+                f"Enterprise docs {version} has no pages for language {applied_language}."
+            )
+
+    payload: dict[str, Any] = {
+        "results": [result.as_dict() for result in results],
+        "indexed_pages": indexed_pages,
+        "searched_pages": len(pool),
+        "sources": sources,
+        "languages": list(DOC_LANGUAGES),
+        "filters": {
+            "language": applied_language,
+            "version": version or None,
+            "version_origin": version_origin,
+            "edition": edition,
+        },
+        "notices": notices,
+        "refreshed_at_unix": min(refreshed_at) if refreshed_at else None,
+    }
+    if version_origin == "query":
+        payload["filters"]["query_without_version"] = search_query
+    if available_versions is not None:
+        payload["available_versions"] = available_versions
+    return payload
+
+
+def _normalize_language_arg(value: str) -> str:
+    language = (value or "auto").strip().casefold()
+    if language in {"any", "*"}:
+        return "all"
+    if language not in {"auto", "all", *DOC_LANGUAGES}:
+        raise ValueError("language must be auto, all, en, zh, or ja")
+    return language
+
+
+def _normalize_edition(value: str) -> str:
+    edition = (value or "all").strip().casefold().replace("_", "-")
+    edition = {
+        "any": "all",
+        "": "all",
+        "self-host": "self-hosted",
+        "selfhosted": "self-hosted",
+        "self hosted": "self-hosted",
+    }.get(edition, edition)
+    if edition not in DOC_EDITIONS:
+        raise ValueError("edition must be all, cloud, or self-hosted")
+    return edition
+
+
+_VERSION_INPUT = re.compile(r"^v?(\d{1,3})[.\-](\d{1,3})(?:[.\-](?:\d{1,4}|x))?$", re.I)
+_QUERY_VERSION = re.compile(
+    r"(?<![A-Za-z0-9.])(?P<v>v)?(?P<major>\d{1,3})\.(?P<minor>\d{1,3})"
+    r"(?:\.(?P<patch>\d{1,4}|x))?(?![A-Za-z0-9.])",
+    re.I,
+)
+
+
+def _normalize_version(value: str) -> str:
+    version = (value or "").strip().casefold()
+    if not version or version in {"all", "any"}:
+        return ""
+    if version == "latest":
+        return "latest"
+    match = _VERSION_INPUT.match(version)
+    if not match:
+        raise ValueError("version must look like 3.5, 3.5.x, v3.5.2, or latest")
+    return f"{int(match.group(1))}.{int(match.group(2))}.x"
+
+
+def _detect_query_version(query: str, *, enterprise_only: bool) -> tuple[str, str]:
+    """Find a version family in free text.
+
+    When only Enterprise docs are searched any ``major.minor`` number counts.
+    Otherwise only unambiguous forms (``3.5.x`` or ``v3.5``) count, so a query
+    such as "python 3.12" does not silently drop the community docs.
+    """
+    for match in _QUERY_VERSION.finditer(query):
+        explicit = bool(match.group("v")) or (match.group("patch") or "").casefold() == "x"
+        if not (enterprise_only or explicit):
+            continue
+        family = f"{int(match.group('major'))}.{int(match.group('minor'))}.x"
+        remaining = f"{query[: match.start()]} {query[match.end() :]}"
+        remaining = re.sub(r"\s+", " ", remaining).strip()
+        return family, remaining
+    return "", query
+
+
+def _version_key(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", version))
+
+
+def _infer_query_language(text: str) -> str:
+    if re.search(r"[぀-ヿ]", text):
+        return "ja"
+    if re.search(r"[㐀-䶿一-鿿]", text):
+        return "zh"
+    return "en"
+
+
+def _matches_edition(document: Document, edition: str) -> bool:
+    if edition == "all" or document.edition == "shared":
+        return True
+    if edition == "cloud":
+        return document.edition == "cloud"
+    return document.edition in {"self-hosted", "enterprise"}
+
+
+_CLOUD_ONLY_MARKERS = re.compile(
+    r"only available (?:on|in|for) (?:the )?dify cloud|dify cloud only|cloud[- ]only feature"
+    r"|仅(?:适用于|限于?|支持)\s*(?:dify\s*)?cloud|クラウド版のみ",
+    re.I,
+)
+_SELF_HOSTED_ONLY_MARKERS = re.compile(
+    r"only available (?:on|in|for) self-host(?:ed|ing)?|self-host(?:ed)?[- ]only"
+    r"|community edition only|仅(?:适用于|限于?|支持)\s*(?:自部署|私有化部署|社区版)"
+    r"|セルフホスト(?:版)?のみ",
+    re.I,
+)
+
+
+def _classify_document(url: str, content: str) -> tuple[str, str, str]:
+    """Return (language, version family, edition) for an official docs page."""
+    parsed = urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    if parts and parts[0] in DOC_LANGUAGES:
+        language, rest = parts[0], parts[1:]
+    else:
+        language, rest = _infer_query_language(content[:4000]), parts
+    version = next((part for part in rest[:2] if re.fullmatch(r"\d+\.\d+\.x", part)), "")
+    if parsed.hostname == "enterprise-docs.dify.ai":
+        return language, version, "enterprise"
+    section = rest[0] if rest else ""
+    if section == "cloud":
+        edition = "cloud"
+    elif section in {"self-host", "self-hosted"}:
+        edition = "self-hosted"
+    else:
+        cloud = bool(_CLOUD_ONLY_MARKERS.search(content))
+        self_hosted = bool(_SELF_HOSTED_ONLY_MARKERS.search(content))
+        if cloud != self_hosted:
+            edition = "cloud" if cloud else "self-hosted"
+        else:
+            edition = "shared"
+    return language, version, edition
+
+
+def _make_document(*, title: str, url: str, content: str, source: str) -> Document:
+    cleaned = _clean_content(content)
+    language, version, edition = _classify_document(url, cleaned)
+    return Document(
+        title=title,
+        url=url,
+        content=cleaned,
+        source=source,
+        language=language,
+        version=version,
+        edition=edition,
+    )
+
+
+async def _load_enterprise_versions(
+    settings: Settings,
+    documents: list[Document] | None = None,
+) -> list[str]:
+    global _ENTERPRISE_VERSIONS_CACHE
+
+    now = time.monotonic()
+    if _ENTERPRISE_VERSIONS_CACHE and _ENTERPRISE_VERSIONS_CACHE[0] > now:
+        versions = list(_ENTERPRISE_VERSIONS_CACHE[1])
+    else:
+        async with _http_client(settings) as client:
+            text, _, _ = await _fetch_text_with_client(
+                client,
+                ENTERPRISE_VERSIONS_INDEX_URL,
+                allowed_hosts=DOCS_HOSTS,
+                max_bytes=MAX_DOWNLOAD_BYTES,
+            )
+        versions = _parse_enterprise_versions(text)
+        _ENTERPRISE_VERSIONS_CACHE = (
+            now + max(21_600.0, settings.docs_cache_ttl_seconds),
+            versions,
+        )
+    for document in documents or []:
+        if document.source == ENTERPRISE_SOURCE and document.version:
+            versions.append(document.version)
+    return sorted(set(versions), key=_version_key, reverse=True)
+
+
+def _parse_enterprise_versions(text: str) -> list[str]:
+    versions = {
+        f"{int(major)}.{int(minor)}.x"
+        for major, minor in re.findall(r"/_llms/[a-z]{2}/(\d+)-(\d+)-x\.(?:txt|md)\b", text)
+    }
+    return sorted(versions, key=_version_key, reverse=True)
+
+
+async def _enterprise_version_documents(
+    version: str,
+    languages: list[str],
+    documents: list[Document],
+    settings: Settings,
+    notices: list[str],
+) -> list[Document]:
+    """Return Enterprise documents of one version family for the given languages.
+
+    The default corpus only holds the current version (plus one translated
+    version); missing (version, language) pairs are fetched from that version's
+    own llms index and cached.
+    """
+    selected = [
+        document
+        for document in documents
+        if document.source == ENTERPRISE_SOURCE and document.version == version
+    ]
+    present = {document.language for document in selected}
+    for language in languages:
+        if language in present:
+            continue
+        extra = await _load_enterprise_version_corpus(version, language, settings)
+        if extra is None:
+            notices.append(f"Enterprise docs {version} is not published in language {language}.")
+            continue
+        selected.extend(document for document in extra if document.version == version)
+    return _dedupe_documents(selected)
+
+
+async def _load_enterprise_version_corpus(
+    version: str,
+    language: str,
+    settings: Settings,
+) -> list[Document] | None:
+    key = (version, language)
+    now = time.monotonic()
+    cached = _VERSION_CORPUS_CACHE.get(key)
+    if cached and cached[0] > now:
+        _VERSION_CORPUS_CACHE.move_to_end(key)
+        return cached[1]
+
+    index_url = ENTERPRISE_VERSION_INDEX_TEMPLATE.format(
+        language=language, slug=version.replace(".", "-")
+    )
+    documents: list[Document] | None
+    async with _http_client(settings) as client:
+        try:
+            references = await _load_page_references(
+                client, index_url, allowed_hosts=DOCS_HOSTS
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            documents = None
+        else:
+            documents = _dedupe_documents(
+                await _fetch_documents(client, references, source=ENTERPRISE_SOURCE)
+            )
+
+    ttl = max(21_600.0, settings.docs_cache_ttl_seconds)
+    _VERSION_CORPUS_CACHE[key] = (now + ttl, documents)
+    _VERSION_CORPUS_CACHE.move_to_end(key)
+    while len(_VERSION_CORPUS_CACHE) > MAX_VERSION_CORPORA:
+        _VERSION_CORPUS_CACHE.popitem(last=False)
+    return documents
+
+
 async def _load_docs_corpus(source: str, settings: Settings) -> tuple[list[Document], float]:
     now = time.monotonic()
     cached = _DOCS_CACHE.get(source)
@@ -286,7 +685,11 @@ async def _load_docs_corpus(source: str, settings: Settings) -> tuple[list[Docum
                 await _load_page_references(client, index_url, allowed_hosts=DOCS_HOSTS)
             )
         existing_urls = {document.url for document in documents}
-        references = [reference for reference in references if reference.url not in existing_urls]
+        references = [
+            reference
+            for reference in references
+            if _without_markdown_suffix(reference.url) not in existing_urls
+        ]
         documents.extend(await _fetch_documents(client, references, source=source))
 
     documents = _dedupe_documents(documents)
@@ -347,10 +750,10 @@ async def _fetch_documents(
                     max_bytes=MAX_DOWNLOAD_BYTES,
                 )
                 return (
-                    Document(
-                        title=reference.title,
+                    _make_document(
+                        title=reference.title or _extract_title(content),
                         url=_without_markdown_suffix(final_url),
-                        content=content.strip(),
+                        content=content,
                         source=source,
                     ),
                     None,
@@ -417,10 +820,10 @@ def _parse_llms_full(content: str, *, source: str) -> list[Document]:
             continue
         end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
         documents.append(
-            Document(
+            _make_document(
                 title=match.group("title").strip(),
                 url=url,
-                content=content[match.end() : end].strip(),
+                content=content[match.end() : end],
                 source=source,
             )
         )
@@ -461,42 +864,121 @@ def _parse_sitemap(content: str) -> list[str]:
     return urls
 
 
+_STOPWORDS = frozenset(
+    """a an and are as at be by can could do does for from get how i if in into is it its
+    me my not of on or should that the this to use using via was what when where which
+    who why will with you your 如何 怎么 怎样 什么 为什么 的 是 吗 呢""".split()
+)
+
+
+@dataclass
+class _TermMatch:
+    title: bool = False
+    heading: bool = False
+    path: bool = False
+    body_count: int = 0
+
+    @property
+    def any(self) -> bool:
+        return self.title or self.heading or self.path or self.body_count > 0
+
+
+def _query_terms(normalized: str) -> list[str]:
+    tokens = list(dict.fromkeys(_tokens(normalized)))
+    meaningful = [token for token in tokens if token not in _STOPWORDS]
+    return meaningful or tokens
+
+
+def _term_pattern(term: str) -> re.Pattern[str]:
+    escaped = re.escape(term)
+    if re.fullmatch(r"[0-9a-z]+", term):
+        # Word-prefix match: "timeout" matches "timeouts" but "api" not "rapid".
+        return re.compile(rf"(?<![0-9a-z]){escaped}")
+    return re.compile(escaped)
+
+
+@lru_cache(maxsize=32_768)
+def _document_fields(document: Document) -> dict[str, str]:
+    return {
+        "title": _normalize(document.title),
+        "path": _normalize(re.sub(r"[-_/.]+", " ", urlparse(document.url).path)),
+        "heading": _normalize(" ".join(re.findall(r"(?m)^#{1,6}[ \t]+(.+)$", document.content))),
+        "body": _normalize(document.content),
+    }
+
+
 def _search_documents(documents: list[Document], *, query: str, limit: int) -> list[SearchResult]:
     normalized = _normalize(query)
-    tokens = _tokens(normalized)
-    scored: list[tuple[int, Document, str]] = []
+    terms = _query_terms(normalized)
+    if not terms:
+        return []
+    patterns = {term: _term_pattern(term) for term in terms}
+    phrase = normalized if len(terms) > 1 else ""
+
+    matches: list[tuple[Document, dict[str, _TermMatch], dict[str, str]]] = []
+    document_frequency = dict.fromkeys(terms, 0)
     for document in documents:
-        title = _normalize(document.title)
-        url = _normalize(document.url)
-        body = _normalize(document.content)
-        score = 0
-        if normalized in title:
-            score += 100
-        if normalized in url:
-            score += 40
-        if normalized in body:
-            score += 30
-        for token in tokens:
-            if token in title:
-                score += 20
-            if token in url:
-                score += 8
-            if token in body:
-                score += 4
-        if score:
-            scored.append(
-                (score, document, _make_snippet(document.content, normalized, tokens))
+        fields = _document_fields(document)
+        term_matches: dict[str, _TermMatch] = {}
+        for term, pattern in patterns.items():
+            match = _TermMatch(
+                title=bool(pattern.search(fields["title"])),
+                heading=bool(pattern.search(fields["heading"])),
+                path=bool(pattern.search(fields["path"])),
+                body_count=sum(1 for _ in zip(range(10), pattern.finditer(fields["body"]))),
             )
-    scored.sort(key=lambda item: (-item[0], item[1].title.casefold(), item[1].url))
-    return [
-        SearchResult(
-            title=document.title,
-            url=document.url,
-            description=snippet,
-            source=document.source,
+            if match.any:
+                term_matches[term] = match
+                document_frequency[term] += 1
+        if term_matches:
+            matches.append((document, term_matches, fields))
+
+    total = max(1, len(documents))
+    idf = {
+        term: 1.0 + math.log((total + 1) / (frequency + 1))
+        for term, frequency in document_frequency.items()
+    }
+
+    scored: list[tuple[int, float, Document, tuple[str, ...]]] = []
+    for document, term_matches, fields in matches:
+        score = 0.0
+        for term, match in term_matches.items():
+            field_score = (
+                12.0 * match.title
+                + 8.0 * match.heading
+                + 6.0 * match.path
+                + (2.0 + 3.0 * min(match.body_count, 5) / 5 if match.body_count else 0.0)
+            )
+            score += idf[term] * field_score
+        if phrase:
+            score += 30.0 * (phrase in fields["title"])
+            score += 20.0 * (phrase in fields["heading"])
+            score += 10.0 * (phrase in fields["body"])
+        matched = tuple(term for term in terms if term in term_matches)
+        scored.append((len(matched), score, document, matched))
+
+    # All query words first, then by number of matched words, then weighted score.
+    scored.sort(
+        key=lambda item: (-item[0], -item[1], item[2].title.casefold(), item[2].url)
+    )
+    results: list[SearchResult] = []
+    for _, _, document, matched in scored[:limit]:
+        snippet_terms = sorted(matched, key=lambda term: -idf[term])
+        results.append(
+            SearchResult(
+                title=document.title,
+                url=document.url,
+                description=_make_snippet(
+                    document.content, phrase, snippet_terms, patterns=patterns
+                ),
+                source=document.source,
+                language=document.language,
+                version=document.version or None,
+                edition=document.edition,
+                matched_terms=matched,
+            )
         )
-        for _, document, snippet in scored[:limit]
-    ]
+    return results
 
 
 def _search_site_urls(urls: list[str], *, query: str, limit: int) -> list[dict[str, str]]:
@@ -554,15 +1036,18 @@ async def _read_content(
                 max_bytes=MAX_DOWNLOAD_BYTES,
             )
 
-    title = ""
     if "html" in content_type.casefold():
         title, text = _strip_html(text)
-    text = text.strip()
+    else:
+        title = _extract_title(text)
+    text = _clean_content(text)
+    if not title:
+        title = _extract_title(text)
     total_chars = len(text)
     safe_offset = min(offset, total_chars)
     end = min(safe_offset + max_chars, total_chars)
     next_offset = end if end < total_chars else None
-    return {
+    payload: dict[str, Any] = {
         "url": url,
         "fetched_url": final_url,
         "title": title,
@@ -572,6 +1057,89 @@ async def _read_content(
         "total_chars": total_chars,
         "truncated": next_offset is not None,
     }
+    if prefer_markdown:
+        language, version, edition = _classify_document(_without_markdown_suffix(final_url), text)
+        payload.update({"language": language, "version": version or None, "edition": edition})
+    return payload
+
+
+_FRONTMATTER = re.compile(r"\A\ufeff?---[ \t]*\n(?P<body>.*?)\n---[ \t]*(?:\n|\Z)", re.S)
+_CODE_FENCE = re.compile(r"(?ms)^[ \t]*(```|~~~).*?^[ \t]*\1[^\n]*$")
+
+
+def _extract_title(text: str) -> str:
+    """Title from YAML frontmatter, then <title>, then the first H1."""
+    frontmatter = _FRONTMATTER.match(text)
+    if frontmatter:
+        for line in frontmatter.group("body").splitlines():
+            match = re.match(r"^title[ \t]*:[ \t]*(.+?)[ \t]*$", line)
+            if match:
+                value = match.group(1).strip().strip("'\"").strip()
+                if value:
+                    return value
+        text = text[frontmatter.end() :]
+    match = re.search(r"<title\b[^>]*>(.*?)</title>", text, re.I | re.S)
+    if match and _inline_html_text(match.group(1)):
+        return _inline_html_text(match.group(1))
+    without_code = _CODE_FENCE.sub("", text)
+    match = re.search(r"(?m)^[ \t]{0,3}#[ \t]+(.+?)[ \t]*#*[ \t]*$", without_code)
+    if match:
+        return _inline_html_text(match.group(1))
+    match = re.search(r"<h1\b[^>]*>(.*?)</h1>", without_code, re.I | re.S)
+    if match:
+        return _inline_html_text(match.group(1))
+    return ""
+
+
+def _inline_html_text(value: str) -> str:
+    value = re.sub(r"<[^>]+>", " ", value)
+    return re.sub(r"\s+", " ", html_lib.unescape(value)).strip()
+
+
+_IMAGE_EXTENSIONS = r"(?:png|jpe?g|gif|webp|svg|bmp|ico|avif)"
+_LINK_TARGET = r"\((?:[^()\n]|\([^()\n]*\))*\)"
+_DOC_INDEX_HEADING = re.compile(
+    r"(?mi)^[ \t]*>?[ \t]*#{0,6}[ \t]*\**Documentation Index\**[ \t]*\n"
+    r"(?:[ \t]*>.*(?:\n|$))*"
+)
+_DOC_INDEX_LINES = re.compile(
+    r"(?mi)^[ \t]*>?[ \t]*(?:Fetch the complete documentation index at:"
+    r"|Use this file to discover all available pages)[^\n]*(?:\n|$)"
+)
+_MD_IMAGE = re.compile(r"!\[[^\]\n]*\]" + _LINK_TARGET)
+_MD_IMAGE_LINK = re.compile(
+    r"\[([^\]\n]*)\]\(\s*https?://[^\s()]+?\." + _IMAGE_EXTENSIONS
+    + r"(?:\?[^\s()]*)?(?:\s+\"[^\"]*\")?\s*\)",
+    re.I,
+)
+_EMPTY_LINK = re.compile(r"\[\s*\]" + _LINK_TARGET)
+_IMAGE_REFERENCE = re.compile(
+    r"(?mi)^[ \t]*\[[^\]\n]+\]:[ \t]*\S+?\." + _IMAGE_EXTENSIONS + r"(?:\?\S*)?[ \t]*(?:\n|$)"
+)
+_HTML_IMG = re.compile(r"<img\b[^>]*>", re.I | re.S)
+_EMPTY_FRAME = re.compile(r"<Frame\b[^>]*>\s*</Frame>", re.I)
+_BARE_IMAGE_URL = re.compile(
+    r"https?://[^\s<>()\[\]\"']+?\." + _IMAGE_EXTENSIONS
+    + r"(?:\?[^\s<>()\[\]\"']*)?(?=[\s<>()\[\]\"']|$)",
+    re.I,
+)
+
+
+def _clean_content(text: str) -> str:
+    """Remove llms index notices and image noise from docs content."""
+    text = text.replace("\r\n", "\n")
+    text = _DOC_INDEX_HEADING.sub("", text)
+    text = _DOC_INDEX_LINES.sub("", text)
+    text = _MD_IMAGE.sub("", text)
+    text = _MD_IMAGE_LINK.sub(lambda match: match.group(1), text)
+    text = _EMPTY_LINK.sub("", text)
+    text = _IMAGE_REFERENCE.sub("", text)
+    text = _HTML_IMG.sub("", text)
+    text = _EMPTY_FRAME.sub("", text)
+    text = _BARE_IMAGE_URL.sub("", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def _http_client(settings: Settings) -> httpx.AsyncClient:
@@ -723,15 +1291,44 @@ def _tokens(normalized: str) -> list[str]:
 
 def _make_snippet(
     content: str,
-    normalized: str,
-    tokens: list[str],
+    phrase: str,
+    terms: list[str],
     width: int = 420,
+    *,
+    patterns: dict[str, re.Pattern[str]] | None = None,
 ) -> str:
+    """Pick the window that covers the most distinct query terms.
+
+    ``terms`` should be ordered rarest first; candidate windows start around the
+    occurrences of the phrase or of the rarest term.
+    """
     folded = content.casefold()
-    positions = [folded.find(normalized)] if normalized else []
-    positions.extend(folded.find(token) for token in tokens)
-    positions = [position for position in positions if position >= 0]
-    position = min(positions) if positions else 0
+    patterns = patterns or {term: _term_pattern(term) for term in terms}
+    occurrences = {
+        term: [match.start() for _, match in zip(range(50), patterns[term].finditer(folded))]
+        for term in terms
+        if term in patterns
+    }
+    candidates: list[int] = []
+    if phrase:
+        position = folded.find(phrase)
+        if position >= 0:
+            candidates.append(position)
+    for term in terms:
+        if occurrences.get(term):
+            candidates.extend(occurrences[term])
+            break
+    if not candidates:
+        firsts = [positions[0] for positions in occurrences.values() if positions]
+        candidates = [min(firsts, default=0)]
+
+    def coverage(center: int) -> int:
+        low, high = center - width // 3, center - width // 3 + width
+        return sum(
+            1 for positions in occurrences.values() if any(low <= p < high for p in positions)
+        )
+
+    position = max(candidates, key=lambda candidate: (coverage(candidate), -candidate))
     start = max(0, position - width // 3)
     end = min(len(content), start + width)
     snippet = re.sub(r"\s+", " ", content[start:end]).strip()
@@ -813,7 +1410,10 @@ class _HTMLTextExtractor(HTMLParser):
         self.parts: list[str] = []
         self.main_parts: list[str] = []
         self.title_parts: list[str] = []
+        self.h1_parts: list[str] = []
         self._ignored_depth = 0
+        self._in_h1 = False
+        self._h1_done = False
         self._main_depth = 0
         self._in_title = False
 
@@ -824,12 +1424,17 @@ class _HTMLTextExtractor(HTMLParser):
             self._main_depth += 1
         if tag == "title" and not self._ignored_depth and not self.title_parts:
             self._in_title = True
+        if tag == "h1" and not self._ignored_depth and not self._h1_done:
+            self._in_h1 = True
         if not self._ignored_depth and tag in self.BLOCK_TAGS:
             self._append("\n")
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "title" and self._in_title:
             self._in_title = False
+        if tag == "h1" and self._in_h1:
+            self._in_h1 = False
+            self._h1_done = bool(self.h1_parts)
         if tag in self.IGNORED_TAGS and self._ignored_depth:
             self._ignored_depth -= 1
         if not self._ignored_depth and tag in self.BLOCK_TAGS:
@@ -844,6 +1449,8 @@ class _HTMLTextExtractor(HTMLParser):
         if self._in_title:
             self.title_parts.append(value)
         elif not self._ignored_depth:
+            if self._in_h1:
+                self.h1_parts.append(value)
             self._append(value)
 
     def _append(self, value: str) -> None:
@@ -855,7 +1462,7 @@ class _HTMLTextExtractor(HTMLParser):
 def _strip_html(html: str) -> tuple[str, str]:
     parser = _HTMLTextExtractor()
     parser.feed(html)
-    title = " ".join(parser.title_parts).strip()
+    title = " ".join(parser.title_parts).strip() or " ".join(parser.h1_parts).strip()
     text = " ".join(parser.main_parts or parser.parts)
     text = re.sub(r"[ \t]+\n", "\n", text)
     text = re.sub(r"\n[ \t]+", "\n", text)

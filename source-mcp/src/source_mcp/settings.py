@@ -70,13 +70,56 @@ class Settings(BaseSettings):
         default=(
             '{"dify":"dify-api-oltp",'
             '"dify-plugin-daemon":"dify-plugindaemon,dify-plugin-daemon",'
-            '"dify-billing":"dify-saas-billing,billing"}'
+            '"dify-billing":"dify-saas-billing,billing",'
+            '"dify-sandbox":"dify-sandbox",'
+            '"dify-marketplace":"dify-marketplace-backend,dify-marketplace-ops-backend",'
+            '"rbac":"dify-rbac,rbac"}'
         ),
         validation_alias="SOURCE_MCP_RUNTIME_DEPLOYMENTS",
+    )
+    # repo -> {path prefix -> deployment}: paths under a prefix run in a different
+    # deployment (and possibly a different version) than the repo's default one.
+    runtime_path_deployments_json: str = Field(
+        default='{"dify":{"web/":"dify-web"}}',
+        validation_alias="SOURCE_MCP_RUNTIME_PATH_DEPLOYMENTS",
     )
     runtime_ref_overrides_json: str = Field(
         default="{}",
         validation_alias="SOURCE_MCP_RUNTIME_REF_OVERRIDES",
+    )
+    # Comma-separated repos that should keep full git history; "*" means all repos.
+    full_history_repos: str = Field(default="*", validation_alias="SOURCE_MCP_FULL_HISTORY_REPOS")
+    # Interval of the background fetch loop; <= 0 disables it.
+    background_refresh_seconds: int = Field(
+        default=3600,
+        validation_alias="SOURCE_MCP_BACKGROUND_REFRESH_SECONDS",
+    )
+    # Name -> hint (string, or list of {"repo": ..., "paths": [...]}) shown when an
+    # unconfigured repo name is requested, e.g. modules that live inside another repo.
+    repo_hints_json: str = Field(
+        default=json.dumps(
+            {
+                "billing": [{"repo": "dify-billing", "paths": []}],
+                "ops": [{"repo": "dify-marketplace", "paths": ["ops/"]}],
+                "ops-backend": [{"repo": "dify-marketplace", "paths": ["ops/"]}],
+                "ops-web": [{"repo": "dify-marketplace", "paths": ["ops/"]}],
+                "gateway": [
+                    {
+                        "repo": "dify-enterprise",
+                        "paths": ["server/cmd/gateway/", "server/pkg/gateway/"],
+                        "note": (
+                            "unconfirmed: the SaaS image langgenius/dify-gateway is most "
+                            "likely built from here"
+                        ),
+                    },
+                ],
+                "sandbox-gateway": [
+                    {"repo": "dify-enterprise", "paths": ["server/cmd/sandbox-gateway/"]},
+                ],
+            },
+            separators=(",", ":"),
+        ),
+        validation_alias="SOURCE_MCP_REPO_HINTS",
     )
 
     @property
@@ -94,6 +137,29 @@ class Settings(BaseSettings):
     @property
     def runtime_ref_overrides(self) -> dict[str, str]:
         return _load_json_object(self.runtime_ref_overrides_json)
+
+    @property
+    def runtime_path_deployments(self) -> dict[str, dict[str, str]]:
+        result: dict[str, dict[str, str]] = {}
+        for repo, mapping in _load_json_object(self.runtime_path_deployments_json).items():
+            if not isinstance(mapping, dict):
+                continue
+            prefixes = {
+                str(prefix).lstrip("/"): str(deployment).strip()
+                for prefix, deployment in mapping.items()
+                if str(prefix).strip("/") and isinstance(deployment, str) and deployment.strip()
+            }
+            if prefixes:
+                result[str(repo)] = prefixes
+        return result
+
+    @property
+    def repo_hints(self) -> dict[str, Any]:
+        return _load_json_object(self.repo_hints_json)
+
+    def is_full_history_repo(self, repo: str) -> bool:
+        names = {part.strip() for part in self.full_history_repos.split(",") if part.strip()}
+        return "*" in names or repo in names
 
 
 def _load_json_object(raw: str) -> dict[str, Any]:

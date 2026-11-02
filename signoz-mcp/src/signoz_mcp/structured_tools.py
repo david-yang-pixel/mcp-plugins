@@ -1,15 +1,41 @@
 from __future__ import annotations
 
+import copy
 import re
-from typing import Any
+from dataclasses import dataclass, field
+from datetime import datetime
+from functools import partial
+from typing import Any, Callable
+
+from .log_compact import compact_log_rows
+from .settings import Settings, get_settings
+from .timewindow import TimeWindow, resolve_window
 
 
 _TRACE_ID_RE = re.compile(r"^[0-9a-fA-F]{32}$")
-_TIME_RANGE_RE = re.compile(r"^(\d+(?:\.\d+)?)([mhd])$")
 _FIELD_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
+_START_PROPERTY = {
+    "type": "string",
+    "description": (
+        "Absolute window start, ISO 8601 such as 2026-10-01T08:00:00Z; no offset means UTC. "
+        "start/end take precedence over timeRange."
+    ),
+}
+_END_PROPERTY = {
+    "type": "string",
+    "description": (
+        "Absolute window end, ISO 8601; no offset means UTC. Default: now. "
+        "With only end, the window is timeRange before end."
+    ),
+}
+_CHUNK_NOTE = (
+    " Long windows are split into sub-window queries and merged "
+    "(count, sum, min, max, avg; percentiles and count_distinct run as one query)."
+)
 
-STRUCTURED_TOOLS: list[dict[str, Any]] = [
+
+_BASE_TOOLS: list[dict[str, Any]] = [
     {
         "name": "signoz_list_services",
         "description": (
@@ -123,7 +149,9 @@ STRUCTURED_TOOLS: list[dict[str, Any]] = [
         "name": "signoz_search_logs",
         "description": (
             "Search recent logs with scoped environment, deployment, tenant, severity, "
-            "trace, and body filters."
+            "trace, and body filters. Results are compacted by default: low-value host/process "
+            "resource keys are dropped, repeated text (e.g. a traceback in both body and "
+            "exception.stacktrace) is kept once, and long text is truncated with a marker."
         ),
         "inputSchema": {
             "type": "object",
@@ -135,6 +163,28 @@ STRUCTURED_TOOLS: list[dict[str, Any]] = [
                 "severity": {"type": "string"},
                 "traceId": {"type": "string"},
                 "searchText": {"type": "string"},
+                "fields": {
+                    "type": ["array", "string"],
+                    "items": {"type": "string"},
+                    "description": (
+                        "Columns to return (array or comma-separated): timestamp_utc, id, trace_id, "
+                        "span_id, severity_text, body, attributes_string, resources_string, "
+                        "attribute.<key>, resource.<key>. Default: all of the plain columns plus "
+                        "both maps."
+                    ),
+                },
+                "compact": {
+                    "type": "boolean",
+                    "description": (
+                        "Default: true. Drop denylisted resource/attribute keys (host.ip, host.mac, ...) "
+                        "and empty values, de-duplicate repeated long text, truncate long text. "
+                        "false returns raw rows."
+                    ),
+                },
+                "maxFieldChars": {
+                    "type": ["integer", "string"],
+                    "description": "Per-string truncation length when compact, from 200 to 100000. Default: 4000.",
+                },
                 "limit": {"type": ["integer", "string"], "description": "Default: 100."},
                 "offset": {"type": ["integer", "string"], "description": "Default: 0."},
             },
@@ -142,7 +192,9 @@ STRUCTURED_TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "signoz_aggregate_logs",
-        "description": "Aggregate recent logs safely, optionally grouped or bucketed over time.",
+        "description": (
+            "Aggregate recent logs safely, optionally grouped or bucketed over time." + _CHUNK_NOTE
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -192,7 +244,7 @@ STRUCTURED_TOOLS: list[dict[str, Any]] = [
         "name": "signoz_aggregate_traces",
         "description": (
             "Aggregate trace spans by latency, errors, services, operations, tenants, or "
-            "other safe fields, optionally as a time series."
+            "other safe fields, optionally as a time series." + _CHUNK_NOTE
         ),
         "inputSchema": {
             "type": "object",
@@ -223,6 +275,7 @@ STRUCTURED_TOOLS: list[dict[str, Any]] = [
         "description": (
             "Query metric samples with safe aggregations and Kubernetes resource filters. "
             "Use signoz_list_metrics first when the metric name is unknown."
+            " Long windows are split into sub-window queries and merged."
         ),
         "inputSchema": {
             "type": "object",
@@ -247,12 +300,31 @@ STRUCTURED_TOOLS: list[dict[str, Any]] = [
 ]
 
 
+def _with_absolute_time(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Insert start/end right after timeRange in every tool that has a window."""
+    result = copy.deepcopy(tools)
+    for tool in result:
+        properties = tool["inputSchema"]["properties"]
+        if "timeRange" not in properties:
+            continue
+        rebuilt: dict[str, Any] = {}
+        for name, schema in properties.items():
+            rebuilt[name] = schema
+            if name == "timeRange":
+                rebuilt["start"] = dict(_START_PROPERTY)
+                rebuilt["end"] = dict(_END_PROPERTY)
+        tool["inputSchema"]["properties"] = rebuilt
+    return result
+
+
+STRUCTURED_TOOLS: list[dict[str, Any]] = _with_absolute_time(_BASE_TOOLS)
+
+
 _SIGNALS = {
     "logs": {
         "table": "signoz_logs.distributed_logs_v2",
         "attribute_map": "attributes_string",
         "resource_map": "resources_string",
-        "time_filter": "timestamp >= {start_ns} AND timestamp <= {end_ns}",
         "intrinsic": {
             "timestamp": "timestamp",
             "id": "id",
@@ -266,10 +338,6 @@ _SIGNALS = {
         "table": "signoz_traces.distributed_signoz_index_v3",
         "attribute_map": "attributes_string",
         "resource_map": "resources_string",
-        "time_filter": (
-            "timestamp >= fromUnixTimestamp64Nano({start_ns}) "
-            "AND timestamp <= fromUnixTimestamp64Nano({end_ns})"
-        ),
         "intrinsic": {
             "timestamp": "timestamp",
             "trace_id": "trace_id",
@@ -289,10 +357,6 @@ _SIGNALS = {
         "table": "signoz_metrics.distributed_time_series_v4",
         "attribute_map": "attrs",
         "resource_map": "resource_attrs",
-        "time_filter": (
-            "unix_milli >= intDiv({start_ns}, 1000000) "
-            "AND unix_milli <= intDiv({end_ns}, 1000000)"
-        ),
         "intrinsic": {
             "metric_name": "metric_name",
             "description": "description",
@@ -303,27 +367,80 @@ _SIGNALS = {
     },
 }
 
-
-def _time_range_hours(value: Any, default: str) -> str:
-    raw = default if value in (None, "") else str(value).strip().lower()
-    match = _TIME_RANGE_RE.fullmatch(raw)
-    if not match:
-        raise ValueError("timeRange must look like 30m, 2h, or 1d")
-    amount = float(match.group(1))
-    unit = match.group(2)
-    hours = amount / 60 if unit == "m" else amount * 24 if unit == "d" else amount
-    hours = max(0.01, min(hours, 168.0))
-    return str(int(hours)) if hours.is_integer() else str(hours)
+# ts_bucket_start is the leading primary-key column of SigNoz logs v2 and traces v3
+# (30-minute buckets, seconds). SigNoz's own query builder adds the same predicate.
+_TS_BUCKET_FILTER = (
+    "ts_bucket_start >= intDiv({start_ns}, 1000000000) - 1800 "
+    "AND ts_bucket_start <= intDiv({end_ns}, 1000000000)"
+)
 
 
-def _bounded_int(value: Any, default: int, *, minimum: int = 1, maximum: int = 1000) -> int:
+def _time_filter(signal: str, *, pruning: bool = False, exclusive_end: bool = False) -> str:
+    end_op = "<" if exclusive_end else "<="
+    if signal == "logs":
+        base = f"timestamp >= {{start_ns}} AND timestamp {end_op} {{end_ns}}"
+    elif signal == "traces":
+        base = (
+            "timestamp >= fromUnixTimestamp64Nano({start_ns}) "
+            f"AND timestamp {end_op} fromUnixTimestamp64Nano({{end_ns}})"
+        )
+    else:
+        return (
+            "unix_milli >= intDiv({start_ns}, 1000000) "
+            f"AND unix_milli {end_op} intDiv({{end_ns}}, 1000000)"
+        )
+    return f"{base} AND {_TS_BUCKET_FILTER}" if pruning else base
+
+
+@dataclass
+class ChunkSpec:
+    """How to run one aggregate as several sub-window queries and merge them."""
+
+    build_sql: Callable[[bool], str]  # exclusive_end -> SQL for one sub-window
+    key_columns: tuple[str, ...]
+    merge_ops: dict[str, str]  # column -> sum | min | max
+    finalize: str | None  # None | "avg" (value = __sum / __count) | "latest" (max __ts wins)
+    sort_column: str
+    sort_desc: bool
+    limit: int
+    row_limit: int
+
+
+@dataclass
+class StructuredPlan:
+    tool: str
+    args: list[str]
+    window: TimeWindow
+    chunk: ChunkSpec | None = None
+    chunk_unavailable_reason: str | None = None
+    postprocess: Callable[[Any], tuple[Any, dict[str, Any]]] | None = field(default=None, repr=False)
+
+
+def _bounded_int(
+    value: Any,
+    default: int,
+    *,
+    minimum: int = 1,
+    maximum: int = 1000,
+    field_name: str = "limit",
+) -> int:
     if value in (None, ""):
         return default
     try:
         parsed = int(value)
     except (TypeError, ValueError) as exc:
-        raise ValueError("limit must be an integer") from exc
+        raise ValueError(f"{field_name} must be an integer") from exc
     return max(minimum, min(parsed, maximum))
+
+
+def _bool_arg(value: Any, field_name: str, default: bool) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
+        return value.strip().lower() == "true"
+    raise ValueError(f"{field_name} must be a boolean")
 
 
 def _sql_literal(value: str) -> str:
@@ -341,20 +458,20 @@ def _signal_config(value: Any) -> tuple[str, dict[str, Any]]:
 
 
 def _safe_field_name(value: Any) -> str:
-    field = str(value or "").strip()
-    if not field or not _FIELD_RE.fullmatch(field):
+    field_name = str(value or "").strip()
+    if not field_name or not _FIELD_RE.fullmatch(field_name):
         raise ValueError("field must contain only letters, numbers, dots, underscores, or hyphens")
-    return field
+    return field_name
 
 
 def _field_expression(
     signal: str,
-    field: Any,
+    field_value: Any,
     *,
     context: str | None = None,
     numeric: bool = False,
 ) -> tuple[str, str]:
-    name = _safe_field_name(field)
+    name = _safe_field_name(field_value)
     config = _SIGNALS[signal]
 
     if context is None:
@@ -407,8 +524,13 @@ def _validate_trace_id(value: Any) -> str:
     return trace_id.lower()
 
 
-def _log_filters(arguments: dict[str, Any]) -> list[str]:
-    where = [_SIGNALS["logs"]["time_filter"]]
+def _log_filters(
+    arguments: dict[str, Any],
+    *,
+    pruning: bool = False,
+    exclusive_end: bool = False,
+) -> list[str]:
+    where = [_time_filter("logs", pruning=pruning, exclusive_end=exclusive_end)]
     exact_filters = (
         ("environment", "resources_string['deployment.environment']"),
         ("deployment", "resources_string['k8s.deployment.name']"),
@@ -427,8 +549,13 @@ def _log_filters(arguments: dict[str, Any]) -> list[str]:
     return where
 
 
-def _trace_filters(arguments: dict[str, Any]) -> list[str]:
-    where = [_SIGNALS["traces"]["time_filter"]]
+def _trace_filters(
+    arguments: dict[str, Any],
+    *,
+    pruning: bool = False,
+    exclusive_end: bool = False,
+) -> list[str]:
+    where = [_time_filter("traces", pruning=pruning, exclusive_end=exclusive_end)]
     exact_filters = (
         ("service", "serviceName"),
         ("operation", "name"),
@@ -461,16 +588,23 @@ def _group_expressions(signal: str, value: Any) -> list[tuple[str, str]]:
     fields = [part.strip() for part in str(value).split(",") if part.strip()]
     if not fields or len(fields) > 3:
         raise ValueError("groupBy field list must contain between 1 and 3 fields")
-    return [_field_expression(signal, field) for field in fields]
+    return [_field_expression(signal, item) for item in fields]
 
 
-def _aggregation_expression(signal: str, arguments: dict[str, Any]) -> str:
+_ALLOWED_AGGREGATIONS = {
+    "count", "count_distinct", "avg", "min", "max", "sum", "p50", "p75", "p90", "p95", "p99",
+}
+# Aggregations whose per-sub-window results can be merged exactly.
+_CHUNK_MERGE = {"count": "sum", "sum": "sum", "min": "min", "max": "max", "avg": None}
+
+
+def _aggregation_expression(signal: str, arguments: dict[str, Any]) -> tuple[str, str, str | None]:
+    """Return (aggregation name, SQL aggregate, operand expression)."""
     aggregation = str(arguments.get("aggregation") or "count").lower()
-    allowed = {"count", "count_distinct", "avg", "min", "max", "sum", "p50", "p75", "p90", "p95", "p99"}
-    if aggregation not in allowed:
+    if aggregation not in _ALLOWED_AGGREGATIONS:
         raise ValueError(f"unsupported aggregation: {aggregation}")
     if aggregation == "count":
-        return "count()"
+        return aggregation, "count()", None
 
     aggregate_on = arguments.get("aggregateOn")
     if aggregate_on in (None, ""):
@@ -481,25 +615,40 @@ def _aggregation_expression(signal: str, arguments: dict[str, Any]) -> str:
         numeric=aggregation != "count_distinct",
     )
     if aggregation == "count_distinct":
-        return f"uniqExact({expression})"
+        return aggregation, f"uniqExact({expression})", expression
     if aggregation.startswith("p"):
         quantile = int(aggregation[1:]) / 100
-        return f"quantile({quantile})({expression})"
-    return f"{aggregation}({expression})"
+        return aggregation, f"quantile({quantile})({expression})", expression
+    return aggregation, f"{aggregation}({expression})", expression
 
 
-def _aggregate_sql(signal: str, arguments: dict[str, Any], where: list[str]) -> str:
+def _request_type(arguments: dict[str, Any]) -> str:
+    request_type = str(arguments.get("requestType") or "scalar").lower()
+    if request_type not in {"scalar", "time_series"}:
+        raise ValueError("requestType must be scalar or time_series")
+    return request_type
+
+
+def _aggregate_sql(
+    signal: str,
+    arguments: dict[str, Any],
+    where: list[str],
+    *,
+    chunk_row_limit: int | None = None,
+) -> str:
+    """Build the aggregate SQL. With ``chunk_row_limit`` the query is shaped for
+    merging across sub-windows (avg is split into __sum/__count, large LIMIT)."""
     config = _SIGNALS[signal]
-    aggregate = _aggregation_expression(signal, arguments)
+    aggregation, aggregate, operand = _aggregation_expression(signal, arguments)
     groups = _group_expressions(signal, arguments.get("groupBy"))
     select_parts: list[str] = []
     group_aliases: list[str] = []
 
-    request_type = str(arguments.get("requestType") or "scalar").lower()
-    if request_type not in {"scalar", "time_series"}:
-        raise ValueError("requestType must be scalar or time_series")
+    request_type = _request_type(arguments)
     if request_type == "time_series":
-        step = _bounded_int(arguments.get("stepInterval"), 300, minimum=1, maximum=86400)
+        step = _bounded_int(
+            arguments.get("stepInterval"), 300, minimum=1, maximum=86400, field_name="stepInterval"
+        )
         source_time = (
             "fromUnixTimestamp64Nano(toInt64(timestamp))"
             if signal == "logs"
@@ -513,40 +662,88 @@ def _aggregate_sql(signal: str, arguments: dict[str, Any], where: list[str]) -> 
     for expression, alias in groups:
         select_parts.append(f"{expression} AS `{alias}`")
         group_aliases.append(f"`{alias}`")
-    select_parts.append(f"{aggregate} AS value")
 
-    limit = _bounded_int(arguments.get("limit"), 100)
+    order_column = "value"
+    if chunk_row_limit is not None and aggregation == "avg":
+        select_parts.append(f"sum({operand}) AS __sum")
+        select_parts.append("count() AS __count")
+        order_column = "__count"
+    else:
+        select_parts.append(f"{aggregate} AS value")
+
+    limit = chunk_row_limit if chunk_row_limit is not None else _bounded_int(arguments.get("limit"), 100)
     group_clause = f" GROUP BY {', '.join(group_aliases)}" if group_aliases else ""
-    order_clause = " ORDER BY bucket ASC" if request_type == "time_series" else " ORDER BY value DESC"
+    order_clause = (
+        " ORDER BY bucket ASC" if request_type == "time_series" else f" ORDER BY {order_column} DESC"
+    )
     return (
         f"SELECT {', '.join(select_parts)} FROM {config['table']} "
         f"WHERE {' AND '.join(where)}{group_clause}{order_clause} LIMIT {limit}"
     )
 
 
-def _metric_field_expression(field: Any) -> tuple[str, str]:
-    expression, alias = _field_expression("metrics", field)
-    if expression.startswith(("attrs[", "resource_attrs[")):
-        expression = f"t.{expression}"
-    else:
-        expression = f"t.{expression}"
-    return expression, alias
+def _aggregate_plan_chunk(
+    signal: str,
+    arguments: dict[str, Any],
+    filters: Callable[..., list[str]],
+    *,
+    pruning: bool,
+    row_limit: int,
+) -> tuple[ChunkSpec | None, str | None]:
+    aggregation, _, _ = _aggregation_expression(signal, arguments)
+    if aggregation not in _CHUNK_MERGE:
+        return None, f"{aggregation} cannot be merged across sub-windows; it runs as one query"
+    request_type = _request_type(arguments)
+    keys = (["bucket"] if request_type == "time_series" else []) + [
+        alias for _, alias in _group_expressions(signal, arguments.get("groupBy"))
+    ]
+    merge_op = _CHUNK_MERGE[aggregation]
+    return (
+        ChunkSpec(
+            build_sql=lambda exclusive_end: _aggregate_sql(
+                signal,
+                arguments,
+                filters(arguments, pruning=pruning, exclusive_end=exclusive_end),
+                chunk_row_limit=row_limit,
+            ),
+            key_columns=tuple(keys),
+            merge_ops={"__sum": "sum", "__count": "sum"} if merge_op is None else {"value": merge_op},
+            finalize="avg" if merge_op is None else None,
+            sort_column="bucket" if request_type == "time_series" else "value",
+            sort_desc=request_type != "time_series",
+            limit=_bounded_int(arguments.get("limit"), 100),
+            row_limit=row_limit,
+        ),
+        None,
+    )
 
 
-def _metric_query_sql(arguments: dict[str, Any]) -> str:
+def _metric_field_expression(field_value: Any) -> tuple[str, str]:
+    expression, alias = _field_expression("metrics", field_value)
+    return f"t.{expression}", alias
+
+
+_METRIC_AGGREGATIONS = {
+    "avg": "avg(s.value)",
+    "min": "min(s.value)",
+    "max": "max(s.value)",
+    "sum": "sum(s.value)",
+    "latest": "argMax(s.value, s.unix_milli)",
+}
+
+
+def _metric_query_sql(
+    arguments: dict[str, Any],
+    *,
+    exclusive_end: bool = False,
+    chunk_row_limit: int | None = None,
+) -> str:
     metric_name = str(arguments.get("metricName") or "").strip()
     if not metric_name:
         raise ValueError("metricName is required")
     metric_literal = _sql_literal(metric_name)
     aggregation = str(arguments.get("aggregation") or "avg").lower()
-    metric_aggregations = {
-        "avg": "avg(s.value)",
-        "min": "min(s.value)",
-        "max": "max(s.value)",
-        "sum": "sum(s.value)",
-        "latest": "argMax(s.value, s.unix_milli)",
-    }
-    aggregate = metric_aggregations.get(aggregation)
+    aggregate = _METRIC_AGGREGATIONS.get(aggregation)
     if aggregate is None:
         raise ValueError(f"unsupported metric aggregation: {aggregation}")
 
@@ -556,15 +753,15 @@ def _metric_query_sql(arguments: dict[str, Any]) -> str:
         fields = [part.strip() for part in str(raw_group_by).split(",") if part.strip()]
         if not fields or len(fields) > 3:
             raise ValueError("groupBy field list must contain between 1 and 3 fields")
-        groups = [_metric_field_expression(field) for field in fields]
+        groups = [_metric_field_expression(item) for item in fields]
 
     select_parts: list[str] = []
     group_aliases: list[str] = []
-    request_type = str(arguments.get("requestType") or "scalar").lower()
-    if request_type not in {"scalar", "time_series"}:
-        raise ValueError("requestType must be scalar or time_series")
+    request_type = _request_type(arguments)
     if request_type == "time_series":
-        step = _bounded_int(arguments.get("stepInterval"), 300, minimum=1, maximum=86400)
+        step = _bounded_int(
+            arguments.get("stepInterval"), 300, minimum=1, maximum=86400, field_name="stepInterval"
+        )
         select_parts.append(
             "toStartOfInterval(fromUnixTimestamp64Milli(s.unix_milli), "
             f"INTERVAL {step} SECOND) AS bucket"
@@ -573,11 +770,20 @@ def _metric_query_sql(arguments: dict[str, Any]) -> str:
     for expression, alias in groups:
         select_parts.append(f"{expression} AS `{alias}`")
         group_aliases.append(f"`{alias}`")
-    select_parts.append(f"{aggregate} AS value")
 
+    order_column = "value"
+    if chunk_row_limit is not None and aggregation == "avg":
+        select_parts.extend(["sum(s.value) AS __sum", "count() AS __count"])
+        order_column = "__count"
+    elif chunk_row_limit is not None and aggregation == "latest":
+        select_parts.extend([f"{aggregate} AS value", "max(s.unix_milli) AS __ts"])
+    else:
+        select_parts.append(f"{aggregate} AS value")
+
+    end_op = "<" if exclusive_end else "<="
     where = [
         "s.unix_milli >= intDiv({start_ns}, 1000000)",
-        "s.unix_milli <= intDiv({end_ns}, 1000000)",
+        f"s.unix_milli {end_op} intDiv({{end_ns}}, 1000000)",
         f"s.metric_name = '{metric_literal}'",
         f"t.metric_name = '{metric_literal}'",
     ]
@@ -594,8 +800,10 @@ def _metric_query_sql(arguments: dict[str, Any]) -> str:
             )
 
     group_clause = f" GROUP BY {', '.join(group_aliases)}" if group_aliases else ""
-    order_clause = " ORDER BY bucket ASC" if request_type == "time_series" else " ORDER BY value DESC"
-    limit = _bounded_int(arguments.get("limit"), 100)
+    order_clause = (
+        " ORDER BY bucket ASC" if request_type == "time_series" else f" ORDER BY {order_column} DESC"
+    )
+    limit = chunk_row_limit if chunk_row_limit is not None else _bounded_int(arguments.get("limit"), 100)
     return (
         f"SELECT {', '.join(select_parts)} "
         "FROM signoz_metrics.distributed_samples_v4 AS s "
@@ -605,24 +813,151 @@ def _metric_query_sql(arguments: dict[str, Any]) -> str:
     )
 
 
-def build_structured_sz_args(tool_name: str, arguments: Any) -> list[str]:
+def _metric_plan_chunk(arguments: dict[str, Any], row_limit: int) -> ChunkSpec:
+    aggregation = str(arguments.get("aggregation") or "avg").lower()
+    request_type = _request_type(arguments)
+    keys = (["bucket"] if request_type == "time_series" else []) + [
+        alias
+        for _, alias in (
+            _metric_field_expression(item)
+            for item in str(arguments.get("groupBy") or "").split(",")
+            if item.strip()
+        )
+    ]
+    if aggregation == "avg":
+        merge_ops, finalize = {"__sum": "sum", "__count": "sum"}, "avg"
+    elif aggregation == "latest":
+        merge_ops, finalize = {}, "latest"
+    else:
+        merge_ops, finalize = {"value": aggregation}, None
+    return ChunkSpec(
+        build_sql=lambda exclusive_end: _metric_query_sql(
+            arguments, exclusive_end=exclusive_end, chunk_row_limit=row_limit
+        ),
+        key_columns=tuple(keys),
+        merge_ops=merge_ops,
+        finalize=finalize,
+        sort_column="bucket" if request_type == "time_series" else "value",
+        sort_desc=request_type != "time_series",
+        limit=_bounded_int(arguments.get("limit"), 100),
+        row_limit=row_limit,
+    )
+
+
+_LOG_TIMESTAMP_COLUMN = "fromUnixTimestamp64Nano(toInt64(timestamp)) AS timestamp_utc"
+_LOG_DEFAULT_COLUMNS = (
+    f"{_LOG_TIMESTAMP_COLUMN}, id, trace_id, "
+    "span_id, severity_text, body, attributes_string, resources_string"
+)
+_LOG_FIELD_COLUMNS = {
+    "timestamp_utc": _LOG_TIMESTAMP_COLUMN,
+    "timestamp": _LOG_TIMESTAMP_COLUMN,
+    "id": "id",
+    "trace_id": "trace_id",
+    "span_id": "span_id",
+    "severity_text": "severity_text",
+    "severity": "severity_text",
+    "body": "body",
+    "attributes_string": "attributes_string",
+    "attributes": "attributes_string",
+    "resources_string": "resources_string",
+    "resources": "resources_string",
+}
+
+
+def _log_select_columns(value: Any) -> str:
+    if value in (None, "", []):
+        return _LOG_DEFAULT_COLUMNS
+    if isinstance(value, str):
+        names = [part.strip() for part in value.split(",") if part.strip()]
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        names = [item.strip() for item in value if item.strip()]
+    else:
+        raise ValueError("fields must be an array of strings or a comma-separated string")
+    if not names or len(names) > 30:
+        raise ValueError("fields must contain between 1 and 30 field names")
+    columns: list[str] = []
+    for name in names:
+        if name in _LOG_FIELD_COLUMNS:
+            column = _LOG_FIELD_COLUMNS[name]
+        elif name.startswith(("attribute.", "resource.")):
+            context, key = name.split(".", 1)
+            key = _safe_field_name(key)
+            map_name = "attributes_string" if context == "attribute" else "resources_string"
+            column = f"{map_name}['{_sql_literal(key)}'] AS `{context}.{key}`"
+        else:
+            raise ValueError(
+                f"unsupported log field: {name}; use one of "
+                f"{', '.join(sorted(set(_LOG_FIELD_COLUMNS)))}, attribute.<key>, or resource.<key>"
+            )
+        if column not in columns:
+            columns.append(column)
+    return ", ".join(columns)
+
+
+def _settings(settings: Settings | None) -> Settings:
+    return settings if settings is not None else get_settings()
+
+
+def build_structured_plan(
+    tool_name: str,
+    arguments: Any,
+    *,
+    settings: Settings | None = None,
+    now: datetime | None = None,
+) -> StructuredPlan:
     if not isinstance(arguments, dict):
         raise ValueError("arguments must be an object")
+    cfg = _settings(settings)
+    pruning = bool(cfg.ts_bucket_pruning)
+    row_limit = max(1, int(cfg.chunk_row_limit))
+
+    def window(default: str) -> TimeWindow:
+        return resolve_window(
+            arguments, default, max_window_hours=cfg.max_window_hours, now=now
+        )
 
     if tool_name == "signoz_list_services":
-        hours = _time_range_hours(arguments.get("timeRange"), "1h")
+        win = window("1h")
         limit = _bounded_int(arguments.get("limit"), 30)
-        args = ["services", "--hours", hours, "--limit", str(limit)]
+        args = ["services", *win.sz_args(), "--limit", str(limit)]
         environment = arguments.get("environment")
         if environment:
             args.extend(["--env", str(environment)])
-        return args
+
+        def services_sql(exclusive_end: bool) -> str:
+            where = [_time_filter("logs", pruning=pruning, exclusive_end=exclusive_end)]
+            if environment:
+                where.append(
+                    f"resources_string['deployment.environment'] = '{_sql_literal(str(environment))}'"
+                )
+            return (
+                "SELECT resources_string['k8s.deployment.name'] AS deployment, "
+                "resources_string['service.name'] AS service, "
+                "resources_string['deployment.environment'] AS environment, "
+                "count(*) AS log_count "
+                f"FROM signoz_logs.distributed_logs_v2 WHERE {' AND '.join(where)} "
+                "GROUP BY deployment, service, environment ORDER BY log_count DESC "
+                f"LIMIT {row_limit}"
+            )
+
+        chunk = ChunkSpec(
+            build_sql=services_sql,
+            key_columns=("deployment", "service", "environment"),
+            merge_ops={"log_count": "sum"},
+            finalize=None,
+            sort_column="log_count",
+            sort_desc=True,
+            limit=limit,
+            row_limit=row_limit,
+        )
+        return StructuredPlan(tool_name, args, win, chunk=chunk)
 
     if tool_name == "signoz_get_trace_details":
         trace_id = str(arguments.get("traceId") or "")
         if not _TRACE_ID_RE.fullmatch(trace_id):
             raise ValueError("traceId must be exactly 32 hexadecimal characters")
-        hours = _time_range_hours(arguments.get("timeRange"), "6h")
+        win = window("6h")
         limit = _bounded_int(arguments.get("limit"), 500)
         sql = (
             "SELECT toString(timestamp) AS timestamp_utc, trace_id, span_id, parent_span_id, "
@@ -630,20 +965,16 @@ def build_structured_sz_args(tool_name: str, arguments: Any) -> list[str]:
             "duration_nano, has_error, status_code_string, status_message, "
             "http_method, http_url, response_status_code, attributes_string, resources_string "
             "FROM signoz_traces.distributed_signoz_index_v3 "
-            "WHERE timestamp >= fromUnixTimestamp64Nano({start_ns}) "
-            "AND timestamp <= fromUnixTimestamp64Nano({end_ns}) "
+            f"WHERE {_time_filter('traces', pruning=pruning)} "
             f"AND trace_id = '{trace_id.lower()}' "
             f"ORDER BY timestamp ASC LIMIT {limit}"
         )
-        return ["query", sql, "--hours", hours]
+        return StructuredPlan(tool_name, ["query", sql, *win.sz_args()], win)
 
     if tool_name == "signoz_list_metrics":
-        hours = _time_range_hours(arguments.get("timeRange"), "1h")
+        win = window("1h")
         limit = _bounded_int(arguments.get("limit"), 50)
-        where = [
-            "unix_milli >= intDiv({start_ns}, 1000000)",
-            "unix_milli <= intDiv({end_ns}, 1000000)",
-        ]
+        where = [_time_filter("metrics")]
         search_text = arguments.get("searchText")
         if search_text:
             where.append(
@@ -660,15 +991,15 @@ def build_structured_sz_args(tool_name: str, arguments: Any) -> list[str]:
             "GROUP BY metric_name ORDER BY metric_name "
             f"LIMIT {limit}"
         )
-        return ["query", sql, "--hours", hours]
+        return StructuredPlan(tool_name, ["query", sql, *win.sz_args()], win)
 
     if tool_name == "signoz_get_field_keys":
         signal, config = _signal_config(arguments.get("signal"))
-        hours = _time_range_hours(arguments.get("timeRange"), "1h")
+        win = window("1h")
         limit = _bounded_int(arguments.get("limit"), 100)
         attribute_map = config["attribute_map"]
         resource_map = config["resource_map"]
-        time_filter = config["time_filter"]
+        time_filter = _time_filter(signal, pruning=pruning)
         intrinsic_names = ", ".join(
             f"'{_sql_literal(name)}'" for name in config["intrinsic"]
         )
@@ -690,50 +1021,90 @@ def build_structured_sz_args(tool_name: str, arguments: Any) -> list[str]:
             f"SELECT arrayJoin([{intrinsic_names}]) AS name, 'intrinsic' AS context"
             f"){search_clause} GROUP BY name, context ORDER BY context, name LIMIT {limit}"
         )
-        return ["query", sql, "--hours", hours]
+        return StructuredPlan(tool_name, ["query", sql, *win.sz_args()], win)
 
     if tool_name == "signoz_get_field_values":
         signal, config = _signal_config(arguments.get("signal"))
-        hours = _time_range_hours(arguments.get("timeRange"), "1h")
+        win = window("1h")
         limit = _bounded_int(arguments.get("limit"), 50)
         expression, _ = _field_expression(
             signal,
             arguments.get("name"),
             context=str(arguments.get("fieldContext") or "").lower(),
         )
-        where = [config["time_filter"], f"toString({expression}) != ''"]
-        if arguments.get("searchText") not in (None, ""):
-            where.append(
-                f"lower(toString({expression})) LIKE '%"
-                f"{_sql_literal(str(arguments['searchText']).lower())}%'"
+        search_text = arguments.get("searchText")
+
+        def values_sql(exclusive_end: bool, row_cap: int) -> str:
+            where = [
+                _time_filter(signal, pruning=pruning, exclusive_end=exclusive_end),
+                f"toString({expression}) != ''",
+            ]
+            if search_text not in (None, ""):
+                where.append(
+                    f"lower(toString({expression})) LIKE '%"
+                    f"{_sql_literal(str(search_text).lower())}%'"
+                )
+            return (
+                f"SELECT toString({expression}) AS value, count() AS count "
+                f"FROM {config['table']} WHERE {' AND '.join(where)} "
+                f"GROUP BY value ORDER BY count DESC LIMIT {row_cap}"
             )
-        sql = (
-            f"SELECT toString({expression}) AS value, count() AS count "
-            f"FROM {config['table']} WHERE {' AND '.join(where)} "
-            f"GROUP BY value ORDER BY count DESC LIMIT {limit}"
+
+        chunk = ChunkSpec(
+            build_sql=lambda exclusive_end: values_sql(exclusive_end, row_limit),
+            key_columns=("value",),
+            merge_ops={"count": "sum"},
+            finalize=None,
+            sort_column="count",
+            sort_desc=True,
+            limit=limit,
+            row_limit=row_limit,
         )
-        return ["query", sql, "--hours", hours]
+        return StructuredPlan(
+            tool_name, ["query", values_sql(False, limit), *win.sz_args()], win, chunk=chunk
+        )
 
     if tool_name == "signoz_search_logs":
-        hours = _time_range_hours(arguments.get("timeRange"), "1h")
+        win = window("1h")
         limit = _bounded_int(arguments.get("limit"), 100)
         offset = _non_negative_int(arguments.get("offset"), "offset", 0, maximum=100000)
+        columns = _log_select_columns(arguments.get("fields"))
+        compact = _bool_arg(arguments.get("compact"), "compact", True)
+        max_chars = _bounded_int(
+            arguments.get("maxFieldChars"),
+            max(200, int(cfg.log_max_field_chars)),
+            minimum=200,
+            maximum=100000,
+            field_name="maxFieldChars",
+        )
         sql = (
-            "SELECT fromUnixTimestamp64Nano(toInt64(timestamp)) AS timestamp_utc, id, trace_id, "
-            "span_id, severity_text, body, attributes_string, resources_string "
+            f"SELECT {columns} "
             "FROM signoz_logs.distributed_logs_v2 "
-            f"WHERE {' AND '.join(_log_filters(arguments))} "
+            f"WHERE {' AND '.join(_log_filters(arguments, pruning=pruning))} "
             f"ORDER BY timestamp DESC LIMIT {limit} OFFSET {offset}"
         )
-        return ["query", sql, "--hours", hours]
+        postprocess = (
+            partial(compact_log_rows, denylist=cfg.log_compact_denyset, max_chars=max_chars)
+            if compact
+            else None
+        )
+        return StructuredPlan(
+            tool_name, ["query", sql, *win.sz_args()], win, postprocess=postprocess
+        )
 
     if tool_name == "signoz_aggregate_logs":
-        hours = _time_range_hours(arguments.get("timeRange"), "1h")
-        sql = _aggregate_sql("logs", arguments, _log_filters(arguments))
-        return ["query", sql, "--hours", hours]
+        win = window("1h")
+        sql = _aggregate_sql("logs", arguments, _log_filters(arguments, pruning=pruning))
+        chunk, reason = _aggregate_plan_chunk(
+            "logs", arguments, _log_filters, pruning=pruning, row_limit=row_limit
+        )
+        return StructuredPlan(
+            tool_name, ["query", sql, *win.sz_args()], win,
+            chunk=chunk, chunk_unavailable_reason=reason,
+        )
 
     if tool_name == "signoz_search_traces":
-        hours = _time_range_hours(arguments.get("timeRange"), "1h")
+        win = window("1h")
         limit = _bounded_int(arguments.get("limit"), 100)
         offset = _non_negative_int(arguments.get("offset"), "offset", 0, maximum=100000)
         sql = (
@@ -741,18 +1112,39 @@ def build_structured_sz_args(tool_name: str, arguments: Any) -> list[str]:
             "serviceName AS service, name AS operation, duration_nano, has_error, "
             "status_code_string, response_status_code, attributes_string, resources_string "
             "FROM signoz_traces.distributed_signoz_index_v3 "
-            f"WHERE {' AND '.join(_trace_filters(arguments))} "
+            f"WHERE {' AND '.join(_trace_filters(arguments, pruning=pruning))} "
             f"ORDER BY timestamp DESC LIMIT {limit} OFFSET {offset}"
         )
-        return ["query", sql, "--hours", hours]
+        return StructuredPlan(tool_name, ["query", sql, *win.sz_args()], win)
 
     if tool_name == "signoz_aggregate_traces":
-        hours = _time_range_hours(arguments.get("timeRange"), "1h")
-        sql = _aggregate_sql("traces", arguments, _trace_filters(arguments))
-        return ["query", sql, "--hours", hours]
+        win = window("1h")
+        sql = _aggregate_sql("traces", arguments, _trace_filters(arguments, pruning=pruning))
+        chunk, reason = _aggregate_plan_chunk(
+            "traces", arguments, _trace_filters, pruning=pruning, row_limit=row_limit
+        )
+        return StructuredPlan(
+            tool_name, ["query", sql, *win.sz_args()], win,
+            chunk=chunk, chunk_unavailable_reason=reason,
+        )
 
     if tool_name == "signoz_query_metrics":
-        hours = _time_range_hours(arguments.get("timeRange"), "1h")
-        return ["query", _metric_query_sql(arguments), "--hours", hours]
+        win = window("1h")
+        sql = _metric_query_sql(arguments)
+        return StructuredPlan(
+            tool_name, ["query", sql, *win.sz_args()], win,
+            chunk=_metric_plan_chunk(arguments, row_limit),
+        )
 
     raise ValueError(f"unknown structured tool: {tool_name}")
+
+
+def build_structured_sz_args(
+    tool_name: str,
+    arguments: Any,
+    *,
+    settings: Settings | None = None,
+    now: datetime | None = None,
+) -> list[str]:
+    """Return the sz argv for the single-query form of a structured tool."""
+    return build_structured_plan(tool_name, arguments, settings=settings, now=now).args

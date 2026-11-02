@@ -11,8 +11,10 @@ import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
+from .executor import execute_plan
 from .settings import Settings, get_settings
-from .structured_tools import STRUCTURED_TOOLS, build_structured_sz_args
+from .structured_tools import STRUCTURED_TOOLS, build_structured_plan
+from .sz_commands import help_payload, sz_run_description
 from .sz_runner import run_sz
 
 
@@ -68,17 +70,18 @@ def _tools_list(request_id: Any) -> dict[str, Any]:
             "tools": [
                 {
                     "name": "sz_run",
-                    "description": (
-                        "Run an allowed read-only server-side sz command with JSON output. "
-                        "Raw SQL must be one SELECT/WITH/SHOW/DESCRIBE/EXPLAIN query."
-                    ),
+                    "description": sz_run_description(),
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "args": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Arguments passed to sz, excluding --json and -q.",
+                                "description": (
+                                    "Arguments passed to sz, excluding --json and -q, e.g. "
+                                    '["query", "SELECT ... WHERE timestamp >= {start_ns}", "--hours", "3"] '
+                                    'or ["help"].'
+                                ),
                             },
                         },
                         "required": ["args"],
@@ -288,9 +291,17 @@ def create_app() -> FastAPI:
         try:
             if tool_name == "sz_run":
                 args = arguments.get("args")
+                payload = help_payload(args)
+                if payload is None:
+                    payload = await _run_sz_controlled(args, settings)
             else:
-                args = build_structured_sz_args(str(tool_name or ""), arguments)
-            payload = await _run_sz_controlled(args, settings)
+                plan = build_structured_plan(str(tool_name or ""), arguments, settings=settings)
+                payload = await execute_plan(
+                    plan,
+                    settings,
+                    run_single=_run_sz_controlled,
+                    run_chunk=_run_sz_limited,
+                )
         except ValueError as e:
             payload = {"success": False, "code": "BAD_ARGUMENTS", "error": str(e)}
         return _tool_result(request_id, payload)

@@ -143,3 +143,71 @@ async def test_mcp_get_returns_sse_probe(mcp_client):
     assert await resp.content.readline() == b"event: endpoint\n"
     assert await resp.content.readline() == b"data: /db-gateway/mcp\n"
     resp.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_tools_list_exposes_paging_and_format(mcp_client):
+    resp = await _post_mcp(
+        mcp_client,
+        {"jsonrpc": "2.0", "id": 5, "method": "tools/list", "params": {}},
+    )
+
+    props = (await resp.json())["result"]["tools"][0]["inputSchema"]["properties"]
+    assert props["offset"]["type"] == "integer" and props["offset"]["minimum"] == 0
+    assert props["limit"]["type"] == "integer" and props["limit"]["minimum"] == 1
+    assert props["format"]["enum"] == ["csv", "json"]
+    assert "ticket_id" in props
+
+
+@pytest.mark.asyncio
+async def test_mcp_tools_call_forwards_paging_and_format(mcp_client):
+    result = GatewayQueryResult(success=True, format="json", columns=["ok"], rows=[["1"]], row_count=1)
+    with patch("db_gateway.mcp.execute_gateway_query", AsyncMock(return_value=result)) as query:
+        resp = await _post_mcp(
+            mcp_client,
+            {
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {
+                    "name": "db_gateway_query",
+                    "arguments": {
+                        "database": "prod",
+                        "sql": "select 1 as ok",
+                        "offset": 20,
+                        "limit": 10,
+                        "format": "json",
+                    },
+                },
+            },
+        )
+
+    content = json.loads((await resp.json())["result"]["content"][0]["text"])
+    assert content["rows"] == [["1"]]
+    kwargs = query.await_args.kwargs
+    assert kwargs["offset"] == 20
+    assert kwargs["limit"] == 10
+    assert kwargs["output_format"] == "json"
+    assert kwargs["ticket_id"] == ""
+
+
+@pytest.mark.asyncio
+async def test_http_query_forwards_paging_and_format(mcp_client):
+    result = GatewayQueryResult(success=True, csv="ok\n1\n", row_count=1)
+    with patch("db_gateway.app.execute_gateway_query", AsyncMock(return_value=result)) as query:
+        resp = await mcp_client.post(
+            "/query",
+            json={"database": "prod", "sql": "select 1", "ticket_id": "9", "offset": 5, "limit": 2, "format": "csv"},
+            headers={"X-API-Key": "secret"},
+        )
+
+    assert resp.status == 200
+    kwargs = query.await_args.kwargs
+    assert (kwargs["offset"], kwargs["limit"], kwargs["output_format"]) == (5, 2, "csv")
+
+
+@pytest.mark.asyncio
+async def test_http_query_rejects_non_object_body(mcp_client):
+    resp = await mcp_client.post("/query", json=[1, 2], headers={"X-API-Key": "secret"})
+
+    assert resp.status == 400

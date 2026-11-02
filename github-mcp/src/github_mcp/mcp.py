@@ -121,3 +121,16 @@ def required_int(
     if name not in arguments:
         raise ValueError(f"{name} is required")
     return optional_int(arguments, name, minimum, minimum=minimum, maximum=maximum)
+
+
+def optional_bool(arguments: dict[str, Any], name: str, default: bool) -> bool:
+    value = arguments.get(name, default)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in {"true", "1", "yes"}:
+        return True
+    if isinstance(value, str) and value.strip().lower() in {"false", "0", "no"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")

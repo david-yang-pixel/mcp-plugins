@@ -14,6 +14,80 @@ uv run --locked db-gateway
 
 使用 Python 3.12。需要 PostgreSQL 的 `psql` 和与环境匹配的 Teleport `tsh`；`tsh` 需在运行时安装或挂载。复制 `config.example.yaml` 为 `config.yaml` 后配置数据库代理。
 
+## 查询工具 `db_gateway_query`
+
+HTTP `POST /query` 与 MCP `tools/call`（`/mcp`，以及 `scripts/db_gateway_mcp.py` stdio 版本）使用同一套参数和返回结构。
+
+### 参数
+
+| 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `database` | 是 | `prod` / `billing` / `plugin` |
+| `sql` | 是 | 单条只读查询，必须以 `SELECT` 或 `WITH` 开头，可带前置括号，例如 `(SELECT 1) UNION ALL (SELECT 2)`。末尾分号和注释会被去掉。 |
+| `ticket_id` | 否* | Zendesk 工单号，写入审计日志。开启 `require_ticket_id` 后必填。 |
+| `offset` | 否 | 跳过的行数，默认 `0`。翻页时传上一页的 `next_offset`。 |
+| `limit` | 否 | 每页行数，默认且最大为 `postgres.max_rows`（默认 1000），超过时按上限返回并给出 warning。 |
+| `format` | 否 | `csv`（默认）或 `json`。 |
+
+分页不要在 SQL 里自己写 `LIMIT/OFFSET`，直接用 `offset`/`limit` 参数。只有原查询带顶层 `ORDER BY`（最好包含唯一键）时翻页结果才稳定；分页时如果原查询没有顶层 `ORDER BY`，返回里会带 warning。
+
+### 返回字段
+
+- `success`、`code`、`error`：失败时 `code` 为 `UNKNOWN_DATABASE`、`INVALID_ARGUMENT`、`TICKET_ID_REQUIRED`、`SQL_SAFETY_ERROR`、`TELEPORT_EXPIRED`、`QUERY_TIMEOUT` 或 `QUERY_ERROR`。
+- `row_count`：本页真实数据行数，按 CSV 解析计数（多行字段算一行，没有 psql 的 `(N rows)` 页脚）。
+- `total_rows`：结果总行数。无法得出时为 `null`，原因写在 `warnings` 里，例如计数超时。
+- `has_more` / `truncated`：后面是否还有数据；`truncated` 是旧字段，值与 `has_more` 相同。
+- `next_offset`：有下一页时为下一页的 `offset`，没有时为 `null`。`offset`、`limit` 返回实际生效的值。
+- `columns`：列名数组。
+- `format=csv`：`csv` 为表头加数据。psql CSV 中 **NULL 与空字符串都输出为空字段**，无法区分；需要区分时请用 `json`。
+- `format=json`：`csv` 为空字符串，另返回 `rows`（**数组的数组**，与 `columns` 顺序一致，保留重名列）和 `column_types`（PostgreSQL 类型名，例如 `integer`、`timestamp with time zone`，由 psql `\gdesc` 获取，只解析不执行，额外一次往返）。值都是 PostgreSQL 文本表示的字符串（数字、`t`/`f`、JSON 文本等不做类型转换），SQL NULL 为 `null`，空字符串为 `""`。
+- `warnings`：例如缺少 ticket_id、limit 被截断、分页缺少 ORDER BY、offset 超出总行数、total_rows 为 null 的原因。
+- `elapsed_ms`：psql 进程耗时（旧字段）。`timing_ms` 为分阶段耗时，同时写入审计日志和结构化日志：
+  - `queue_wait_ms`：等待本库并发槽位（`max_concurrent_queries`）。
+  - `psql_spawn_ms`：启动 psql 子进程。
+  - `psql_process_ms`：psql 进程从启动到退出的总耗时。
+  - `connect_and_overhead_ms`：`psql_process_ms` 减去服务端执行时间的估算值，主要是 psql 启动、经 Teleport 本地代理建立连接（TLS/认证）和退出。
+  - `describe_ms`：仅 json，获取列类型。
+  - `query_ms`：建游标、跳过 offset、取本页（psql `\timing`）。
+  - `count_ms`：计算 total_rows。
+  - `parse_ms`：解析输出。
+  - `total_ms`：网关内总耗时。
+  - 发生 Teleport 重试时另有 `teleport_retry_ms` 和 `attempts`。
+
+### 执行方式
+
+每次查询启动一个 psql 进程，只建立一个连接，使用 `--csv -P footer=off`，NULL 用每次随机生成的标记区分。执行流程：
+
+1. 在 `BEGIN TRANSACTION READ ONLY` 中设置 `statement_timeout = query_timeout_seconds`。
+2. `DECLARE` 游标，内容为 `SELECT * FROM (<sql>) AS _db_gateway_q`；包装后的 SQL 会再次通过只读校验。
+3. 依次执行 `MOVE offset`、`FETCH limit+1`；多取的一行只用来判断 `has_more`。
+4. 在同一游标上执行 `MOVE ALL` 计算 `total_rows`，受 `count_timeout_seconds` 限制。这样不会再次执行原查询；超时只让 `total_rows` 为 `null`，本页数据照常返回。
+
+用户 SQL 只出现在以 SQL 开头的 `-c` 参数中，psql 原样发给服务端，不解析其中的 `\` 元命令或 `:变量`。
+
+### 只读校验
+
+校验器用词法分析识别注释、字符串、引号标识符和 `$$` 美元引号，然后检查：
+
+- 未闭合的引号或注释会被拒绝。
+- 只能有一条语句，分号只能出现在末尾。
+- 查询（去掉前置括号后）必须以 `SELECT` 或 `WITH` 开头。
+- 关键字黑名单：`INSERT`、`UPDATE`、`DELETE`、`DROP`、`SET`、`SHOW`、`COPY` 等。字符串常量里出现这些词也会保守拦截，错误信息会说明命中位置。
+
+被拒绝的 SQL 返回具体原因，例如 `仅允许以 SELECT 或 WITH 开头的只读查询（可带前置括号），检测到: EXPLAIN`，并在审计日志中记为 `REJECTED_SQL_SAFETY`。
+
+### 相关配置（`deploy/runtime.json` → `settings`，即 `config.yaml`）
+
+| 配置 | 默认 | 说明 |
+| --- | --- | --- |
+| `postgres.max_rows` | 1000 | 单页上限。 |
+| `postgres.query_timeout_seconds` | 30 | 主查询 `statement_timeout`。psql 进程总超时为该值加 `count_timeout_seconds`。 |
+| `postgres.count_timeout_seconds` | 5 | total_rows 计数预算，设为 `0` 时不计数（仍会通过 `has_more` 判断是否有下一页）。 |
+| `db_gateway.require_ticket_id` | false | 设为 true 时，缺少 ticket_id 直接拒绝（`TICKET_ID_REQUIRED`）。也可用环境变量 `DB_GATEWAY_REQUIRE_TICKET_ID=true`。 |
+| `db_gateway.missing_ticket_alert_interval_seconds` | 0 | 大于 0 时，缺少 ticket_id 会通过现有飞书机器人提醒，两次提醒至少间隔该秒数，期间的次数合并到下一条；为 0 时不提醒。 |
+
+未开启 `require_ticket_id` 时，缺少 ticket_id 的查询照常执行，但返回 warning，审计日志记录 `"ticket_id_missing": true`。审计日志每条都带 `ticket_id_missing`、`offset`、`limit`、`format` 字段，成功时另有 `total_rows`、`has_more`、`timing_ms`。stdio 客户端默认超时 `DB_GATEWAY_TIMEOUT=45` 秒。
+
 ## 构建
 
 ```bash
