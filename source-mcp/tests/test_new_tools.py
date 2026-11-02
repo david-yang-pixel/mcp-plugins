@@ -348,8 +348,18 @@ def test_tags_sort_versions_first(client):
         "redhat-chart-1.0.0",
         "release-x",
     ]
-    assert data["version_tags"] == 5
-    assert data["non_version_tags"] == 2
+    assert data["version_tags"] == 6
+    assert data["non_version_tags"] == 1
+
+
+def test_tags_sort_prefixed_versions_with_their_version():
+    from source_mcp.git_ops import _version_sort_key
+
+    tags = ["redhat-chart-3.9.8-run-3", "3.13.2", "dify-3.9.15", "dify-3.13.2", "backend/2.3.2", "main"]
+    ordered = sorted((t for t in tags if _version_sort_key(t)), key=_version_sort_key, reverse=True)
+
+    assert ordered == ["3.13.2", "dify-3.13.2", "dify-3.9.15", "redhat-chart-3.9.8-run-3", "backend/2.3.2"]
+    assert _version_sort_key("main") is None
 
 
 def test_tags_pattern_filters(client):

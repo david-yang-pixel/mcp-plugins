@@ -70,7 +70,7 @@ class Settings(BaseSettings):
         default=(
             '{"dify":"dify-api-oltp",'
             '"dify-plugin-daemon":"dify-plugindaemon,dify-plugin-daemon",'
-            '"dify-billing":"dify-saas-billing,billing",'
+            '"dify-billing":"dify-billing,billing",'
             '"dify-sandbox":"dify-sandbox",'
             '"dify-marketplace":"dify-marketplace-backend,dify-marketplace-ops-backend",'
             '"rbac":"dify-rbac,rbac"}'
@@ -82,6 +82,44 @@ class Settings(BaseSettings):
     runtime_path_deployments_json: str = Field(
         default='{"dify":{"web/":"dify-web"}}',
         validation_alias="SOURCE_MCP_RUNTIME_PATH_DEPLOYMENTS",
+    )
+    # repo -> {deployment or "*" -> tag prefix}: monorepos tag each component as
+    # "<prefix><version>" while the image tag is the bare version (dify-marketplace
+    # images are 2.3.2, git tags backend/2.3.2, ops/2.3.2, ...).
+    runtime_tag_prefixes_json: str = Field(
+        default=json.dumps(
+            {
+                "dify-marketplace": {
+                    "dify-marketplace-backend": "backend/",
+                    "dify-marketplace-scheduler": "backend/",
+                    "dify-marketplace-ops-backend": "ops/",
+                    "dify-marketplace-ops-web": "ops/",
+                    "dify-marketplace-web": "frontend/",
+                    "dify-marketplace-creators-backend": "creators/",
+                    "dify-marketplace-creators-web": "creators/",
+                },
+            },
+            separators=(",", ":"),
+        ),
+        validation_alias="SOURCE_MCP_RUNTIME_TAG_PREFIXES",
+    )
+    # When telemetry has no image tag for a deployment (no logs shipped, e.g.
+    # dify-sandbox, or no production logs, e.g. dify-rbac), fall back to the tag
+    # declared in this GitOps repo's environments/<env>/**/kustomization.yaml.
+    gitops_repo: str = Field(default="saas-deploy", validation_alias="SOURCE_MCP_GITOPS_REPO")
+    # deployment -> image name looked up in the GitOps kustomizations.
+    gitops_images_json: str = Field(
+        default=json.dumps(
+            {
+                "dify-rbac": "langgenius/rbac",
+                "rbac": "langgenius/rbac",
+                "dify-sandbox": "langgenius/dify-sandbox",
+                "dify-billing": "langgenius/dify-billing",
+                "billing": "langgenius/dify-billing",
+            },
+            separators=(",", ":"),
+        ),
+        validation_alias="SOURCE_MCP_GITOPS_IMAGES",
     )
     runtime_ref_overrides_json: str = Field(
         default="{}",
@@ -100,6 +138,12 @@ class Settings(BaseSettings):
         default=json.dumps(
             {
                 "billing": [{"repo": "dify-billing", "paths": []}],
+                "dify-saas-billing": (
+                    "the SaaS billing service (deployment dify-saas-billing, image "
+                    "langgenius/dify-saas-billing, tags like release-20261030.2) is not built "
+                    "from dify-billing (deployment dify-billing, tags release-202606xx); its "
+                    "source repository has not been identified, so it is not configured"
+                ),
                 "ops": [{"repo": "dify-marketplace", "paths": ["ops/"]}],
                 "ops-backend": [{"repo": "dify-marketplace", "paths": ["ops/"]}],
                 "ops-web": [{"repo": "dify-marketplace", "paths": ["ops/"]}],
@@ -152,6 +196,26 @@ class Settings(BaseSettings):
             if prefixes:
                 result[str(repo)] = prefixes
         return result
+
+    @property
+    def runtime_tag_prefixes(self) -> dict[str, dict[str, str]]:
+        result: dict[str, dict[str, str]] = {}
+        for repo, mapping in _load_json_object(self.runtime_tag_prefixes_json).items():
+            if isinstance(mapping, dict):
+                result[str(repo)] = {
+                    str(name): str(prefix)
+                    for name, prefix in mapping.items()
+                    if isinstance(prefix, str) and prefix
+                }
+        return result
+
+    @property
+    def gitops_images(self) -> dict[str, str]:
+        return {
+            str(name): str(image)
+            for name, image in _load_json_object(self.gitops_images_json).items()
+            if isinstance(image, str) and image
+        }
 
     @property
     def repo_hints(self) -> dict[str, Any]:

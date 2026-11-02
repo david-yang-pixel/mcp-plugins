@@ -38,7 +38,11 @@ _MAX_TREE_LIMIT = 1000
 _TREE_OUTPUT_CAP = 16_000_000
 _MAX_TAG_LIMIT = 200
 _TRUNCATION_MARKER = "\n\n... (output truncated)"
-_VERSION_TAG_RE = re.compile(r"^[vV]?(\d+(?:\.\d+){1,3})(?:[-+._]?(.*))?$")
+# Optional component prefix ("dify-3.13.2", "backend/2.3.2", "redhat-chart-3.9.8-run-1"),
+# optional v, then a dotted version and an optional suffix.
+_VERSION_TAG_RE = re.compile(
+    r"^(?P<prefix>[A-Za-z][A-Za-z0-9._-]*?[-/_])?[vV]?(\d+(?:\.\d+){1,3})(?:[-+._]?(.*))?$"
+)
 _PRERELEASE_RE = re.compile(r"^(alpha|beta|rc|pre|preview|dev|a|b)(?![a-z])", re.IGNORECASE)
 _GREP_PATTERN_ERROR_MARKERS = (
     "fatal: -e option",
@@ -889,7 +893,8 @@ async def list_repo_tags(
         "version_tags": len(version_tags),
         "non_version_tags": len(other_tags),
         "order": (
-            "version tags (optional v prefix) newest first, then other tags by name"
+            "version tags newest first (a component prefix such as 'dify-' or 'backend/' "
+            "and a v prefix are allowed), then other tags by name"
         ),
     }
 
@@ -898,16 +903,18 @@ def _version_sort_key(tag: str) -> Optional[tuple[Any, ...]]:
     match = _VERSION_TAG_RE.match(tag)
     if not match:
         return None
-    numbers = [int(part) for part in match.group(1).split(".")]
+    numbers = [int(part) for part in match.group(2).split(".")]
     numbers += [0] * (4 - len(numbers))
-    suffix = match.group(2) or ""
+    suffix = match.group(3) or ""
+    prefix = match.group("prefix") or ""
     if not suffix:
         rank = 1
     elif _PRERELEASE_RE.match(suffix):
         rank = 0  # 1.2.3-rc1 sorts before 1.2.3
     else:
         rank = 2  # 1.2.3-fix.4 / hotfix builds sort after 1.2.3
-    return (*numbers, rank, _natural_key(suffix))
+    # Same version: the bare tag first, then prefixed ones (sorted descending overall).
+    return (*numbers, rank, 0 if prefix else 1, _natural_key(suffix), _natural_key(prefix))
 
 
 def _natural_key(text: str) -> tuple[tuple[int, int, str], ...]:

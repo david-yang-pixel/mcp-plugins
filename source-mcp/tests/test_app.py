@@ -231,3 +231,19 @@ def test_runtime_ref_candidates_include_semver_variant_base():
         "hotfix/1.14.2-fix.11",
         "hotfix-1.14.2-fix.11",
     ]
+
+
+def test_every_tool_is_annotated_read_only(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+
+    response = client.post(
+        "/mcp",
+        headers=_auth(),
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+    )
+
+    tools = response.json()["result"]["tools"]
+    assert {"source_tree", "list_runtime_deployments"} <= {tool["name"] for tool in tools}
+    for tool in tools:
+        assert tool["annotations"]["readOnlyHint"] is True, tool["name"]
+        assert tool["annotations"]["destructiveHint"] is False, tool["name"]

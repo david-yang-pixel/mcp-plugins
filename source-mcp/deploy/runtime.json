@@ -10,7 +10,7 @@
     "SOURCE_MCP_REPOS": "dify,dify-marketplace-backend,dify-marketplace-frontend,dify-plugin-daemon,saas-deploy,dify-enterprise,dify-enterprise-frontend,dify-sandbox,dify-helm,dify-ee-terraform,dify-ee-helm-chart-values-generator,dify-official-plugins,dify-plugin-sdks,dify-billing,rbac,dify-marketplace",
     "SOURCE_MCP_REPOS_BASE_DIR": "/opt/source-mcp/repos",
     "SOURCE_MCP_REPO_URLS": "{}",
-    "SOURCE_MCP_RUNTIME_DEPLOYMENTS": "{\"dify\":\"dify-api-oltp\",\"dify-plugin-daemon\":\"dify-plugindaemon,dify-plugin-daemon\",\"dify-billing\":\"dify-saas-billing,billing\",\"dify-sandbox\":\"dify-sandbox\",\"dify-marketplace\":\"dify-marketplace-backend,dify-marketplace-ops-backend\",\"rbac\":\"dify-rbac,rbac\"}",
+    "SOURCE_MCP_RUNTIME_DEPLOYMENTS": "{\"dify\":\"dify-api-oltp\",\"dify-plugin-daemon\":\"dify-plugindaemon,dify-plugin-daemon\",\"dify-billing\":\"dify-billing,billing\",\"dify-sandbox\":\"dify-sandbox\",\"dify-marketplace\":\"dify-marketplace-backend,dify-marketplace-ops-backend\",\"rbac\":\"dify-rbac,rbac\"}",
     "SOURCE_MCP_RUNTIME_ENVIRONMENT": "production",
     "SOURCE_MCP_RUNTIME_HOURS": "3",
     "SOURCE_MCP_RUNTIME_PATH_DEPLOYMENTS": "{\"dify\":{\"web/\":\"dify-web\"}}",

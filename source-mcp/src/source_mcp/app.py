@@ -170,7 +170,25 @@ async def _require_auth(
     return settings
 
 
+# All tools read source code or telemetry. refresh_repos only updates this
+# service's local clone cache, so it is also reported read-only. Clients such as
+# OpenConnector derive read/write from these hints; without them unfamiliar tool
+# names (source_tree, list_runtime_deployments) were classified as writes.
+READ_ONLY_ANNOTATIONS: dict[str, Any] = {
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": True,
+}
+
+
 def _tools_list() -> list[dict[str, Any]]:
+    return [
+        {**tool, "annotations": dict(READ_ONLY_ANNOTATIONS)} for tool in _tool_definitions()
+    ]
+
+
+def _tool_definitions() -> list[dict[str, Any]]:
     runtime_props = {
         "deployment": {"type": "string", "description": _DEPLOYMENT_DESCRIPTION},
         "environment": {"type": "string", "description": _ENVIRONMENT_DESCRIPTION},

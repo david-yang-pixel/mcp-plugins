@@ -92,6 +92,17 @@ async def resolve_runtime_ref(
         # An explicitly requested deployment may live in another environment (e.g. gray).
         deployment_name, image = await _first_runtime_image(deployment_names, ANY_ENVIRONMENT, settings)
         environment_fallback = image is not None
+    gitops_image: Optional[dict[str, Any]] = None
+    if image is None:
+        gitops_environment = (
+            settings.runtime_environment
+            if _is_any_environment(requested_environment)
+            else requested_environment
+        )
+        deployment_name, gitops_image = await _first_gitops_image(
+            deployment_names, gitops_environment, settings
+        )
+        image = gitops_image
     if image is None:
         scope = (
             "any environment"
@@ -100,19 +111,22 @@ async def resolve_runtime_ref(
         )
         raise RuntimeRefUnavailable(
             f"no runtime image tag found for deployments {', '.join(deployment_names)} in {scope} "
-            f"within the last {settings.runtime_hours}h; list_runtime_deployments shows what is running"
+            f"within the last {settings.runtime_hours}h, and no image declared for them in "
+            f"{settings.gitops_repo} environments/; list_runtime_deployments shows what is running"
         )
     tag = image["image_tag"]
-    candidates = runtime_ref_candidates(tag)
-    last_error = ""
-    for ref in dict.fromkeys(candidates):
-        try:
-            commit = await rev_parse_func(repo, ref, settings)
-        except SourceError as e:
-            if e.code != "REF_NOT_FOUND":
-                raise
-            last_error = str(e)
-            continue
+    candidates = _prefixed_candidates(settings, repo, deployment_name, runtime_ref_candidates(tag))
+    ref, commit, last_error = await _first_resolvable(repo, candidates, settings, rev_parse_func)
+    if ref is None:
+        component_refs = [
+            name for name in await _component_tag_candidates(repo, tag, settings)
+            if name not in candidates
+        ]
+        ref, commit, component_error = await _first_resolvable(
+            repo, component_refs, settings, rev_parse_func
+        )
+        last_error = last_error or component_error
+    if ref is not None:
         result: dict[str, Any] = {
             "repo": repo,
             "ref": ref,
@@ -121,8 +135,15 @@ async def resolve_runtime_ref(
             "deployment": deployment_name,
             "environment": image.get("environment") or requested_environment,
             "base_version": extract_base_version(tag),
-            "source": "signoz",
+            "source": "gitops" if gitops_image else "signoz",
         }
+        if gitops_image:
+            result["gitops"] = gitops_image["gitops"]
+            result["source_warning"] = (
+                f"no image tag for {deployment_name} in telemetry; used the tag declared in "
+                f"{gitops_image['gitops']['repo']}:{gitops_image['gitops']['path']} "
+                "(GitOps desired state, not observed running)"
+            )
         if environment_fallback:
             result["environment_fallback"] = True
             result["environment_warning"] = (
@@ -134,6 +155,153 @@ async def resolve_runtime_ref(
         "GIT_REF_UNPUBLISHED",
         f"runtime image tag {tag!r} for {deployment_name} did not resolve in {repo}: {last_error}",
     )
+
+
+async def _first_resolvable(
+    repo: str,
+    candidates: list[str],
+    settings: Settings,
+    rev_parse_func: RevParseFunc,
+) -> tuple[Optional[str], str, str]:
+    last_error = ""
+    for ref in dict.fromkeys(candidates):
+        try:
+            return ref, await rev_parse_func(repo, ref, settings), last_error
+        except SourceError as e:
+            if e.code != "REF_NOT_FOUND":
+                raise
+            last_error = str(e)
+    return None, "", last_error
+
+
+def _prefixed_candidates(
+    settings: Settings,
+    repo: str,
+    deployment: str,
+    candidates: list[str],
+) -> list[str]:
+    mapping = settings.runtime_tag_prefixes.get(repo) or {}
+    prefix = mapping.get(deployment) or mapping.get("*")
+    if not prefix:
+        return list(candidates)
+    return list(dict.fromkeys([prefix + ref for ref in candidates] + candidates))
+
+
+async def _component_tag_candidates(repo: str, tag: str, settings: Settings) -> list[str]:
+    """Tags such as backend/2.3.2 for image tag 2.3.2 when no prefix is configured."""
+    if not tag or "/" in tag or any(ch in tag for ch in "*?[]\\"):
+        return []
+    from .git_ops import is_git_repo, list_repo_tags, repo_path
+
+    try:
+        if not is_git_repo(repo_path(settings, repo)):
+            return []
+        listed = await list_repo_tags(repo, 200, settings, pattern=f"*/{tag}")
+    except SourceError:
+        return []
+    matches = [name for name in listed["tags"] if name.endswith("/" + tag)]
+    # Only unambiguous: with several components (backend/, ops/) configure a prefix.
+    return matches if len(matches) == 1 else []
+
+
+async def _first_gitops_image(
+    deployment_names: list[str],
+    environment: str,
+    settings: Settings,
+) -> tuple[str, Optional[dict[str, Any]]]:
+    for candidate in deployment_names:
+        image = await gitops_image_tag(candidate, environment, settings)
+        if image:
+            return candidate, image
+    return "", None
+
+
+_KUSTOMIZE_IMAGE_NAME_RE = re.compile(r"^(\s*)-?\s*name:\s*['\"]?([^'\"\s#]+)['\"]?\s*(?:#.*)?$")
+_KUSTOMIZE_NEW_TAG_RE = re.compile(r"^\s*newTag:\s*['\"]?([^'\"\s#]+)['\"]?\s*(?:#.*)?$")
+
+
+async def gitops_image_tag(
+    deployment: str,
+    environment: str,
+    settings: Settings,
+) -> Optional[dict[str, Any]]:
+    """Image tag declared for a deployment in the GitOps repo, or None.
+
+    Looks in <gitops_repo>:environments/<environment>/**/kustomization.yaml for the
+    image mapped to the deployment (SOURCE_MCP_GITOPS_IMAGES). When several overlays
+    declare the image, the one whose directory matches the deployment name wins.
+    """
+    image_name = settings.gitops_images.get(deployment)
+    gitops_repo = settings.gitops_repo
+    if not image_name or not gitops_repo or gitops_repo not in settings.repo_names:
+        return None
+    if not _ENVIRONMENT_RE.fullmatch(environment or ""):
+        return None
+    from .git_ops import default_branch_ref, is_git_repo, repo_path, run_git
+
+    try:
+        path = repo_path(settings, gitops_repo)
+        if not is_git_repo(path):
+            return None  # never clone from the request path; the background refresh clones it
+        ref = await default_branch_ref(path, settings)
+        code, out, _ = await run_git(
+            path, "grep", "-l", "-F", "-e", image_name, ref, "--",
+            f"environments/{environment}/*kustomization.yaml",
+            settings=settings,
+            max_output=200_000,
+        )
+    except SourceError:
+        return None
+    if code != 0:
+        return None
+    files = [line.split(":", 1)[1] for line in out.splitlines() if ":" in line]
+    declared: list[tuple[str, str]] = []
+    for file in files:
+        code, text, _ = await run_git(path, "show", f"{ref}:{file}", settings=settings, max_output=200_000)
+        if code != 0:
+            continue
+        tag = _kustomize_image_tag(text, image_name)
+        if tag:
+            declared.append((file, tag))
+    if not declared:
+        return None
+    short = deployment.removeprefix("dify-")
+    declared.sort(key=lambda item: (item[0].split("/")[-2] not in (deployment, short), item[0]))
+    file, tag = declared[0]
+    code, commit, _ = await run_git(path, "rev-parse", ref, settings=settings, max_output=200)
+    return {
+        "image_tag": tag,
+        "environment": environment,
+        "gitops": {
+            "repo": gitops_repo,
+            "ref": ref,
+            "commit": commit.strip() if code == 0 else None,
+            "path": file,
+            "image": image_name,
+            "other_overlays": [{"path": f, "image_tag": t} for f, t in declared[1:]],
+        },
+    }
+
+
+def _kustomize_image_tag(text: str, image_name: str) -> Optional[str]:
+    """newTag of the images[] entry named image_name in a kustomization.yaml."""
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        match = _KUSTOMIZE_IMAGE_NAME_RE.match(line)
+        if not match or match.group(2) != image_name:
+            continue
+        item_indent = len(match.group(1))
+        for follow in lines[index + 1:index + 8]:
+            if not follow.strip():
+                continue
+            stripped = follow.lstrip()
+            indent = len(follow) - len(stripped)
+            if stripped.startswith("- ") or indent < item_indent or (indent == 0 and not follow.startswith(" ")):
+                break
+            tag = _KUSTOMIZE_NEW_TAG_RE.match(follow)
+            if tag:
+                return tag.group(1)
+    return None
 
 
 async def _first_runtime_image(
@@ -376,6 +544,10 @@ async def list_runtime_deployments(
         }
         items.append(item)
     seen = {item["deployment"] for item in items}
+    # Only deployments the query could have returned: those matching name_contains.
+    # When the listing was truncated, absence proves nothing.
+    considered = [name for name in deployment_repos if not name_contains or name_contains in name]
+    without_logs = None if truncated else sorted(name for name in considered if name not in seen)
     return {
         "hours": hours,
         "environment": environment or "any",
@@ -386,7 +558,7 @@ async def list_runtime_deployments(
         "configured_repo_deployments": configured,
         "configured_path_deployments": settings.runtime_path_deployments,
         "deployment_repos": deployment_repos,
-        "configured_without_logs": sorted(name for name in deployment_repos if name not in seen),
+        "configured_without_logs": without_logs,
     }
 
 

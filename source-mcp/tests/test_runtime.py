@@ -30,7 +30,7 @@ def test_default_runtime_deployments_match_production_aliases(monkeypatch):
     assert deployments == {
         "dify": "dify-api-oltp",
         "dify-plugin-daemon": "dify-plugindaemon,dify-plugin-daemon",
-        "dify-billing": "dify-saas-billing,billing",
+        "dify-billing": "dify-billing,billing",
         "dify-sandbox": "dify-sandbox",
         "dify-marketplace": "dify-marketplace-backend,dify-marketplace-ops-backend",
         "rbac": "dify-rbac,rbac",
