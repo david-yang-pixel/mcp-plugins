@@ -31,6 +31,9 @@ def test_default_runtime_deployments_match_production_aliases(monkeypatch):
         "dify": "dify-api-oltp",
         "dify-plugin-daemon": "dify-plugindaemon,dify-plugin-daemon",
         "dify-billing": "dify-saas-billing,billing",
+        "dify-sandbox": "dify-sandbox",
+        "dify-marketplace": "dify-marketplace-backend,dify-marketplace-ops-backend",
+        "rbac": "dify-rbac,rbac",
     }
 
 
@@ -44,9 +47,13 @@ def test_resolve_runtime_ref_tries_configured_deployment_aliases(monkeypatch, tm
     )
     settings = Settings()
 
-    async def query_runtime_image_tag(deployment: str, _settings: Settings) -> str | None:
+    async def query_runtime_image(
+        deployment: str, _settings: Settings, _environment: str | None = None
+    ) -> dict[str, str] | None:
         queried_deployments.append(deployment)
-        return "release-20260708.1" if deployment == "dify-saas-billing" else None
+        if deployment == "dify-saas-billing":
+            return {"image_tag": "release-20260708.1", "environment": "production"}
+        return None
 
     async def rev_parse(
         repo: str,
@@ -57,7 +64,7 @@ def test_resolve_runtime_ref_tries_configured_deployment_aliases(monkeypatch, tm
         assert ref == "release-20260708.1"
         return "a" * 40
 
-    monkeypatch.setattr(runtime, "_query_runtime_image_tag", query_runtime_image_tag)
+    monkeypatch.setattr(runtime, "_query_runtime_image", query_runtime_image)
 
     async def resolve() -> dict[str, object]:
         return await runtime.resolve_runtime_ref(
@@ -82,8 +89,10 @@ def test_resolve_runtime_ref_marks_unpublished_git_ref(monkeypatch, tmp_path):
     )
     settings = Settings()
 
-    async def query_runtime_image_tag(_deployment: str, _settings: Settings) -> str:
-        return "release-20260708.1"
+    async def query_runtime_image(
+        _deployment: str, _settings: Settings, _environment: str | None = None
+    ) -> dict[str, str]:
+        return {"image_tag": "release-20260708.1", "environment": "production"}
 
     async def rev_parse(
         _repo: str,
@@ -92,7 +101,7 @@ def test_resolve_runtime_ref_marks_unpublished_git_ref(monkeypatch, tmp_path):
     ) -> str:
         raise SourceError("REF_NOT_FOUND", f"missing {ref}")
 
-    monkeypatch.setattr(runtime, "_query_runtime_image_tag", query_runtime_image_tag)
+    monkeypatch.setattr(runtime, "_query_runtime_image", query_runtime_image)
 
     async def resolve() -> None:
         await runtime.resolve_runtime_ref(
@@ -117,8 +126,10 @@ def test_resolve_runtime_ref_preserves_git_transport_errors(monkeypatch, tmp_pat
     )
     settings = Settings()
 
-    async def query_runtime_image_tag(_deployment: str, _settings: Settings) -> str:
-        return "release-20260708.1"
+    async def query_runtime_image(
+        _deployment: str, _settings: Settings, _environment: str | None = None
+    ) -> dict[str, str]:
+        return {"image_tag": "release-20260708.1", "environment": "production"}
 
     async def rev_parse(
         _repo: str,
@@ -127,7 +138,7 @@ def test_resolve_runtime_ref_preserves_git_transport_errors(monkeypatch, tmp_pat
     ) -> str:
         raise SourceError("GIT_CLONE_FAILED", "repository transport failed")
 
-    monkeypatch.setattr(runtime, "_query_runtime_image_tag", query_runtime_image_tag)
+    monkeypatch.setattr(runtime, "_query_runtime_image", query_runtime_image)
 
     async def resolve() -> None:
         await runtime.resolve_runtime_ref(

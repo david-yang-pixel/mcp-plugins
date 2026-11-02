@@ -5,8 +5,8 @@
 ## 开发和测试
 
 ```bash
-uv sync --locked --extra dev
-uv run --locked --extra dev python -m pytest
+uv sync --locked --all-extras --all-groups
+uv run --locked pytest -q
 cp .env.example .env
 # 填写本地凭证后启动
 uv run --locked source-mcp
@@ -16,12 +16,20 @@ uv run --locked source-mcp
 
 ## 工具行为要点
 
-- **ref 默认值**：`source_search`、`source_read`、`source_log` 省略 `ref` 时使用 `runtime`，即 Dify SaaS 生产正在运行的代码。返回结果会带 `ref_defaulted: true` 和 `ref_warning`。Enterprise/私有部署必须显式传入客户版本对应的 tag 或锁定提交。
+- **ref 默认值**：`source_search`、`source_read`、`source_log`、`source_tree` 省略 `ref`（或传 `ref=runtime`）时使用 Dify SaaS 生产正在运行的代码。返回结果会带 `ref_defaulted: true` 和 `ref_warning`。Enterprise/私有部署必须显式传入客户版本对应的 tag 或锁定提交。
+- **按 deployment 解析线上版本**：同一仓库的不同 deployment 可能运行不同版本（例如 `dify-api-oltp` 与 `dify-web`）。上述读取工具和 `source_diff` 都接受可选 `deployment`、`environment`，只在 ref 省略或为 `runtime` 时生效；显式 ref 时忽略并在 `deployment_warning` 中说明。未传 `deployment` 时按 `SOURCE_MCP_RUNTIME_PATH_DEPLOYMENTS`（JSON：`{"仓库": {"路径前缀": "deployment"}}`，默认 `{"dify": {"web/": "dify-web"}}`）选择：`filepath`/`path`/`glob` 落在 `web/` 下时自动改用 `dify-web`，结果带 `deployment_selection: "path"` 和 `deployment_warning`；`glob` 为空或可能跨越 `web/` 与其他目录（如全仓搜索、`**/*.tsx`）时仍用仓库默认 deployment，并在 `deployment_warning` 中提示 `web/` 下结果对应的是默认 deployment 的版本，可传 `deployment=dify-web`。结果中的 `deployment`、`environment`、`image_tag` 为实际使用值。`source_diff` 的 `runtime` 字段列出 runtime 侧的解析结果。
+- **source_runtime_ref / environment**：默认按 `SOURCE_MCP_RUNTIME_ENVIRONMENT`（production）过滤 `deployment.environment`；可传 `environment`，`any` 表示不过滤。显式传 `deployment` 而默认环境查不到时，会自动不限环境重查一次，返回实际 `environment`、`environment_fallback: true` 和 `environment_warning`（用于 `dify-api-oltp-gray` 这类非 production 环境）。`SOURCE_MCP_RUNTIME_DEPLOYMENTS` 的值为逗号分隔的候选 deployment，按顺序尝试；默认已包含 `dify-sandbox`、`dify-marketplace`（线上 marketplace 各服务的镜像版本如 `2.3.2` 来自新的 `dify-marketplace` 单仓库；旧仓库 `dify-marketplace-backend` 的 tag 只到 1.0.x，不再映射线上 deployment，需显式传 ref）、`dify-billing`、`rbac`（deployment `dify-rbac`）。
+- **list_runtime_deployments**：通过同一 SigNoz `sz_run query` 通道列出最近 `hours`（默认 `SOURCE_MCP_RUNTIME_HOURS`，最大 168）内上报过 `container.image.tag` 的 `k8s.deployment.name`，每行含 `deployment`、`environment`、`image_tag`、`log_count`、`latest_ts`/`latest_at` 和映射到的 `repos`。可选 `name_contains`（仅 `[a-z0-9.-]`）、`environment`（不传则不过滤环境）、`limit`（默认 200，最大 500，超出时 `truncated: true`）。同时返回已配置的 repo→deployment 映射、路径映射、deployment→repo 反查以及没有日志的已配置 deployment。
+- **未配置的仓库**：`UNKNOWN_REPO` 会列出已配置仓库，并说明如何通过 `SOURCE_MCP_REPOS`（langgenius 仓库名，逗号分隔）和 `SOURCE_MCP_REPO_URLS`（非 langgenius 仓库的克隆地址）添加。`SOURCE_MCP_REPO_HINTS`（JSON：名称 → 提示文本，或 `{repo, paths, note}` 列表）为不是独立仓库的模块给出“位于 X 仓库的 Y 路径”的建议；默认包含 `billing`→`dify-billing`，`ops`/`ops-backend`/`ops-web`→`dify-marketplace` 的 `ops/`，`gateway`→`dify-enterprise` 的 `server/cmd/gateway/`、`server/pkg/gateway/`（未确认），`sandbox-gateway`→`dify-enterprise` 的 `server/cmd/sandbox-gateway/`。名称带 `dify-` 前缀时也会匹配去掉前缀的提示。
 - **浅克隆与补取**：读取类工具遇到本地没有的完整 40 位提交 SHA 时，会自动从 origin 按 SHA 拉取，存放在 `refs/source-mcp/commits/<sha>`，不受 `fetch --prune` 影响。缩写 SHA 无法从远端按 ID 拉取，`REF_NOT_FOUND` 会说明仓库是浅克隆，并提示改用完整 SHA 或 `unshallow`。`repo_status`、`source_log` 返回 `shallow`；浅克隆下历史不完整时，`source_log` 会附带 `warning`。
-- **refresh_repos**：返回 `changed`、`changes`（新增、更新、删除的 ref 数及 `history_changed`）、`shallow` 和 `warnings`，可以分辨"成功但没变化"。只指定一个仓库时可传：`refs`（分支、tag 或完整 SHA，最多 20 个）、`deepen=N`、`unshallow=true`。历史拉取使用 `SOURCE_MCP_GIT_HISTORY_TIMEOUT_SECONDS`（默认 900 秒）。
-- **source_search**：`mode=auto`（默认）按扩展正则匹配，`a|b` 可用；遇到 lookaround、`\d`、`(?` 分组或懒惰量词时改用 PCRE；开头的 `(?i)` 会被识别。正则被拒绝时退回固定字符串，并在 `fallback` 中说明。也可以显式指定 `fixed`/`regex`/`perl`，此时正则非法返回 `BAD_PATTERN`。另有 `case_sensitive`（默认 false）和 `context`（0–10 行上下文）。无匹配时的输出写明实际使用的模式和大小写设置。
+- **完整历史**：`SOURCE_MCP_FULL_HISTORY_REPOS`（逗号分隔，`*` 表示全部，默认 `*`）中的仓库新克隆时使用完整克隆，后台定时刷新时若仍是浅克隆会执行 `fetch --unshallow`（超时 `SOURCE_MCP_GIT_HISTORY_TIMEOUT_SECONDS`）；不在列表中的仓库新克隆为 `--depth=1`，后台不会补全历史。`repo_status` 返回 `full_history`。
+- **后台定时刷新**：服务启动后由 FastAPI lifespan 启动后台任务，首次在启动 60 秒（或更短的间隔）后运行，之后每 `SOURCE_MCP_BACKGROUND_REFRESH_SECONDS`（默认 3600，`<=0` 关闭）逐仓库执行：未克隆则克隆，已克隆且距上次 fetch 超过 `SOURCE_MCP_FETCH_TTL_SECONDS` 则 `fetch --all --prune --tags --force`，再按需 unshallow。单个仓库失败（如私有仓库无权限）只记录错误，不影响其他仓库。`repo_status` 返回 `last_fetch_at`/`last_fetch_at_iso`、`stale`（超过 2 倍间隔未 fetch；后台关闭时为 null）、`stale_after_seconds` 和 `background_refresh`（最近一次尝试、成功、动作、错误）。
+- **refresh_repos / repo_status**：`refresh_repos` 返回 `changed`、`changes`（新增、更新、删除的 ref 数及 `history_changed`）、`shallow` 和 `warnings`，可以分辨"成功但没变化"。多仓库时单个仓库失败不会让整个调用失败：该条目为 `ok: false`，附 `code` 和 `error`，成功条目为 `ok: true`；只指定一个仓库时失败仍直接返回错误。只指定一个仓库时可传：`refs`（分支、tag 或完整 SHA，最多 20 个）、`deepen=N`、`unshallow=true`。历史拉取使用 `SOURCE_MCP_GIT_HISTORY_TIMEOUT_SECONDS`（默认 900 秒）。不带 `repo` 的 `repo_status` 同样逐仓库隔离错误。
+- **source_search**：`mode=auto`（默认）按扩展正则匹配，`a|b` 可用；遇到 lookaround、`\d`、`(?` 分组或懒惰量词时改用 PCRE；开头的 `(?i)` 会被识别。正则被拒绝时退回固定字符串，并在 `fallback` 中说明。也可以显式指定 `fixed`/`regex`/`perl`，此时正则非法返回 `BAD_PATTERN`。另有 `case_sensitive`（默认 false）和 `context`（0–10 行上下文）。`limit` 是最多返回的匹配行数（默认 30，上限 200），`offset` 跳过前若干条；返回结构化 `matches`（`file`、`line`、`text`，有 context 时附 `context_before`/`context_after`，单行超过 500 字符截断并标 `text_truncated`）、`total_matches`、`total_exact`（git grep 输出超过 4MB 时为 false，总数为下限）、`files_with_matches`、`returned`、`offset`、`has_more`、`next_offset`。`output` 文本只包含当前页，与分页一致。跳过二进制文件。无匹配时的输出写明实际使用的模式和大小写设置。
+- **source_tree**：基于 `git ls-tree` 列出目录，`path` 省略为仓库根目录，`recursive=true` 列出整个子树（含子目录条目）。条目含 `path`、`type`（`blob`/`tree`/`commit`）、`mode`，文件含 `size`；`path` 指向文件时返回该文件一条。`limit` 默认 200、上限 1000，配合 `offset`/`next_offset` 分页。拒绝 `..` 和绝对路径（`BAD_FILEPATH`），路径不存在返回 `PATH_NOT_FOUND`。
 - **source_read**：`start_line`/`end_line` 为从 1 开始、包含两端的行号。返回 `total_lines`、`start_line`、`end_line`、`truncated`；单次最多 120000 字符，按整行截断，并提示下一次的 `start_line`。
 - **source_diff**：`mode=stat`（不传 `filepath` 时的默认值）、`name-status`、`patch`（传 `filepath` 时的默认值）。`filepath` 可以是目录。
+- **list_repo_tags**：可传 `pattern`（`git tag -l` 的 glob，如 `1.14.*`）。能解析为版本号的 tag（纯版本或 `v` 前缀，如 `1.14.2`、`v1.14.2-fix.4`）按版本降序排在前面，`-rc`/`-beta` 等预发布排在正式版之后，`-fix.N` 等后缀排在正式版之前；其余 tag（如 `redhat-chart-*`、`hotfix-*`）按名称排在后面。返回 `total`、`version_tags`、`non_version_tags`。
 
 ## 构建
 
