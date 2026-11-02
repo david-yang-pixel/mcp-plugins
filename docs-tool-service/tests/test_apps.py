@@ -191,3 +191,22 @@ def test_html_reader_removes_navigation_scripts_and_keeps_page_content() -> None
     assert "官网正文" in content
     assert "Navigation" not in content
     assert "secret" not in content
+
+
+def test_every_docs_tool_is_annotated_read_only(monkeypatch) -> None:
+    monkeypatch.setenv("DOCS_TOOL_SERVICE_API_KEY", "docs-secret")
+    from docs_tool_service.settings import get_settings
+
+    get_settings.cache_clear()
+    from docs_tool_service.app import create_service_app
+
+    client = TestClient(create_service_app("docs-tool-service"))
+    response = client.post(
+        "/mcp",
+        headers=_auth("docs-secret"),
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+    )
+
+    for tool in response.json()["result"]["tools"]:
+        assert tool["annotations"]["readOnlyHint"] is True, tool["name"]
+        assert tool["annotations"]["destructiveHint"] is False, tool["name"]
