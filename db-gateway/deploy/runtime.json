@@ -63,7 +63,7 @@
       "teleport_retry_delay_seconds": 0.25,
       "singleflight_enabled": true,
       "count_timeout_seconds": 5,
-      "driver": "psql",
+      "driver": "pool",
       "pool_max_idle_seconds": 240,
       "pool_retry_delay_seconds": 1.5
     },
