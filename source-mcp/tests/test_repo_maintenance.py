@@ -473,3 +473,38 @@ def test_leftover_branch_gone_upstream_is_not_refetched_within_ttl(env, monkeypa
 
     assert first == second == local
     assert len(lookups) == 1  # one lookup per TTL, not one or two per read
+
+
+def test_background_clone_fetches_only_default_branch_and_is_fresh(env, monkeypatch):
+    # Full-history clones run without --depth, so plain `git clone` would fetch
+    # every branch and leave the all-branches refspec and no fetch marker behind.
+    _git("checkout", "-q", "-b", "feature/x", cwd=env["origin"])
+    (env["origin"] / "file.txt").write_text("release\n", encoding="utf-8")
+    _git("commit", "-q", "-am", "release", cwd=env["origin"])
+    _git("tag", "1.0.5", cwd=env["origin"])  # only reachable from feature/x
+    _git("checkout", "-q", "main", cwd=env["origin"])
+    monkeypatch.setenv("SOURCE_MCP_FULL_HISTORY_REPOS", "*")
+    monkeypatch.setenv("SOURCE_MCP_REPOS", "fresh")
+    monkeypatch.setenv("SOURCE_MCP_REPO_URLS", json.dumps({"fresh": env["origin"].as_uri()}))
+    monkeypatch.setenv("SOURCE_MCP_BACKGROUND_REFRESH_SECONDS", "3600")
+    settings = Settings(_env_file=None)
+    path = env["base"] / "fresh"
+
+    result = anyio.run(git_ops.background_refresh_repo, "fresh", settings)
+
+    assert result["actions"] == ["cloned"]
+    assert result["error"] is None
+    status = anyio.run(git_ops.status_for_repo, "fresh", settings)
+    assert status["fetch_refspecs"] == ["+refs/heads/main:refs/remotes/origin/main"]
+    assert status["fetch_refspec_ok"] is True
+    assert status["stale"] is False
+    assert status["last_fetch_kind"] == "full"
+    assert status["tag_count"] == 1
+    assert status["shallow"] is False
+    remote_branches = _git("for-each-ref", "--format=%(refname)", "refs/remotes/origin/", cwd=path)
+    assert "refs/remotes/origin/feature/x" not in remote_branches.split()
+    assert _git("rev-parse", "--verify", "-q", "1.0.5^{commit}", cwd=path)
+
+    # The next cycle within the TTL has nothing to do.
+    again = anyio.run(git_ops.background_refresh_repo, "fresh", settings)
+    assert again["actions"] == ["fresh"]
