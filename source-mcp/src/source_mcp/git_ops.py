@@ -437,7 +437,10 @@ async def rev_parse(
         max_output=2000,
     )
     if code != 0:
-        if await _can_auto_fetch(path, repo, settings):
+        # A local copy exists and this branch was already tried within the TTL
+        # (e.g. it is gone upstream): use the local copy without another fetch.
+        skip_fetch = target != ref and _branch_recently_fetched(path, target, settings)
+        if not skip_fetch and await _can_auto_fetch(path, repo, settings):
             try:
                 await _configure_origin(path, repo, settings)
                 if _FULL_COMMIT_SHA_RE.match(ref):
@@ -497,6 +500,13 @@ async def _refresh_branch_on_use(
         await _fetch_ref(path, branch, settings)
     except SourceError as e:
         _LOG.warning("on-use refresh of %s %s failed: %s", repo, branch, e.message)
+
+
+def _branch_recently_fetched(path: Path, target: str, settings: Settings) -> bool:
+    if not target.startswith("refs/remotes/origin/"):
+        return False
+    key = (str(path), target.removeprefix("refs/remotes/origin/"))
+    return time.time() - _BRANCH_FETCHED_AT.get(key, 0.0) < settings.fetch_ttl_seconds
 
 
 async def _remote_default_branch_cached(path: Path, settings: Settings) -> Optional[str]:

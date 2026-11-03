@@ -447,3 +447,29 @@ def test_local_branch_is_used_when_origin_is_unreachable(env, monkeypatch, tmp_p
     git_ops._BRANCH_FETCHED_AT.clear()
 
     assert anyio.run(git_ops.rev_parse, "dify", "local-only", settings) == local
+
+
+def test_leftover_branch_gone_upstream_is_not_refetched_within_ttl(env, monkeypatch):
+    """Bugbot: every read of a leftover local branch missing upstream ran ls-remote."""
+    path = env["base"] / "dify"
+    _git("branch", "deleted-upstream", "HEAD", cwd=path)
+    local = _git("rev-parse", "deleted-upstream", cwd=path)
+    monkeypatch.setenv("SOURCE_MCP_REPOS", "dify")
+    monkeypatch.setenv("SOURCE_MCP_FETCH_TTL_SECONDS", "900")
+    settings = Settings(_env_file=None)
+    git_ops._BRANCH_FETCHED_AT.clear()
+    lookups: list[tuple[str, ...]] = []
+    real_run_git = git_ops.run_git
+
+    async def counting_run_git(cwd: Path, *args: str, **kwargs: Any):
+        if args and args[0] == "ls-remote" and "--symref" not in args:
+            lookups.append(args)
+        return await real_run_git(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "run_git", counting_run_git)
+
+    first = anyio.run(git_ops.rev_parse, "dify", "deleted-upstream", settings)
+    second = anyio.run(git_ops.rev_parse, "dify", "deleted-upstream", settings)
+
+    assert first == second == local
+    assert len(lookups) == 1  # one lookup per TTL, not one or two per read
