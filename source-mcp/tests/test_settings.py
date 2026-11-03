@@ -56,7 +56,8 @@ def test_default_repo_hints_cover_known_modules(monkeypatch):
 
     assert {"billing", "ops", "ops-backend", "ops-web", "gateway", "sandbox-gateway"} <= set(hints)
     assert "rbac" not in hints
-    assert hints["billing"][0]["repo"] == "dify-billing"
+    assert "dify-saas-billing" in hints["billing"]
+    assert "langgenius/dify-saas" in hints["gateway"]
 
 
 def test_deploy_runtime_config_matches_new_settings():
