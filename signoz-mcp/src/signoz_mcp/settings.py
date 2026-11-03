@@ -40,8 +40,10 @@ class Settings(BaseSettings):
     chunk_hours: float = Field(default=24.0, validation_alias="SIGNOZ_MCP_CHUNK_HOURS")
     chunk_concurrency: int = Field(default=2, validation_alias="SIGNOZ_MCP_CHUNK_CONCURRENCY")
     chunk_row_limit: int = Field(default=10000, validation_alias="SIGNOZ_MCP_CHUNK_ROW_LIMIT")
+    # Kept below the 60s proxy read timeout in front of the legacy route, so a
+    # long aggregation returns its partial result instead of a gateway 504.
     total_timeout_seconds: float = Field(
-        default=120.0,
+        default=50.0,
         validation_alias="SIGNOZ_MCP_TOTAL_TIMEOUT_SECONDS",
     )
     # Adds ts_bucket_start predicates (SigNoz logs v2 / traces v3 primary key)

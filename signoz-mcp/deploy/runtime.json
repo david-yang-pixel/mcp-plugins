@@ -8,7 +8,8 @@
     "SIGNOZ_MCP_PORT": "8098",
     "SIGNOZ_MCP_SINGLEFLIGHT_ENABLED": "true",
     "SIGNOZ_MCP_SZ_PATH": "/app/scripts/sz",
-    "SIGNOZ_MCP_TIMEOUT_SECONDS": "60",
+    "SIGNOZ_MCP_TIMEOUT_SECONDS": "45",
+    "SIGNOZ_MCP_TOTAL_TIMEOUT_SECONDS": "50",
     "SIGNOZ_URL": "https://signoz.dify.dev"
   },
   "secrets": {

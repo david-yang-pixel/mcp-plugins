@@ -285,3 +285,50 @@ def test_dify_saas_is_not_configured(monkeypatch):
     assert "dify-saas" not in settings.runtime_deployments
     assert "dify-saas" not in settings.repo_component_deployments
     assert "dify-saas-billing" not in settings.gitops_images
+
+
+def test_knowledge_fs_resolves_its_image_tag_and_workers_map_to_dify(monkeypatch):
+    for name in (
+        "SOURCE_MCP_RUNTIME_DEPLOYMENTS",
+        "SOURCE_MCP_REPO_COMPONENT_DEPLOYMENTS",
+        "SOURCE_MCP_GITOPS_IMAGES",
+        "SOURCE_MCP_RUNTIME_REF_OVERRIDES",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    settings = Settings(_env_file=None)
+    queried: list[str] = []
+    resolved: list[str] = []
+
+    async def query(deployment: str, _settings: Settings, environment: str | None = None):
+        queried.append(deployment)
+        return {"image_tag": "1.0.5", "environment": "production"}
+
+    async def rev_parse(_repo: str, ref: str, _settings: Settings) -> str:
+        resolved.append(ref)
+        return "c" * 40
+
+    monkeypatch.setattr(runtime, "_query_runtime_image", query)
+    result = anyio.run(
+        lambda: runtime.resolve_runtime_ref(
+            repo="knowledge-fs", deployment=None, settings=settings, rev_parse_func=rev_parse
+        )
+    )
+
+    assert queried == ["dify-knowledge-fs"]
+    assert resolved[0] == "1.0.5"
+    assert result["deployment"] == "dify-knowledge-fs"
+    assert settings.gitops_images["dify-knowledge-fs"] == "langgenius/knowledge-fs-api"
+    workers = settings.repo_component_deployments["dify"]
+    assert "dify-knowledge-fs-document-worker" in workers
+    assert all(name.endswith("-worker") for name in workers)
+
+
+def test_deployed_config_includes_knowledge_fs():
+    import json
+    from pathlib import Path
+
+    env = json.loads((Path(__file__).resolve().parents[1] / "deploy" / "runtime.json").read_text())[
+        "environment"
+    ]
+    assert "knowledge-fs" in env["SOURCE_MCP_REPOS"].split(",")
+    assert json.loads(env["SOURCE_MCP_RUNTIME_DEPLOYMENTS"])["knowledge-fs"] == "dify-knowledge-fs"
