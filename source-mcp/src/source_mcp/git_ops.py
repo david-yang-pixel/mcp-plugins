@@ -437,15 +437,32 @@ async def rev_parse(
         max_output=2000,
     )
     if code != 0:
-        if await _can_auto_fetch(path, repo, settings):
-            await _configure_origin(path, repo, settings)
-            if _FULL_COMMIT_SHA_RE.match(ref):
-                await _fetch_commit(path, ref, settings)
-            else:
-                await _fetch_ref(path, ref, settings)
+        # A local copy exists and this branch was already tried within the TTL
+        # (e.g. it is gone upstream): use the local copy without another fetch.
+        skip_fetch = target != ref and _branch_recently_fetched(path, target, settings)
+        if not skip_fetch and await _can_auto_fetch(path, repo, settings):
+            try:
+                await _configure_origin(path, repo, settings)
+                if _FULL_COMMIT_SHA_RE.match(ref):
+                    await _fetch_commit(path, ref, settings)
+                else:
+                    await _fetch_ref(path, ref, settings)
+            except SourceError:
+                if target == ref:
+                    raise
+                # A local copy of the branch exists; fall back to it below.
+                _LOG.warning("fetch of %s %s failed; using the local ref", repo, ref)
         target = await _preferred_ref(path, ref, settings)
         code, out, err = await run_git(
             path, "rev-parse", "--verify", "-q", f"{target}^{{commit}}",
+            settings=settings,
+            max_output=2000,
+        )
+    if code != 0 and target != ref:
+        # Remote-tracking ref unavailable (no origin access, branch deleted
+        # upstream): use whatever local ref git resolves, as before.
+        code, out, err = await run_git(
+            path, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}",
             settings=settings,
             max_output=2000,
         )
@@ -485,6 +502,13 @@ async def _refresh_branch_on_use(
         _LOG.warning("on-use refresh of %s %s failed: %s", repo, branch, e.message)
 
 
+def _branch_recently_fetched(path: Path, target: str, settings: Settings) -> bool:
+    if not target.startswith("refs/remotes/origin/"):
+        return False
+    key = (str(path), target.removeprefix("refs/remotes/origin/"))
+    return time.time() - _BRANCH_FETCHED_AT.get(key, 0.0) < settings.fetch_ttl_seconds
+
+
 async def _remote_default_branch_cached(path: Path, settings: Settings) -> Optional[str]:
     code, out, _ = await run_git(
         path, "config", "--get", _DEFAULT_BRANCH_CONFIG, settings=settings, max_output=500
@@ -507,15 +531,26 @@ async def _preferred_ref(path: Path, ref: str, settings: Settings) -> str:
         or any(token in ref for token in _REF_EXPRESSION_CHARS)
     ):
         return ref
-    for candidate, preferred in ((f"refs/tags/{ref}", ref), (f"refs/remotes/origin/{ref}", f"refs/remotes/origin/{ref}")):
-        code, _, _ = await run_git(
-            path, "show-ref", "--verify", "--quiet", candidate,
-            settings=settings,
-            max_output=200,
-        )
-        if code == 0:
-            return preferred
+    remote = f"refs/remotes/origin/{ref}"
+    if await _ref_exists(path, f"refs/tags/{ref}", settings):
+        return ref
+    if await _ref_exists(path, remote, settings):
+        return remote
+    if await _ref_exists(path, f"refs/heads/{ref}", settings):
+        # Only a local copy exists (left by the old on-demand fetch path): aim at
+        # the remote-tracking ref so it is fetched; rev_parse falls back to the
+        # local branch if that fetch is impossible.
+        return remote
     return ref
+
+
+async def _ref_exists(path: Path, full_ref: str, settings: Settings) -> bool:
+    code, _, _ = await run_git(
+        path, "show-ref", "--verify", "--quiet", full_ref,
+        settings=settings,
+        max_output=200,
+    )
+    return code == 0
 
 
 async def is_shallow_repo(path: Path, settings: Settings) -> bool:
@@ -1228,8 +1263,11 @@ async def _ensure_ref_present(
     ref: str,
     settings: Settings,
 ) -> dict[str, Any]:
+    # Branches live under refs/remotes/origin/*, which git does not find from a
+    # short name; resolve the same way rev_parse does.
+    target = await _preferred_ref(path, ref, settings)
     code, out, _ = await run_git(
-        path, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}",
+        path, "rev-parse", "--verify", "-q", f"{target}^{{commit}}",
         settings=settings,
         max_output=2000,
     )
@@ -1252,8 +1290,9 @@ async def _ensure_ref_present(
         }
     else:
         status = "fetched" if await _fetch_ref(path, ref, settings) else "not_found"
+    target = await _preferred_ref(path, ref, settings)
     code, out, _ = await run_git(
-        path, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}",
+        path, "rev-parse", "--verify", "-q", f"{target}^{{commit}}",
         settings=settings,
         max_output=2000,
     )
