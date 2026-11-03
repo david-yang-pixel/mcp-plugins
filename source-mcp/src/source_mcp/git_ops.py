@@ -1361,8 +1361,11 @@ async def _clone_repo(path: Path, repo: str, settings: Settings) -> None:
     existed = path.exists()
     # Repos configured for full history get a complete clone; others stay shallow.
     depth_args = () if settings.is_full_history_repo(repo) else ("--depth=1",)
+    # Like later fetches, take only the remote default branch (plus tags); a
+    # full-history clone would otherwise download every branch.
+    branch_args = () if settings.fetch_all_branches else ("--single-branch",)
     code, _, err = await run_git(
-        path.parent, "clone", *depth_args, url, str(path),
+        path.parent, "clone", *depth_args, *branch_args, url, str(path),
         settings=settings,
         max_output=8000,
         timeout_seconds=settings.git_history_timeout_seconds,
@@ -1372,6 +1375,22 @@ async def _clone_repo(path: Path, repo: str, settings: Settings) -> None:
             # Do not leave a half-written clone that later looks like a valid repo.
             shutil.rmtree(path, ignore_errors=True)
         raise SourceError("GIT_CLONE_FAILED", f"{repo}: {err.strip()}")
+    # Cache the default branch and settle the refspec now, so repo_status does
+    # not report the fresh clone as stale or mis-configured until the next cycle.
+    with suppress(SourceError):
+        await _configure_origin(path, repo, settings)
+    # --single-branch only follows tags reachable from that branch; release tags
+    # cut on other branches would otherwise wait for the next background fetch.
+    code, _, err = await run_git(
+        path, "fetch", "--prune", "--tags", "--force", "origin",
+        settings=settings,
+        max_output=8000,
+        timeout_seconds=settings.git_history_timeout_seconds,
+    )
+    if code == 0:
+        _mark_full_fetch(path)
+    else:
+        _LOG.warning("tag fetch after cloning %s failed: %s", repo, err.strip())
 
 
 ALL_BRANCHES_REFSPEC = "+refs/heads/*:refs/remotes/origin/*"
