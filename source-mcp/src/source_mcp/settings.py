@@ -73,7 +73,8 @@ class Settings(BaseSettings):
             '"dify-billing":"dify-billing,billing",'
             '"dify-sandbox":"dify-sandbox",'
             '"dify-marketplace":"dify-marketplace-backend,dify-marketplace-ops-backend",'
-            '"rbac":"dify-rbac,rbac"}'
+            '"rbac":"dify-rbac,rbac",'
+            '"knowledge-fs":"dify-knowledge-fs"}'
         ),
         validation_alias="SOURCE_MCP_RUNTIME_DEPLOYMENTS",
     )
@@ -114,6 +115,18 @@ class Settings(BaseSettings):
                     "dify-marketplace-ops-web",
                     "dify-marketplace-creators-backend",
                     "dify-marketplace-creators-web",
+                ],
+                # The knowledge-fs workers run the langgenius/dify-api image (dify
+                # repo); only dify-knowledge-fs itself is built from knowledge-fs.
+                "dify": [
+                    "dify-knowledge-fs-dispatch-worker",
+                    "dify-knowledge-fs-document-worker",
+                    "dify-knowledge-fs-lifecycle-worker",
+                    "dify-knowledge-fs-maintenance-worker",
+                    "dify-knowledge-fs-priority-document-worker",
+                    "dify-knowledge-fs-research-worker",
+                    "dify-knowledge-fs-source-worker",
+                    "dify-knowledge-fs-upgrade-worker",
                 ],
             },
             separators=(",", ":"),
@@ -158,6 +171,7 @@ class Settings(BaseSettings):
                 "dify-sandbox": "langgenius/dify-sandbox",
                 "dify-billing": "langgenius/dify-billing",
                 "billing": "langgenius/dify-billing",
+                "dify-knowledge-fs": "langgenius/knowledge-fs-api",
             },
             separators=(",", ":"),
         ),
