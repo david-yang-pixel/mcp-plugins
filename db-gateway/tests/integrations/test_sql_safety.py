@@ -109,3 +109,29 @@ def test_top_level_order_by_detection():
     assert not sql_has_top_level_order_by("SELECT * FROM (SELECT * FROM t ORDER BY id) s")
     assert not sql_has_top_level_order_by("SELECT 'ORDER BY' AS x")
     assert not sql_has_top_level_order_by("SELECT 1 -- ORDER BY 1")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT pg_advisory_lock(1)",
+        "select pg_catalog.pg_try_advisory_lock_shared(1, 2)",
+        'SELECT "pg_advisory_lock"(1)',
+        "SELECT pg_advisory_xact_lock(1)",
+        "SELECT * FROM t WHERE PG_ADVISORY_UNLOCK_ALL() IS NOT NULL",
+    ],
+)
+def test_advisory_lock_functions_are_rejected(sql):
+    # Session-level advisory locks survive ROLLBACK and would leak to the next
+    # caller of a pooled connection.
+    with pytest.raises(PsqlSafetyError, match="advisory lock"):
+        validate_read_only_sql(sql)
+
+
+def test_advisory_lock_name_in_a_string_literal_is_allowed():
+    assert validate_read_only_sql("SELECT 'pg_advisory_lock' AS name") == "SELECT 'pg_advisory_lock' AS name"
+
+
+def test_unicode_quoted_advisory_lock_is_rejected():
+    with pytest.raises(PsqlSafetyError, match="advisory lock"):
+        validate_read_only_sql('SELECT U&"pg_advisory_lock"(1)')

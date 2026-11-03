@@ -155,7 +155,14 @@ def create_db_gateway_app(cfg: Any | None = None) -> web.Application:
     app.router.add_get("/teleport-auth", handle_teleport_auth_get)
     app.router.add_post("/teleport-auth", handle_teleport_auth_post)
     app.router.add_post("/internal/teleport-auth/issue", handle_teleport_auth_issue)
+    app.on_cleanup.append(_close_pg_pools)
     return app
+
+
+async def _close_pg_pools(_app: web.Application) -> None:
+    from db_gateway.pg_pool import MANAGER
+
+    await MANAGER.close_all()
 
 
 def run_db_gateway_app() -> None:
