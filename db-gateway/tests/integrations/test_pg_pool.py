@@ -269,7 +269,7 @@ async def test_drain_of_an_old_pool_keeps_the_new_one(database, manager):
     await run_pool_query(manager=manager, **kwargs)
     key = manager.open_pools()[0]
     old = manager._pools[key]
-    await manager.drain(key, "test")
+    await manager.drain(key, "test", pool=old)
     await run_pool_query(manager=manager, **kwargs)
     new = manager._pools[key]
 
@@ -291,7 +291,7 @@ async def test_pool_reset_between_lookup_and_checkout_is_retried(database, manag
         pool = await real_pool_for(key, **kw)
         calls["n"] += 1
         if calls["n"] == 1:
-            await manager.drain(key, "concurrent reset")  # closes the pool just handed out
+            await manager.drain(key, "concurrent reset", pool=pool)  # closes the pool just handed out
         return pool
 
     monkeypatch.setattr(manager, "pool_for", racing_pool_for)

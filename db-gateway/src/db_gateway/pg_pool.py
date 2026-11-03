@@ -181,17 +181,15 @@ class PoolManager:
                     self._opening.pop(key, None)
         return pool
 
-    async def drain(
-        self, key: PoolKey, reason: str, *, pool: AsyncConnectionPool | None = None,
-    ) -> None:
-        """Close the pool for key; with ``pool``, only if it is still the current one.
+    async def drain(self, key: PoolKey, reason: str, *, pool: AsyncConnectionPool) -> None:
+        """Close ``pool`` if it is still the current pool for key.
 
-        A query that failed on an old pool must not close a newer pool another
-        query has already created for the same key.
+        Callers always name the pool that failed: a query that failed on an old
+        pool must not close a newer pool another query already created.
         """
         async with self._lock:
             current = self._pools.get(key)
-            if current is None or (pool is not None and current is not pool):
+            if current is None or current is not pool:
                 return
             self._pools.pop(key, None)
             self._opening.pop(key, None)
@@ -458,7 +456,9 @@ async def _run_once(
     except PoolClosed:
         raise  # subclass of OperationalError; the caller retries with the new pool
     except PoolTimeout as e:
-        await manager.drain(key, "no connection within acquire timeout", pool=pool)
+        # pool is None when pool_for itself failed; it already drained its pool.
+        if pool is not None:
+            await manager.drain(key, "no connection within acquire timeout", pool=pool)
         raise TeleportAuthExpired(
             f"could not connect to server: no PostgreSQL connection to {key.host}:{key.port} "
             f"within {settings.acquire_timeout_seconds:g}s ({e})"
@@ -467,11 +467,13 @@ async def _run_once(
         raise StatementTimeout(_error_text(e)) from e
     except psycopg.Error as e:
         if _is_connection_failure(e, conn):
-            await manager.drain(key, f"connection failure: {str(e).strip()[:200]}", pool=pool)
+            if pool is not None:
+                await manager.drain(key, f"connection failure: {str(e).strip()[:200]}", pool=pool)
             raise TeleportAuthExpired(f"connection reset: {str(e).strip()}") from e
         raise RuntimeError(_error_text(e)) from e
     except OSError as e:
-        await manager.drain(key, f"connection failure: {e}", pool=pool)
+        if pool is not None:
+            await manager.drain(key, f"connection failure: {e}", pool=pool)
         raise TeleportAuthExpired(f"Connection refused: {e}") from e
 
 
