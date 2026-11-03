@@ -40,6 +40,11 @@ _FORBIDDEN_KEYWORDS = [
 ]
 _FORBIDDEN_RE = {kw: re.compile(rf"\b{kw}\b") for kw in _FORBIDDEN_KEYWORDS}
 _ALLOWED_FIRST_WORDS = ("SELECT", "WITH")
+# Advisory locks taken with the session-level functions survive ROLLBACK and stay
+# on the connection; with pooled connections they would leak to later callers.
+# The transaction-level variants are rejected too: a read-only support query has
+# no use for them and they can still block other sessions.
+_ADVISORY_LOCK_FUNCTION_RE = re.compile(r"^PG_(TRY_)?ADVISORY_", re.IGNORECASE)
 
 
 def validate_read_only_sql(sql: str) -> str:
@@ -86,6 +91,19 @@ def validate_read_only_sql(sql: str) -> str:
             raise PsqlSafetyError(
                 f"字符串常量或双引号标识符中包含禁止的关键字 {kw}"
                 "（网关对常量也做保守拦截），请改写该常量"
+            )
+
+    for tok in body_tokens:
+        if tok.kind == "word":
+            name = tok.text
+        elif tok.kind == "qident":
+            name = re.sub(r'^(?:[Uu]&)?"|"$', "", tok.text).replace('""', '"')
+        else:
+            name = ""
+        if name and _ADVISORY_LOCK_FUNCTION_RE.match(name):
+            raise PsqlSafetyError(
+                f"不允许调用 advisory lock 函数 {name}：会话级锁在回滚后仍会保留，"
+                "会影响复用同一连接的其他查询"
             )
 
     sig = [t for t in body_tokens if not t.is_trivia]

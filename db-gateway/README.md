@@ -76,6 +76,7 @@ pool 模式与 Teleport 续签的配合：
 - 遇到连接级错误（连接被关闭、隧道拒绝连接、`pool_acquire_timeout_seconds` 内拿不到连接）时，清空该库的连接池并返回 `TELEPORT_EXPIRED`。核心的重试循环会间隔 `pool_retry_delay_seconds`（默认 1.5 秒，覆盖隧道重启时间）用新连接重试 `teleport_retry_attempts` 次。
 - 空闲超过 `pool_max_idle_seconds`（240）的多余连接会被回收，常驻 `pool_min_size`（1）条；连接最长存活 `pool_max_lifetime_seconds`（1800）。空闲超过 `pool_check_idle_seconds`（60）的连接在交给查询前先探测一次，失效就换新连接。
 - 连接数上限沿用 `max_concurrent_queries`；单飞（singleflight）和每库并发限制不变。
+- 会话隔离：每次查询都在事务内执行并强制回滚，事务内做的会话级 `SET` / `set_config(..., false)` / `SET ROLE` 会随回滚撤销，不会被下一条查询继承。回滚撤销不了的 advisory lock 由只读校验直接拒绝。
 
 `timing_ms` 在 pool 模式下的字段：`pool_acquire_ms`（取得连接，含新建连接耗时）、`pool_new_connections`（本次新建的连接数，0 表示复用）、`query_ms`、`describe_ms`、`count_ms`、`parse_ms`。
 
@@ -88,6 +89,7 @@ pool 模式与 Teleport 续签的配合：
 - 未闭合的引号或注释会被拒绝。
 - 只能有一条语句，分号只能出现在末尾。
 - 查询（去掉前置括号后）必须以 `SELECT` 或 `WITH` 开头。
+- 拒绝调用 `pg_advisory_*` / `pg_try_advisory_*` 函数（包括写成 `"pg_advisory_lock"` 的引号形式）：会话级 advisory lock 在回滚后仍留在连接上，pool 模式下会影响后续复用该连接的查询。
 - 关键字黑名单：`INSERT`、`UPDATE`、`DELETE`、`DROP`、`SET`、`SHOW`、`COPY` 等。字符串常量里出现这些词也会保守拦截，错误信息会说明命中位置。
 
 被拒绝的 SQL 返回具体原因，例如 `仅允许以 SELECT 或 WITH 开头的只读查询（可带前置括号），检测到: EXPLAIN`，并在审计日志中记为 `REJECTED_SQL_SAFETY`。

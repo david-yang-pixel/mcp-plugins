@@ -299,3 +299,29 @@ async def test_pool_reset_between_lookup_and_checkout_is_retried(database, manag
 
     assert result.rows == [["6"]]
     assert calls["n"] == 2
+
+
+async def test_session_settings_do_not_leak_to_the_next_query(database, manager):
+    """Security review: session GUCs set by one caller must not reach the next.
+
+    The forced ROLLBACK undoes session-level SET/set_config made inside the
+    transaction; advisory locks (which survive ROLLBACK) are rejected upfront.
+    """
+    settings = PoolSettings(min_size=1, max_size=1)  # same backend for both queries
+    changed = await run_pool_query(
+        manager=manager, settings=settings,
+        **_kwargs(database, sql="SELECT set_config('search_path', 'evil', false), set_config('work_mem', '1MB', false)"),
+    )
+    assert changed.rows == [["evil", "1MB"]]
+
+    after = await run_pool_query(
+        manager=manager, settings=settings,
+        **_kwargs(database, sql="SELECT current_setting('search_path'), current_setting('work_mem') <> '1MB'"),
+    )
+    assert after.timing_ms["pool_new_connections"] == 0
+    assert after.rows == [['"$user", public', "t"]]
+
+    from db_gateway.postgres import PsqlSafetyError
+
+    with pytest.raises(PsqlSafetyError):
+        await run_pool_query(manager=manager, settings=settings, **_kwargs(database, sql="SELECT pg_advisory_lock(42)"))
