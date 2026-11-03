@@ -441,15 +441,19 @@ async def _run_once(
             acquired = time.perf_counter()
             timing["pool_acquire_ms"] = _ms(acquired - started)
             timing["pool_new_connections"] = float(manager.new_connections(key, pool))
+            finished = False
             try:
-                async with conn.transaction(force_rollback=True):
-                    return await _query_in_transaction(
-                        manager, conn, wrapped=wrapped, timeout=timeout,
-                        page_limit=page_limit, offset=offset,
-                        count_timeout=count_timeout, describe=describe,
-                        timing=timing, started=started,
-                    )
+                result = await _query_page(
+                    manager, conn, wrapped=wrapped, timeout=timeout,
+                    page_limit=page_limit, offset=offset,
+                    count_timeout=count_timeout, describe=describe,
+                    timing=timing, started=started,
+                )
+                finished = True
+                return result
             finally:
+                if not finished:
+                    await _cleanup_after_error(conn)
                 manager.touch(conn)
     except PoolClosed:
         raise  # subclass of OperationalError; the caller retries with the new pool
@@ -471,7 +475,41 @@ async def _run_once(
         raise TeleportAuthExpired(f"Connection refused: {e}") from e
 
 
-async def _query_in_transaction(
+# Releases session-level advisory locks. ROLLBACK undoes session GUCs and SET
+# ROLE but not these locks, and the SQL validator cannot see every way to take
+# one (Unicode-escaped identifiers, query_to_xml('...'), application functions),
+# so every pooled query ends with this before the connection is reused.
+_UNLOCK_ALL = "SELECT pg_advisory_unlock_all()"
+
+
+async def _results(cur: psycopg.AsyncCursor) -> list[tuple[str, int, Optional[list[list[Any]]], Any, Any]]:
+    """(status, rowcount, rows, description, pgresult) for every statement in a batch."""
+    out = []
+    while True:
+        rows = [list(row) for row in await cur.fetchall()] if cur.description is not None else None
+        out.append((cur.statusmessage or "", cur.rowcount, rows, cur.description, cur.pgresult))
+        if not cur.nextset():
+            return out
+
+
+async def _cleanup_after_error(conn: psycopg.AsyncConnection) -> None:
+    """Leave the connection idle with no advisory locks, or close it.
+
+    Only runs when a batch failed before its trailing unlock + ROLLBACK, so the
+    normal path pays no extra round trip.
+    """
+    if conn.closed or conn.broken:
+        return
+    try:
+        if conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+            await conn.execute("ROLLBACK")
+        await conn.execute(_UNLOCK_ALL)
+    except Exception as e:  # noqa: BLE001 - a connection we cannot clean is dropped
+        logger.warning("pg_pool_cleanup_failed_closing_connection", error=str(e)[:200])
+        await conn.close()
+
+
+async def _query_page(
     manager: PoolManager,
     conn: psycopg.AsyncConnection,
     *,
@@ -484,18 +522,31 @@ async def _query_in_transaction(
     timing: dict[str, float],
     started: float,
 ) -> PsqlResult:
+    """One page in two round trips, like the psql path.
+
+    1. ``BEGIN READ ONLY; SET LOCAL statement_timeout; DECLARE; [MOVE offset;] FETCH``
+    2. ``[SET LOCAL statement_timeout; MOVE ALL;] SELECT pg_advisory_unlock_all(); ROLLBACK``
+
+    Each batch is one simple-query message; the validated body cannot contain a
+    second statement and is wrapped with newlines so a trailing ``--`` comment
+    cannot swallow what follows.
+    """
+    cur = conn.cursor()
     query_started = time.perf_counter()
-    await conn.execute("SET TRANSACTION READ ONLY")
-    await conn.execute(f"SET LOCAL statement_timeout = {int(timeout * 1000)}")
-    await conn.execute(f"DECLARE {_CURSOR_NAME} NO SCROLL CURSOR FOR {wrapped}")
-    skipped = 0
+    batch = [
+        "BEGIN TRANSACTION READ ONLY",
+        f"SET LOCAL statement_timeout = {int(timeout * 1000)}",
+        f"DECLARE {_CURSOR_NAME} NO SCROLL CURSOR FOR {wrapped}",
+    ]
     if offset > 0:
-        moved = await conn.execute(f"MOVE FORWARD {int(offset)} IN {_CURSOR_NAME}")
-        skipped = max(0, moved.rowcount)
-    cur = await conn.execute(f"FETCH FORWARD {page_limit + 1} FROM {_CURSOR_NAME}")
-    data_rows = [list(row) for row in await cur.fetchall()]
-    columns = [col.name for col in cur.description or []]
-    pgresult = cur.pgresult
+        batch.append(f"MOVE FORWARD {int(offset)} IN {_CURSOR_NAME}")
+    batch.append(f"FETCH FORWARD {page_limit + 1} FROM {_CURSOR_NAME}")
+    await cur.execute(";\n".join(batch))
+    results = await _results(cur)
+    skipped = max(0, results[3][1]) if offset > 0 else 0
+    _status, _count, fetched_rows, description, pgresult = results[-1]
+    data_rows = fetched_rows or []
+    columns = [col.name for col in description or []]
     timing["query_ms"] = _ms(time.perf_counter() - query_started)
 
     column_types: list[str] | None = None
@@ -512,23 +563,36 @@ async def _query_in_transaction(
     if not has_more:
         # Cursor exhausted inside this page: exact total without counting.
         total_rows = skipped + fetched
+        finish = [_UNLOCK_ALL, "ROLLBACK"]
     elif count_timeout > 0:
-        count_started = time.perf_counter()
-        try:
-            await conn.execute(f"SET LOCAL statement_timeout = {int(count_timeout * 1000)}")
-            rest = await conn.execute(f"MOVE FORWARD ALL IN {_CURSOR_NAME}")
-            total_rows = skipped + fetched + max(0, rest.rowcount)
-        except psycopg.errors.QueryCanceled:
-            total_note = (
-                f"计数超时（超过 {count_timeout:g}s），总行数未知；可加过滤条件或用 next_offset 继续翻页"
-            )
-        except psycopg.Error as e:
-            if _is_connection_failure(e, conn):
-                raise
-            total_note = f"计数阶段失败，总行数未知：{_error_text(e)}"
-        timing["count_ms"] = _ms(time.perf_counter() - count_started)
+        finish = [
+            f"SET LOCAL statement_timeout = {int(count_timeout * 1000)}",
+            f"MOVE FORWARD ALL IN {_CURSOR_NAME}",
+            _UNLOCK_ALL,
+            "ROLLBACK",
+        ]
     else:
         total_note = "未计算总行数（count_timeout_seconds=0）"
+        finish = [_UNLOCK_ALL, "ROLLBACK"]
+
+    finish_started = time.perf_counter()
+    counting = len(finish) == 4
+    try:
+        await cur.execute(";\n".join(finish))
+        finished = await _results(cur)
+        if counting:
+            total_rows = skipped + fetched + max(0, finished[1][1])
+    except psycopg.errors.QueryCanceled:
+        if not counting:
+            raise
+        total_note = f"计数超时（超过 {count_timeout:g}s），总行数未知；可加过滤条件或用 next_offset 继续翻页"
+        await _cleanup_after_error(conn)
+    except psycopg.Error as e:
+        if not counting or _is_connection_failure(e, conn):
+            raise
+        total_note = f"计数阶段失败，总行数未知：{_error_text(e)}"
+        await _cleanup_after_error(conn)
+    timing["count_ms" if counting else "finish_ms"] = _ms(time.perf_counter() - finish_started)
 
     parse_started = time.perf_counter()
     csv_text = rows_to_csv(columns, rows) if columns else ""

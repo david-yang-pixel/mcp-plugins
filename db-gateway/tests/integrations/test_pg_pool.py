@@ -325,3 +325,70 @@ async def test_session_settings_do_not_leak_to_the_next_query(database, manager)
 
     with pytest.raises(PsqlSafetyError):
         await run_pool_query(manager=manager, settings=settings, **_kwargs(database, sql="SELECT pg_advisory_lock(42)"))
+
+
+def _advisory_locks_sql() -> str:
+    return "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # Security review: Unicode-escaped identifiers slip past the denylist ...
+        'SELECT U&"\\0070g_advisory_lock"(7)',
+        # ... and query_to_xml runs SQL from a string the validator cannot see.
+        "SELECT query_to_xml('select pg_advisory_lock(8)', false, false, '')",
+    ],
+)
+async def test_advisory_locks_never_survive_a_pooled_query(database, manager, sql):
+    settings = PoolSettings(min_size=1, max_size=1)  # same backend for both queries
+    await run_pool_query(manager=manager, settings=settings, **_kwargs(database, sql=sql))
+
+    after = await run_pool_query(manager=manager, settings=settings, **_kwargs(database, sql=_advisory_locks_sql()))
+
+    assert after.timing_ms["pool_new_connections"] == 0
+    assert after.rows == [["0"]]
+
+
+async def test_advisory_lock_is_released_after_a_failed_query(database, manager):
+    settings = PoolSettings(min_size=1, max_size=1)
+    with pytest.raises(RuntimeError):
+        await run_pool_query(
+            manager=manager, settings=settings,
+            # The division by zero only happens after query_to_xml took the lock.
+            **_kwargs(
+                database,
+                sql="SELECT 1 / (CASE WHEN query_to_xml('select pg_advisory_lock(9)', false, false, '') IS NOT NULL THEN 0 END)",
+            ),
+        )
+
+    after = await run_pool_query(manager=manager, settings=settings, **_kwargs(database, sql=_advisory_locks_sql()))
+    assert after.rows == [["0"]]
+
+
+async def test_warm_query_uses_two_round_trips(database, manager, monkeypatch):
+    """Each execute() is one round trip; the pool must not send statement by statement."""
+    await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT 1"))
+    calls: list[str] = []
+    real_cursor_execute = psycopg.AsyncCursor.execute
+    real_conn_execute = psycopg.AsyncConnection.execute
+
+    async def cursor_execute(self, query, *args, **kwargs):
+        calls.append(str(query))
+        return await real_cursor_execute(self, query, *args, **kwargs)
+
+    async def conn_execute(self, query, *args, **kwargs):
+        calls.append(str(query))
+        return await real_conn_execute(self, query, *args, **kwargs)
+
+    monkeypatch.setattr(psycopg.AsyncCursor, "execute", cursor_execute)
+    monkeypatch.setattr(psycopg.AsyncConnection, "execute", conn_execute)
+
+    small = await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT id FROM t ORDER BY id"))
+    assert small.total_rows == 25
+    assert len(calls) == 2
+
+    calls.clear()
+    paged = await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT id FROM t ORDER BY id", offset=5, limit=5))
+    assert paged.total_rows == 25 and paged.has_more is True
+    assert len(calls) == 2  # setup+fetch, then count+unlock+rollback

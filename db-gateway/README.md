@@ -68,7 +68,7 @@ HTTP `POST /query` 与 MCP `tools/call`（`/mcp`，以及 `scripts/db_gateway_mc
 ### 连接方式 `postgres.driver`
 
 - `psql`（默认）：每次查询启动一个 psql 进程并新建连接。经 `tsh proxy db --tunnel` 建连（TLS 到 Teleport、DB agent、Postgres 认证）约需 2 秒，`timing_ms.connect_and_overhead_ms` 主要就是这部分。
-- `pool`：进程内用 psycopg 连接池为每个库（prod、billing、plugin）保持连接，平时一次查询只需自身的往返。执行方式与 psql 路径一致：`READ ONLY` 事务里设置 `SET LOCAL statement_timeout`，用游标完成 `MOVE`/`FETCH`/`MOVE ALL`，结束后一律回滚。值按 PostgreSQL 文本输出返回，csv/json 结果与 psql 路径逐字一致。`column_types` 用 `format_type()` 解析并缓存。只有页面取满（还有下一页）时才执行计数，否则总行数直接可知。
+- `pool`：进程内用 psycopg 连接池为每个库（prod、billing、plugin）保持连接，平时一次查询只需自身的往返。执行方式与 psql 路径一致，每页固定两个往返：第一个是 `BEGIN READ ONLY; SET LOCAL statement_timeout; DECLARE; [MOVE offset;] FETCH`；第二个是 `[SET LOCAL statement_timeout; MOVE ALL;] SELECT pg_advisory_unlock_all(); ROLLBACK`。每个批次是一条简单查询消息，结束后一律回滚。值按 PostgreSQL 文本输出返回，csv/json 结果与 psql 路径逐字一致。`column_types` 用 `format_type()` 解析并缓存。只有页面取满（还有下一页）时才执行计数，否则总行数直接可知。
 
 pool 模式与 Teleport 续签的配合：
 - 证书由 `tsh-auth-watchdog` 自动续签：`tsh logout --all` 后用密码和 TOTP 重新 `tsh login`。之后 `tsh-cert.path` 重启 `tsh-proxy-db*` 隧道，经隧道的已有连接会全部断开。连接池不接触证书，只连接本机隧道端口。
@@ -76,9 +76,9 @@ pool 模式与 Teleport 续签的配合：
 - 遇到连接级错误（连接被关闭、隧道拒绝连接、`pool_acquire_timeout_seconds` 内拿不到连接）时，清空该库的连接池并返回 `TELEPORT_EXPIRED`。核心的重试循环会间隔 `pool_retry_delay_seconds`（默认 1.5 秒，覆盖隧道重启时间）用新连接重试 `teleport_retry_attempts` 次。
 - 空闲超过 `pool_max_idle_seconds`（240）的多余连接会被回收，常驻 `pool_min_size`（1）条；连接最长存活 `pool_max_lifetime_seconds`（1800）。空闲超过 `pool_check_idle_seconds`（60）的连接在交给查询前先探测一次，失效就换新连接。
 - 连接数上限沿用 `max_concurrent_queries`；单飞（singleflight）和每库并发限制不变。
-- 会话隔离：每次查询都在事务内执行并强制回滚，事务内做的会话级 `SET` / `set_config(..., false)` / `SET ROLE` 会随回滚撤销，不会被下一条查询继承。回滚撤销不了的 advisory lock 由只读校验直接拒绝。
+- 会话隔离：每次查询都在事务内执行并强制回滚，事务内做的会话级 `SET` / `set_config(..., false)` / `SET ROLE` 会随回滚撤销，不会被下一条查询继承。会话级 advisory lock 回滚后仍会保留，而且只读校验看不到所有取锁方式（例如 Unicode 转义标识符、`query_to_xml('...')`），所以每次查询的最后一个往返都会执行 `pg_advisory_unlock_all()`。查询中途出错时，先补发 `ROLLBACK` 和解锁再归还连接；如果清理也失败，就直接关闭这条连接。校验器拒绝 `pg_advisory_*` 只是第一道防线。
 
-`timing_ms` 在 pool 模式下的字段：`pool_acquire_ms`（取得连接，含新建连接耗时）、`pool_new_connections`（本次新建的连接数，0 表示复用）、`query_ms`、`describe_ms`、`count_ms`、`parse_ms`。
+`timing_ms` 在 pool 模式下的字段：`pool_acquire_ms`（取得连接，含新建连接耗时）、`pool_new_connections`（本次新建的连接数，0 表示复用）、`query_ms`（第一个往返）、`count_ms` 或 `finish_ms`（第二个往返，带计数时为前者）、`describe_ms`（列类型首次出现时多一次往返，之后走缓存）、`parse_ms`。
 
 切换方法：把 `deploy/runtime.json` 中 `settings.postgres.driver` 改为 `pool` 并部署 db-gateway；回退时改回 `psql`。
 
