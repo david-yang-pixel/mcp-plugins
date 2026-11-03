@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -33,6 +34,21 @@ class PostgresConfig(BaseModel):
     singleflight_enabled: bool = True
     # total_rows 计数预算（秒）：在同一游标上 MOVE ALL，超时则 total_rows=null；0 关闭计数。
     count_timeout_seconds: float = 5
+    # psql：每次查询启动 psql 并新建连接（经 Teleport 隧道约 2s）；
+    # pool：进程内 psycopg 连接池，复用连接（见 pg_pool.py）。
+    driver: Literal["psql", "pool"] = "psql"
+    pool_min_size: int = 1
+    # 空闲连接回收时间；需短于 Teleport/网络对空闲连接的掐断时间。
+    pool_max_idle_seconds: float = 240
+    pool_max_lifetime_seconds: float = 1800
+    # 空闲超过该秒数的连接在交给查询前先探测一次（一次往返）。
+    pool_check_idle_seconds: float = 60
+    # 等待/新建连接的上限，超时按 TELEPORT_EXPIRED 处理并重试。
+    pool_acquire_timeout_seconds: float = 15
+    # pool 模式连接失败后的重试间隔，需覆盖 tsh-proxy-db 重启的几秒。
+    pool_retry_delay_seconds: float = 1.5
+    # 监视 <teleport.auth_home>/keys，证书续签（隧道会被重启）后清空连接池。
+    pool_watch_teleport_keys: bool = True
 
 
 class DbGatewayConfig(BaseModel):

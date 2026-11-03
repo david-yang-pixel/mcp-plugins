@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from db_gateway.feishu import FeishuClient
+from db_gateway.pg_pool import pool_settings_from_config, run_pool_query
 from db_gateway.postgres import (
     PsqlResult,
     PsqlSafetyError,
@@ -541,32 +542,42 @@ async def _run_psql_with_retries(
     count_timeout: float = 0,
     describe: bool = False,
 ) -> PsqlResult:
+    use_pool = getattr(cfg.postgres, "driver", "psql") == "pool"
     attempts = max(0, int(getattr(cfg.postgres, "teleport_retry_attempts", 1) or 0)) + 1
-    retry_delay = max(0.0, float(getattr(cfg.postgres, "teleport_retry_delay_seconds", 0.25) or 0.0))
+    delay_attr = "pool_retry_delay_seconds" if use_pool else "teleport_retry_delay_seconds"
+    retry_delay = max(0.0, float(getattr(cfg.postgres, delay_attr, 0.25) or 0.0))
     last_error: TeleportAuthExpired | None = None
     first_started = time.perf_counter()
+    query_kwargs: dict[str, Any] = {
+        "host": cfg.postgres.host,
+        "port": db_port,
+        "user": cfg.postgres.user,
+        "password": cfg.postgres.password,
+        "database": db_name,
+        "sql": sql,
+        "timeout": cfg.postgres.query_timeout_seconds,
+        "max_rows": cfg.postgres.max_rows,
+        "offset": offset,
+        "limit": limit,
+        "count_timeout": count_timeout,
+        "describe": describe,
+    }
+    if use_pool:
+        teleport = getattr(cfg, "teleport", None)
+        watch = bool(getattr(cfg.postgres, "pool_watch_teleport_keys", True))
+        query_kwargs["settings"] = pool_settings_from_config(cfg)
+        query_kwargs["auth_home"] = getattr(teleport, "auth_home", None) if watch else None
     for attempt in range(attempts):
+        attempt_started = time.perf_counter()
         try:
-            result = await run_psql(
-                host=cfg.postgres.host,
-                port=db_port,
-                user=cfg.postgres.user,
-                password=cfg.postgres.password,
-                database=db_name,
-                sql=sql,
-                timeout=cfg.postgres.query_timeout_seconds,
-                max_rows=cfg.postgres.max_rows,
-                offset=offset,
-                limit=limit,
-                count_timeout=count_timeout,
-                describe=describe,
-            )
+            if use_pool:
+                result = await run_pool_query(**query_kwargs)
+            else:
+                result = await run_psql(**query_kwargs)
             if attempt > 0 and isinstance(result.timing_ms, dict):
                 # Time burnt by failed attempts + retry delay before this success.
                 result.timing_ms["teleport_retry_ms"] = round(max(
-                    0.0,
-                    (time.perf_counter() - first_started) * 1000
-                    - float(result.timing_ms.get("psql_process_ms", 0.0)),
+                    0.0, (attempt_started - first_started) * 1000,
                 ), 1)
                 result.timing_ms["attempts"] = attempt + 1
             return result

@@ -30,3 +30,24 @@ def test_env_can_enable_require_ticket_id(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_GATEWAY_REQUIRE_TICKET_ID", "true")
     cfg = load_config(str(tmp_path / "missing.yaml"))
     assert cfg.db_gateway.require_ticket_id is True
+
+
+def test_pool_driver_settings_default_to_psql():
+    from db_gateway.config import PostgresConfig
+
+    pg = PostgresConfig()
+    assert pg.driver == "psql"
+    assert pg.pool_min_size == 1
+    assert pg.pool_max_idle_seconds == 240
+    assert pg.pool_retry_delay_seconds == 1.5
+    assert pg.pool_watch_teleport_keys is True
+
+
+def test_pool_driver_rejects_unknown_driver():
+    import pydantic
+    import pytest as _pytest
+
+    from db_gateway.config import PostgresConfig
+
+    with _pytest.raises(pydantic.ValidationError):
+        PostgresConfig(driver="psycopg2")

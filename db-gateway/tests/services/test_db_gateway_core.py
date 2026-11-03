@@ -607,3 +607,74 @@ async def test_gateway_retry_time_is_reported(tmp_path):
     assert result.success is True
     assert result.timing_ms["attempts"] == 2
     assert "teleport_retry_ms" in result.timing_ms
+
+
+def _pool_cfg(tmp_path):
+    cfg = _cfg(tmp_path)
+    cfg.postgres.driver = "pool"
+    cfg.postgres.pool_min_size = 1
+    cfg.postgres.pool_max_idle_seconds = 240
+    cfg.postgres.pool_max_lifetime_seconds = 1800
+    cfg.postgres.pool_check_idle_seconds = 60
+    cfg.postgres.pool_acquire_timeout_seconds = 15
+    cfg.postgres.pool_retry_delay_seconds = 0
+    cfg.postgres.pool_watch_teleport_keys = True
+    cfg.teleport.auth_home = str(tmp_path / "tsh")
+    return cfg
+
+
+@pytest.mark.asyncio
+async def test_gateway_pool_driver_uses_pool_not_psql(tmp_path):
+    from db_gateway.core import execute_gateway_query
+
+    fake_result = PsqlResult(csv="ok\n1\n", row_count=1, elapsed_ms=5, truncated=False)
+    pool_run = AsyncMock(return_value=fake_result)
+    psql_run = AsyncMock()
+    with patch("db_gateway.core.run_pool_query", pool_run), patch("db_gateway.core.run_psql", psql_run):
+        result = await execute_gateway_query(
+            cfg=_pool_cfg(tmp_path), database="billing", sql="SELECT 1 AS ok", ticket_id="1",
+        )
+
+    assert result.success is True
+    psql_run.assert_not_awaited()
+    kwargs = pool_run.await_args.kwargs
+    assert kwargs["port"] == 56062
+    assert kwargs["database"] == "billing"
+    assert kwargs["auth_home"] == str(tmp_path / "tsh")
+    assert kwargs["settings"].max_size == 3
+    assert kwargs["settings"].max_idle_seconds == 240
+
+
+@pytest.mark.asyncio
+async def test_gateway_pool_driver_retries_after_connection_loss(tmp_path):
+    from db_gateway.core import execute_gateway_query
+
+    fake_result = PsqlResult(csv="ok\n1\n", row_count=1, elapsed_ms=5, truncated=False)
+    pool_run = AsyncMock(side_effect=[TeleportAuthExpired("connection reset"), fake_result])
+    cfg = _pool_cfg(tmp_path)
+    cfg.postgres.pool_retry_delay_seconds = 0.01
+    cfg.postgres.teleport_retry_delay_seconds = 99  # must not be used by the pool driver
+
+    with patch("db_gateway.core.run_pool_query", pool_run):
+        result = await asyncio.wait_for(
+            execute_gateway_query(cfg=cfg, database="prod", sql="SELECT 1 AS ok", ticket_id="1"),
+            timeout=5,
+        )
+
+    assert result.success is True
+    assert pool_run.await_count == 2
+    assert result.timing_ms["attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_gateway_pool_driver_can_skip_key_watching(tmp_path):
+    from db_gateway.core import execute_gateway_query
+
+    fake_result = PsqlResult(csv="ok\n1\n", row_count=1, elapsed_ms=5, truncated=False)
+    pool_run = AsyncMock(return_value=fake_result)
+    cfg = _pool_cfg(tmp_path)
+    cfg.postgres.pool_watch_teleport_keys = False
+    with patch("db_gateway.core.run_pool_query", pool_run):
+        await execute_gateway_query(cfg=cfg, database="prod", sql="SELECT 1 AS ok", ticket_id="1")
+
+    assert pool_run.await_args.kwargs["auth_home"] is None

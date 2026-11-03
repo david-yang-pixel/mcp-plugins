@@ -12,6 +12,16 @@ postgres:
   max_rows: 1000
   query_timeout_seconds: 30
   count_timeout_seconds: 5
+  # psql: one psql process + new connection per query (~2s through Teleport).
+  # pool: keep connections open in-process (psycopg pool); see README.
+  driver: psql
+  pool_min_size: 1
+  pool_max_idle_seconds: 240
+  pool_max_lifetime_seconds: 1800
+  pool_check_idle_seconds: 60
+  pool_acquire_timeout_seconds: 15
+  pool_retry_delay_seconds: 1.5
+  pool_watch_teleport_keys: true
 db_gateway:
   listen_host: 127.0.0.1
   listen_port: 18081
