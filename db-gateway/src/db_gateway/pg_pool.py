@@ -34,7 +34,7 @@ import psycopg
 from psycopg import postgres
 from psycopg.conninfo import make_conninfo
 from psycopg.types.string import TextLoader
-from psycopg_pool import AsyncConnectionPool, PoolTimeout
+from psycopg_pool import AsyncConnectionPool, PoolClosed, PoolTimeout
 
 from db_gateway.postgres import (
     PsqlResult,
@@ -56,6 +56,14 @@ _CURSOR_NAME = "_db_gateway_cursor"
 # Extra wall-clock budget on top of statement timeouts for acquiring a
 # connection and network round trips.
 _CLIENT_TIMEOUT_MARGIN_SECONDS = 15.0
+
+
+class StatementTimeout(TimeoutError):
+    """The server cancelled the statement (statement_timeout).
+
+    Still a TimeoutError (reported as QUERY_TIMEOUT), but distinct from the
+    client-side deadline: the connection is healthy and goes back to the pool.
+    """
 
 
 @dataclass(frozen=True)
@@ -137,11 +145,12 @@ class PoolManager:
         settings: PoolSettings,
         auth_home: Optional[str],
     ) -> AsyncConnectionPool:
+        to_close: list[tuple[PoolKey, AsyncConnectionPool]] = []
         async with self._lock:
             if auth_home:
                 signature = keys_signature(auth_home)
                 if self._keys_signature is not None and signature != self._keys_signature:
-                    await self._close_all_locked("teleport keys changed")
+                    to_close = self._detach_all_locked()
                 self._keys_signature = signature
             pool = self._pools.get(key)
             if pool is None:
@@ -159,35 +168,44 @@ class PoolManager:
                     min_size=settings.min_size, max_size=settings.max_size,
                 )
             opening = self._opening.get(key)
+        # Closing waits for in-use connections; never do it while holding the lock.
+        await _close_pools(to_close, "teleport keys changed")
         if opening is not None:
             try:
                 await asyncio.shield(opening)
             except Exception:
-                await self.drain(key, "initial connections failed")
+                await self.drain(key, "initial connections failed", pool=pool)
                 raise
             finally:
-                if opening.done():
+                if opening.done() and self._opening.get(key) is opening:
                     self._opening.pop(key, None)
         return pool
 
-    async def drain(self, key: PoolKey, reason: str) -> None:
+    async def drain(
+        self, key: PoolKey, reason: str, *, pool: AsyncConnectionPool | None = None,
+    ) -> None:
+        """Close the pool for key; with ``pool``, only if it is still the current one.
+
+        A query that failed on an old pool must not close a newer pool another
+        query has already created for the same key.
+        """
         async with self._lock:
-            pool = self._pools.pop(key, None)
+            current = self._pools.get(key)
+            if current is None or (pool is not None and current is not pool):
+                return
+            self._pools.pop(key, None)
             self._opening.pop(key, None)
-        if pool is not None:
-            logger.warning("pg_pool_drained", database=key.database, port=key.port, reason=reason)
-            await _close_quietly(pool)
+        await _close_pools([(key, current)], reason)
 
     async def close_all(self, reason: str = "shutdown") -> None:
         async with self._lock:
-            await self._close_all_locked(reason)
+            to_close = self._detach_all_locked()
+        await _close_pools(to_close, reason)
 
-    async def _close_all_locked(self, reason: str) -> None:
+    def _detach_all_locked(self) -> list[tuple[PoolKey, AsyncConnectionPool]]:
         pools, self._pools = list(self._pools.items()), {}
         self._opening.clear()
-        for key, pool in pools:
-            logger.warning("pg_pool_drained", database=key.database, port=key.port, reason=reason)
-            await _close_quietly(pool)
+        return pools
 
     def open_pools(self) -> list[PoolKey]:
         return list(self._pools)
@@ -257,6 +275,12 @@ class PoolManager:
 
     def cache_type_name(self, oid: int, typmod: int, name: str) -> None:
         self._type_names[(oid, typmod)] = name
+
+
+async def _close_pools(pools: list[tuple[PoolKey, AsyncConnectionPool]], reason: str) -> None:
+    for key, pool in pools:
+        logger.warning("pg_pool_drained", database=key.database, port=key.port, reason=reason)
+    await asyncio.gather(*(_close_quietly(pool) for _, pool in pools))
 
 
 async def _close_quietly(pool: AsyncConnectionPool) -> None:
@@ -347,20 +371,17 @@ async def run_pool_query(
     deadline = float(timeout) + count_timeout + _CLIENT_TIMEOUT_MARGIN_SECONDS
 
     started = time.perf_counter()
-    try:
-        return await asyncio.wait_for(
-            _run(
-                manager, key, password=password, settings=settings, auth_home=auth_home,
-                wrapped=wrapped, timeout=float(timeout), page_limit=page_limit,
-                offset=offset, count_timeout=count_timeout, describe=describe,
-                started=started,
-            ),
-            timeout=deadline,
-        )
-    except asyncio.TimeoutError:
-        # The connection may be mid-query; start clean for the next caller.
-        await manager.drain(key, "client deadline exceeded")
-        raise
+    # No drain on the client deadline either: the cancelled connection comes
+    # back to the pool in a non-idle state and psycopg_pool discards it alone.
+    return await asyncio.wait_for(
+        _run(
+            manager, key, password=password, settings=settings, auth_home=auth_home,
+            wrapped=wrapped, timeout=float(timeout), page_limit=page_limit,
+            offset=offset, count_timeout=count_timeout, describe=describe,
+            started=started,
+        ),
+        timeout=deadline,
+    )
 
 
 async def _run(
@@ -378,7 +399,41 @@ async def _run(
     describe: bool,
     started: float,
 ) -> PsqlResult:
+    for attempt in range(2):
+        try:
+            return await _run_once(
+                manager, key, password=password, settings=settings, auth_home=auth_home,
+                wrapped=wrapped, timeout=timeout, page_limit=page_limit, offset=offset,
+                count_timeout=count_timeout, describe=describe, started=started,
+            )
+        except PoolClosed as e:
+            # A concurrent query reset this pool between lookup and checkout
+            # (e.g. Teleport key rotation): take the new pool once.
+            if attempt == 0:
+                continue
+            raise TeleportAuthExpired(
+                f"connection reset: the connection pool for {key.database} was reset ({e})"
+            ) from e
+    raise AssertionError("unreachable")
+
+
+async def _run_once(
+    manager: PoolManager,
+    key: PoolKey,
+    *,
+    password: str,
+    settings: PoolSettings,
+    auth_home: str | None,
+    wrapped: str,
+    timeout: float,
+    page_limit: int,
+    offset: int,
+    count_timeout: float,
+    describe: bool,
+    started: float,
+) -> PsqlResult:
     conn: Optional[psycopg.AsyncConnection] = None
+    pool: Optional[AsyncConnectionPool] = None
     timing: dict[str, float] = {}
     try:
         pool = await manager.pool_for(key, password=password, settings=settings, auth_home=auth_home)
@@ -396,21 +451,23 @@ async def _run(
                     )
             finally:
                 manager.touch(conn)
+    except PoolClosed:
+        raise  # subclass of OperationalError; the caller retries with the new pool
     except PoolTimeout as e:
-        await manager.drain(key, "no connection within acquire timeout")
+        await manager.drain(key, "no connection within acquire timeout", pool=pool)
         raise TeleportAuthExpired(
             f"could not connect to server: no PostgreSQL connection to {key.host}:{key.port} "
             f"within {settings.acquire_timeout_seconds:g}s ({e})"
         ) from e
     except psycopg.errors.QueryCanceled as e:
-        raise asyncio.TimeoutError(_error_text(e)) from e
+        raise StatementTimeout(_error_text(e)) from e
     except psycopg.Error as e:
         if _is_connection_failure(e, conn):
-            await manager.drain(key, f"connection failure: {str(e).strip()[:200]}")
+            await manager.drain(key, f"connection failure: {str(e).strip()[:200]}", pool=pool)
             raise TeleportAuthExpired(f"connection reset: {str(e).strip()}") from e
         raise RuntimeError(_error_text(e)) from e
     except OSError as e:
-        await manager.drain(key, f"connection failure: {e}")
+        await manager.drain(key, f"connection failure: {e}", pool=pool)
         raise TeleportAuthExpired(f"Connection refused: {e}") from e
 
 

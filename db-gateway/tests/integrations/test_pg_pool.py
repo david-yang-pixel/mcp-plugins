@@ -250,3 +250,52 @@ async def test_unreachable_tunnel_is_teleport_expired(manager):
             timeout=5,
             max_rows=10,
         )
+
+
+async def test_statement_timeout_keeps_the_pool(database, manager):
+    """Bugbot: a server statement_timeout drained the whole pool."""
+    await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT 1"))
+    with pytest.raises(asyncio.TimeoutError):
+        await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT pg_sleep(3)", timeout=1))
+
+    after = await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT 5"))
+    assert after.rows == [["5"]]
+    assert after.timing_ms["pool_new_connections"] == 0
+
+
+async def test_drain_of_an_old_pool_keeps_the_new_one(database, manager):
+    """Bugbot: a query failing on an old pool must not close a newer pool."""
+    kwargs = _kwargs(database, sql="SELECT 1")
+    await run_pool_query(manager=manager, **kwargs)
+    key = manager.open_pools()[0]
+    old = manager._pools[key]
+    await manager.drain(key, "test")
+    await run_pool_query(manager=manager, **kwargs)
+    new = manager._pools[key]
+
+    await manager.drain(key, "late failure on the old pool", pool=old)
+
+    assert manager._pools[key] is new
+    reused = await run_pool_query(manager=manager, **kwargs)
+    assert reused.timing_ms["pool_new_connections"] == 0
+
+
+async def test_pool_reset_between_lookup_and_checkout_is_retried(database, manager, monkeypatch):
+    """Bugbot: PoolClosed from a concurrently reset pool became QUERY_ERROR."""
+    kwargs = _kwargs(database, sql="SELECT 6")
+    await run_pool_query(manager=manager, **kwargs)
+    real_pool_for = manager.pool_for
+    calls = {"n": 0}
+
+    async def racing_pool_for(key, **kw):
+        pool = await real_pool_for(key, **kw)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await manager.drain(key, "concurrent reset")  # closes the pool just handed out
+        return pool
+
+    monkeypatch.setattr(manager, "pool_for", racing_pool_for)
+    result = await run_pool_query(manager=manager, **kwargs)
+
+    assert result.rows == [["6"]]
+    assert calls["n"] == 2
