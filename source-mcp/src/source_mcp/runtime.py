@@ -102,6 +102,13 @@ async def resolve_runtime_ref(
         deployment_name, gitops_image = await _first_gitops_image(
             deployment_names, gitops_environment, settings
         )
+        if gitops_image and gitops_image.get("scaled_to_zero"):
+            raise RuntimeRefUnavailable(
+                f"deployment {deployment_name} has no logs and {gitops_image['gitops']['repo']}:"
+                f"{gitops_image['gitops']['path']} scales it to 0 replicas, so it is not running "
+                f"(declared tag {gitops_image['image_tag']!r} is not a runtime version)"
+                + _runtime_notes(settings, deployment_names)
+            )
         image = gitops_image
     if image is None:
         scope = (
@@ -113,6 +120,7 @@ async def resolve_runtime_ref(
             f"no runtime image tag found for deployments {', '.join(deployment_names)} in {scope} "
             f"within the last {settings.runtime_hours}h, and no image declared for them in "
             f"{settings.gitops_repo} environments/; list_runtime_deployments shows what is running"
+            + _runtime_notes(settings, deployment_names)
         )
     tag = image["image_tag"]
     candidates = _prefixed_candidates(settings, repo, deployment_name, runtime_ref_candidates(tag))
@@ -155,6 +163,11 @@ async def resolve_runtime_ref(
         "GIT_REF_UNPUBLISHED",
         f"runtime image tag {tag!r} for {deployment_name} did not resolve in {repo}: {last_error}",
     )
+
+
+def _runtime_notes(settings: Settings, deployment_names: list[str]) -> str:
+    notes = [settings.runtime_notes[name] for name in deployment_names if name in settings.runtime_notes]
+    return "".join(f". {note}" for note in dict.fromkeys(notes))
 
 
 async def _first_resolvable(
@@ -262,25 +275,66 @@ async def gitops_image_tag(
             continue
         tag = _kustomize_image_tag(text, image_name)
         if tag:
-            declared.append((file, tag))
+            declared.append((file, tag, _kustomize_replicas(text)))
     if not declared:
         return None
     short = deployment.removeprefix("dify-")
     declared.sort(key=lambda item: (item[0].split("/")[-2] not in (deployment, short), item[0]))
-    file, tag = declared[0]
+    file, tag, replicas = declared[0]
     code, commit, _ = await run_git(path, "rev-parse", ref, settings=settings, max_output=200)
+    replica_count = _declared_replicas(replicas, deployment, file)
     return {
         "image_tag": tag,
         "environment": environment,
+        "scaled_to_zero": replica_count == 0,
         "gitops": {
             "repo": gitops_repo,
             "ref": ref,
             "commit": commit.strip() if code == 0 else None,
             "path": file,
             "image": image_name,
-            "other_overlays": [{"path": f, "image_tag": t} for f, t in declared[1:]],
+            "replicas": replica_count,
+            "other_overlays": [{"path": f, "image_tag": t} for f, t, _ in declared[1:]],
         },
     }
+
+
+def _kustomize_replicas(text: str) -> dict[str, int]:
+    """name -> count from the top-level `replicas:` list of a kustomization.yaml."""
+    result: dict[str, int] = {}
+    in_block = False
+    name: Optional[str] = None
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith((" ", "-")):
+            in_block = line.split("#", 1)[0].strip() == "replicas:"
+            name = None
+            continue
+        if not in_block:
+            continue
+        item = line.strip().removeprefix("- ").strip()
+        key, _, value = item.partition(":")
+        value = value.split("#", 1)[0].strip().strip("'\"")
+        if key == "name":
+            name = value
+        elif key == "count" and name is not None:
+            try:
+                result[name] = int(value)
+            except ValueError:
+                pass
+    return result
+
+
+def _declared_replicas(replicas: dict[str, int], deployment: str, file: str) -> Optional[int]:
+    """Replica count the overlay declares for the deployment, or None if unknown."""
+    if not replicas:
+        return None
+    overlay = file.split("/")[-2] if "/" in file else ""
+    for name in (deployment, deployment.removeprefix("dify-"), overlay):
+        if name in replicas:
+            return replicas[name]
+    return replicas[next(iter(replicas))] if len(replicas) == 1 else None
 
 
 def _kustomize_image_tag(text: str, image_name: str) -> Optional[str]:
@@ -528,6 +582,13 @@ async def list_runtime_deployments(
         for name in prefixes.values():
             if repo not in deployment_repos.setdefault(name, []):
                 deployment_repos[name].append(repo)
+    # Default deployments only: component deployments (cronjobs, workers) may
+    # legitimately log rarely, so they are mapped back to repos but not reported.
+    expected = set(deployment_repos)
+    for repo, names in settings.repo_component_deployments.items():
+        for name in names:
+            if repo not in deployment_repos.setdefault(name, []):
+                deployment_repos[name].append(repo)
 
     items: list[dict[str, Any]] = []
     for row in rows:
@@ -546,7 +607,7 @@ async def list_runtime_deployments(
     seen = {item["deployment"] for item in items}
     # Only deployments the query could have returned: those matching name_contains.
     # When the listing was truncated, absence proves nothing.
-    considered = [name for name in deployment_repos if not name_contains or name_contains in name]
+    considered = [name for name in expected if not name_contains or name_contains in name]
     without_logs = None if truncated else sorted(name for name in considered if name not in seen)
     return {
         "hours": hours,

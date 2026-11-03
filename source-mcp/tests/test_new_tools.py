@@ -389,11 +389,12 @@ def test_unknown_repo_lists_configured_repos(client):
 @pytest.mark.parametrize(
     ("name", "expected"),
     [
-        ("gateway", ["dify-enterprise", "server/cmd/gateway/", "unconfirmed"]),
-        ("dify-gateway", ["dify-enterprise", "server/pkg/gateway/"]),
+        ("gateway", ["repo dify-saas", "promotions/config.json"]),
+        ("dify-gateway", ["repo dify-saas"]),
         ("sandbox-gateway", ["server/cmd/sandbox-gateway/"]),
         ("ops-web", ["dify-marketplace", "ops/"]),
-        ("billing", ["repo dify-billing", "not configured here"]),
+        ("billing", ["repo dify-saas", "not configured here", "scaled to 0"]),
+        ("dify-saas-billing", ["repo dify-saas"]),
     ],
 )
 def test_unknown_repo_suggests_hints(client, name, expected):

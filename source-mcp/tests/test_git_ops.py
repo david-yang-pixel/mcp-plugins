@@ -264,7 +264,7 @@ def test_rev_parse_uses_one_remote_lookup_to_confirm_missing_ref(monkeypatch, tm
         del settings, max_output, use_github_token
         calls.append(args)
         timeouts.append(timeout_seconds)
-        if args[0] == "rev-parse":
+        if args[0] in ("rev-parse", "show-ref"):
             return 1, "", ""
         if args[0] == "ls-remote":
             return 2, "", ""
@@ -317,7 +317,7 @@ def test_rev_parse_retries_default_git_credentials_after_rejected_token(monkeypa
         use_github_token: bool = True,
     ) -> tuple[int, str, str]:
         del settings, max_output, timeout_seconds
-        if args[0] == "rev-parse":
+        if args[0] in ("rev-parse", "show-ref"):
             return 1, "", ""
         assert args[0] == "ls-remote"
         auth_modes.append(use_github_token)

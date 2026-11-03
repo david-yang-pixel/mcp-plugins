@@ -170,7 +170,8 @@ def test_background_refresh_unshallows_full_history_repo(env, monkeypatch):
     result = anyio.run(git_ops.background_refresh_repo, "dify", settings)
 
     assert result["error"] is None
-    assert result["actions"] == ["fetched", "unshallowed"]
+    # `clone --depth=1` implies --single-branch; the narrow refspec is repaired first.
+    assert result["actions"] == ["refspec-repaired", "fetched", "unshallowed"]
     assert _shallow(path) is False
     assert len(_git("log", "--oneline", "HEAD", cwd=path).splitlines()) == 3
 
@@ -193,7 +194,7 @@ def test_background_refresh_keeps_non_full_history_repo_shallow(env, monkeypatch
 
     result = anyio.run(git_ops.background_refresh_repo, "dify", settings)
 
-    assert result["actions"] == ["fetched"]
+    assert result["actions"] == ["refspec-repaired", "fetched"]
     assert _shallow(env["base"] / "dify") is True
 
 
@@ -299,3 +300,57 @@ def test_lifespan_starts_and_stops_background_loop(env, monkeypatch):
     with TestClient(app_module.create_app()):
         pass
     assert events == []
+
+
+def test_single_branch_clone_gets_origin_main_updated(env, monkeypatch, tmp_path):
+    """Regression: a clone made on a hotfix branch never updated origin/main."""
+    origin = env["origin"]
+    _git("checkout", "-q", "-b", "hotfix/1.15.0-fix.17", cwd=origin)
+    _git("checkout", "-q", "main", cwd=origin)
+    single = env["base"] / "other"
+    _git(
+        "clone", "-q", "--single-branch", "--branch", "hotfix/1.15.0-fix.17",
+        origin.as_uri(), str(single), cwd=tmp_path,
+    )
+    # A stale local main left behind by an old on-demand fetch.
+    _git("branch", "main", "HEAD", cwd=single)
+    for number in range(2):
+        (origin / "file.txt").write_text(f"main {number}\n", encoding="utf-8")
+        _git("commit", "-qam", f"main {number}", cwd=origin)
+    tip = _git("rev-parse", "main", cwd=origin)
+    monkeypatch.setenv("SOURCE_MCP_REPOS", "other")
+    settings = Settings(_env_file=None)
+
+    before = anyio.run(git_ops.status_for_repo, "other", settings)
+    assert before["fetch_refspec_ok"] is False
+
+    result = anyio.run(git_ops.background_refresh_repo, "other", settings)
+
+    assert result["error"] is None
+    assert result["actions"][:2] == ["refspec-repaired", "fetched"]
+    assert _git("rev-parse", "refs/remotes/origin/main", cwd=single) == tip
+    status = anyio.run(git_ops.status_for_repo, "other", settings)
+    assert status["fetch_refspec_ok"] is True
+    assert status["commit"] == tip  # default branch, not the checked-out hotfix HEAD
+    assert status["head_ref"] == "hotfix/1.15.0-fix.17"
+    assert status["head_commit"] != tip
+    assert status["default_branch_committed_at"]
+    assert status["last_fetch_kind"] == "full"
+    # A bare branch name resolves to the fetched remote-tracking branch, not the
+    # stale local refs/heads/main.
+    assert anyio.run(git_ops.rev_parse, "other", "main", settings) == tip
+
+
+def test_single_ref_fetch_does_not_make_background_refresh_skip(env, monkeypatch):
+    monkeypatch.setenv("SOURCE_MCP_REPOS", "dify")
+    monkeypatch.setenv("SOURCE_MCP_FULL_HISTORY_REPOS", "other")
+    settings = Settings(_env_file=None)
+    path = env["base"] / "dify"
+    # On-demand fetches of one ref rewrite FETCH_HEAD; that is not a full fetch.
+    (path / ".git" / "FETCH_HEAD").write_text("", encoding="utf-8")
+    anyio.run(git_ops._configure_origin, path, "dify", settings)
+
+    result = anyio.run(git_ops.background_refresh_repo, "dify", settings)
+
+    assert "fetched" in result["actions"]
+    assert "fresh" not in result["actions"]

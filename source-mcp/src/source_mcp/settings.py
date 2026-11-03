@@ -73,7 +73,8 @@ class Settings(BaseSettings):
             '"dify-billing":"dify-billing,billing",'
             '"dify-sandbox":"dify-sandbox",'
             '"dify-marketplace":"dify-marketplace-backend,dify-marketplace-ops-backend",'
-            '"rbac":"dify-rbac,rbac"}'
+            '"rbac":"dify-rbac,rbac",'
+            '"dify-saas":"dify-saas-billing"}'
         ),
         validation_alias="SOURCE_MCP_RUNTIME_DEPLOYMENTS",
     )
@@ -103,6 +104,57 @@ class Settings(BaseSettings):
         ),
         validation_alias="SOURCE_MCP_RUNTIME_TAG_PREFIXES",
     )
+    # repo -> further deployments built from it (monorepos). Only used to map
+    # deployments back to repos; pass deployment=<name> to resolve one of them.
+    repo_component_deployments_json: str = Field(
+        default=json.dumps(
+            {
+                "dify-saas": [
+                    "dify-saas-billing-cronjob",
+                    "dify-saas-billing-quota-persist",
+                    "dify-saas-billing-coupon-generation",
+                    "dify-saas-billing-quota-history-cdc",
+                    "dify-gateway",
+                    "dify-saas",
+                    "dify-saas-admin",
+                    "dify-saas-admin-web",
+                    "dify-aggregator",
+                    "dify-cdc-cache",
+                    "dify-email-service",
+                    "dify-email-worker",
+                ],
+                "dify-marketplace": [
+                    "dify-marketplace-scheduler",
+                    "dify-marketplace-web",
+                    "dify-marketplace-ops-web",
+                    "dify-marketplace-creators-backend",
+                    "dify-marketplace-creators-web",
+                ],
+            },
+            separators=(",", ":"),
+        ),
+        validation_alias="SOURCE_MCP_REPO_COMPONENT_DEPLOYMENTS",
+    )
+    # deployment -> explanation added when no runtime version can be found.
+    runtime_notes_json: str = Field(
+        default=json.dumps(
+            {
+                "dify-sandbox": (
+                    "Dify SaaS production runs the code sandbox outside Kubernetes "
+                    "(saas-deploy dify-shared-sandbox-config points CODE_EXECUTION_ENDPOINT "
+                    "at AWS App Runner); it ships no logs to SigNoz and has no production "
+                    "overlay in saas-deploy, so its running version cannot be determined "
+                    "here. Pass an explicit ref."
+                ),
+                "dify-billing": (
+                    "dify-billing is retired: saas-deploy scales it to 0 replicas and billing "
+                    "runs in dify-saas-billing (repo dify-saas). Use repo=dify-saas."
+                ),
+            },
+            separators=(",", ":"),
+        ),
+        validation_alias="SOURCE_MCP_RUNTIME_NOTES",
+    )
     # When telemetry has no image tag for a deployment (no logs shipped, e.g.
     # dify-sandbox, or no production logs, e.g. dify-rbac), fall back to the tag
     # declared in this GitOps repo's environments/<env>/**/kustomization.yaml.
@@ -116,6 +168,10 @@ class Settings(BaseSettings):
                 "dify-sandbox": "langgenius/dify-sandbox",
                 "dify-billing": "langgenius/dify-billing",
                 "billing": "langgenius/dify-billing",
+                "dify-saas-billing": "langgenius/dify-saas-billing",
+                "dify-saas-billing-cronjob": "langgenius/dify-saas-billing",
+                "dify-saas-billing-quota-persist": "langgenius/dify-saas-billing",
+                "dify-gateway": "langgenius/dify-gateway",
             },
             separators=(",", ":"),
         ),
@@ -137,23 +193,28 @@ class Settings(BaseSettings):
     repo_hints_json: str = Field(
         default=json.dumps(
             {
-                "billing": [{"repo": "dify-billing", "paths": []}],
-                "dify-saas-billing": (
-                    "the SaaS billing service (deployment dify-saas-billing, image "
-                    "langgenius/dify-saas-billing, tags like release-20261030.2) is not built "
-                    "from dify-billing (deployment dify-billing, tags release-202606xx); its "
-                    "source repository has not been identified, so it is not configured"
-                ),
+                "billing": [
+                    {
+                        "repo": "dify-saas",
+                        "paths": [],
+                        "note": (
+                            "SaaS billing (deployments dify-saas-billing*) is built from "
+                            "dify-saas; the legacy dify-billing repo/deployment is scaled to 0"
+                        ),
+                    },
+                ],
+                "dify-saas-billing": [{"repo": "dify-saas", "paths": []}],
                 "ops": [{"repo": "dify-marketplace", "paths": ["ops/"]}],
                 "ops-backend": [{"repo": "dify-marketplace", "paths": ["ops/"]}],
                 "ops-web": [{"repo": "dify-marketplace", "paths": ["ops/"]}],
                 "gateway": [
                     {
-                        "repo": "dify-enterprise",
-                        "paths": ["server/cmd/gateway/", "server/pkg/gateway/"],
+                        "repo": "dify-saas",
+                        "paths": [],
                         "note": (
-                            "unconfirmed: the SaaS image langgenius/dify-gateway is most "
-                            "likely built from here"
+                            "the SaaS image langgenius/dify-gateway is built from dify-saas "
+                            "(saas-deploy promotions/config.json); the Enterprise gateway is "
+                            "dify-enterprise server/cmd/gateway/"
                         ),
                     },
                 ],
@@ -208,6 +269,22 @@ class Settings(BaseSettings):
                     if isinstance(prefix, str) and prefix
                 }
         return result
+
+    @property
+    def repo_component_deployments(self) -> dict[str, list[str]]:
+        return {
+            str(repo): [str(name) for name in names if isinstance(name, str) and name]
+            for repo, names in _load_json_object(self.repo_component_deployments_json).items()
+            if isinstance(names, list)
+        }
+
+    @property
+    def runtime_notes(self) -> dict[str, str]:
+        return {
+            str(name): str(note)
+            for name, note in _load_json_object(self.runtime_notes_json).items()
+            if isinstance(note, str) and note
+        }
 
     @property
     def gitops_images(self) -> dict[str, str]:

@@ -278,6 +278,7 @@ async def _refresh_repo_locked(
         )
         if code != 0:
             raise SourceError("GIT_FETCH_FAILED", f"{repo}: {err.strip()}")
+        _mark_full_fetch(path)
 
     ref_results = [await _ensure_ref_present(path, repo, ref, settings) for ref in refs or []]
     data = await status_for_repo(repo, settings, message=message)
@@ -371,10 +372,31 @@ async def status_for_repo(
     }
     if not cloned:
         return data
-    data["commit"] = await rev_parse(repo, "HEAD", settings)
-    last_fetch = _fetch_head_mtime(path)
+    default_ref = await default_branch_ref(path, settings)
+    code, out, _ = await run_git(
+        path, "log", "-1", "--format=%H %cI", f"refs/remotes/{default_ref}",
+        settings=settings,
+        max_output=2000,
+    )
+    parts = out.split() if code == 0 else []
+    # The default branch as last fetched, not the checked-out HEAD (which is
+    # whatever the clone started on and is never moved by fetches).
+    data["commit"] = parts[0] if parts else None
+    data["default_branch_committed_at"] = parts[1] if len(parts) > 1 else None
+    code, head_ref, _ = await run_git(
+        path, "rev-parse", "--abbrev-ref", "HEAD", settings=settings, max_output=2000
+    )
+    data["head_ref"] = head_ref.strip() if code == 0 else None
+    data["head_commit"] = await rev_parse(repo, "HEAD", settings)
+    refspecs = await fetch_refspecs(path, settings)
+    data["fetch_refspecs"] = refspecs
+    data["fetch_refspec_ok"] = STANDARD_FETCH_REFSPEC in refspecs
+    full_fetch = _full_fetch_mtime(path)
+    last_fetch = full_fetch if full_fetch is not None else _fetch_head_mtime(path)
     data["last_fetch_at"] = last_fetch
     data["last_fetch_at_iso"] = _iso(last_fetch)
+    # "full" = last `fetch --all`; "fetch_head" = any fetch, possibly a single ref.
+    data["last_fetch_kind"] = "full" if full_fetch is not None else ("fetch_head" if last_fetch else None)
     interval = settings.background_refresh_seconds
     if interval > 0:
         data["stale_after_seconds"] = interval * 2
@@ -382,7 +404,7 @@ async def status_for_repo(
     else:
         data["stale_after_seconds"] = None
         data["stale"] = None
-    data["default_branch_ref"] = await default_branch_ref(path, settings)
+    data["default_branch_ref"] = default_ref
     data["shallow"] = await is_shallow_repo(path, settings)
     code, tags, _ = await run_git(path, "tag", "-l", settings=settings, max_output=1_000_000)
     data["tag_count"] = len([line for line in tags.splitlines() if line.strip()]) if code == 0 else 0
@@ -406,8 +428,9 @@ async def rev_parse(
     settings: Settings,
 ) -> str:
     path = await ensure_repo(repo, settings)
+    target = await _preferred_ref(path, ref, settings)
     code, out, err = await run_git(
-        path, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}",
+        path, "rev-parse", "--verify", "-q", f"{target}^{{commit}}",
         settings=settings,
         max_output=2000,
     )
@@ -418,14 +441,44 @@ async def rev_parse(
                 await _fetch_commit(path, ref, settings)
             else:
                 await _fetch_ref(path, ref, settings)
+        target = await _preferred_ref(path, ref, settings)
         code, out, err = await run_git(
-            path, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}",
+            path, "rev-parse", "--verify", "-q", f"{target}^{{commit}}",
             settings=settings,
             max_output=2000,
         )
     if code != 0:
         raise SourceError("REF_NOT_FOUND", await _ref_not_found_message(path, repo, ref, err, settings))
     return out.strip()
+
+
+_REF_EXPRESSION_CHARS = ("^", "~", ":", "@{", "..")
+
+
+async def _preferred_ref(path: Path, ref: str, settings: Settings) -> str:
+    """Resolve a bare branch name to its remote-tracking ref.
+
+    Background fetches only update refs/remotes/origin/*, so a local refs/heads/main
+    (left by the initial clone or an old on-demand fetch) silently goes stale. Tags
+    keep git's normal precedence; SHAs, HEAD and explicit ref paths are unchanged.
+    """
+    if (
+        not ref
+        or ref == "HEAD"
+        or ref.startswith(("origin/", "refs/", "-"))
+        or _COMMIT_SHA_RE.match(ref)
+        or any(token in ref for token in _REF_EXPRESSION_CHARS)
+    ):
+        return ref
+    for candidate, preferred in ((f"refs/tags/{ref}", ref), (f"refs/remotes/origin/{ref}", f"refs/remotes/origin/{ref}")):
+        code, _, _ = await run_git(
+            path, "show-ref", "--verify", "--quiet", candidate,
+            settings=settings,
+            max_output=200,
+        )
+        if code == 0:
+            return preferred
+    return ref
 
 
 async def is_shallow_repo(path: Path, settings: Settings) -> bool:
@@ -729,7 +782,7 @@ async def read_source(
         repo, ref, settings, deployment=deployment, environment=environment
     )
     code, out, err = await run_git(
-        path, "show", f"{resolved['ref']}:{filepath}",
+        path, "show", f"{resolved['commit']}:{filepath}",
         settings=settings,
         max_output=settings.read_max_file_bytes,
     )
@@ -785,7 +838,7 @@ async def source_log(
     resolved = await _resolve_ref(
         repo, ref, settings, deployment=deployment, environment=environment
     )
-    args = ["log", resolved["ref"], f"-{max(1, min(n, 100))}", "--oneline", "--decorate"]
+    args = ["log", resolved["commit"], f"-{max(1, min(n, 100))}", "--oneline", "--decorate"]
     if filepath:
         _reject_bad_filepath(filepath)
         args.extend(["--", filepath])
@@ -829,7 +882,7 @@ async def source_diff(
     resolved2 = await _resolve_ref(
         repo, ref2, settings, deployment=deployment, environment=environment
     )
-    args = ["diff", resolved1["ref"], resolved2["ref"]]
+    args = ["diff", resolved1["commit"], resolved2["commit"]]
     if mode == "stat":
         args.append("--stat=200")
     elif mode == "name-status":
@@ -1082,12 +1135,9 @@ async def _fetch_ref(path: Path, ref: str, settings: Settings) -> bool:
     if source_ref is None:
         raise SourceError("GIT_FETCH_FAILED", f"git ls-remote returned no usable ref for {ref}")
 
-    if source_ref == tag_ref:
-        destination = tag_ref
-    elif ref.startswith("origin/"):
-        destination = f"refs/remotes/origin/{branch}"
-    else:
-        destination = branch_ref
+    # Branches go to refs/remotes/origin/*, which the background fetch keeps
+    # current; a local refs/heads/* copy would go stale.
+    destination = tag_ref if source_ref == tag_ref else f"refs/remotes/origin/{branch}"
     code, _, err = await run_git(
         path,
         "fetch",
@@ -1246,22 +1296,52 @@ async def _clone_repo(path: Path, repo: str, settings: Settings) -> None:
         raise SourceError("GIT_CLONE_FAILED", f"{repo}: {err.strip()}")
 
 
-async def _configure_origin(path: Path, repo: str, settings: Settings) -> None:
+STANDARD_FETCH_REFSPEC = "+refs/heads/*:refs/remotes/origin/*"
+
+
+async def _configure_origin(path: Path, repo: str, settings: Settings) -> bool:
+    """Point origin at the repo URL and make it fetch every branch.
+
+    Returns True when the fetch refspec had to be repaired. A clone made with
+    --single-branch/--branch only fetches that one branch, so `fetch --all`
+    "succeeds" while origin/main never moves.
+    """
     url = _repo_url(repo, settings)
     code, out, _ = await run_git(
         path, "remote", "get-url", "origin",
         settings=settings,
         max_output=2000,
     )
-    if code == 0 and out.strip() == url:
-        return
-    if code == 0:
-        args = ("remote", "set-url", "origin", url)
-    else:
-        args = ("remote", "add", "origin", url)
-    code, _, err = await run_git(path, *args, settings=settings, max_output=4000)
+    if code != 0 or out.strip() != url:
+        args = ("remote", "set-url", "origin", url) if code == 0 else ("remote", "add", "origin", url)
+        code, _, err = await run_git(path, *args, settings=settings, max_output=4000)
+        if code != 0:
+            raise SourceError("GIT_REMOTE_FAILED", f"{repo}: {err.strip()}")
+    if STANDARD_FETCH_REFSPEC in await fetch_refspecs(path, settings):
+        return False
+    code, _, err = await run_git(
+        path, "config", "--replace-all", "remote.origin.fetch", STANDARD_FETCH_REFSPEC,
+        settings=settings,
+        max_output=4000,
+    )
     if code != 0:
-        raise SourceError("GIT_REMOTE_FAILED", f"{repo}: {err.strip()}")
+        raise SourceError("GIT_REMOTE_FAILED", f"{repo}: cannot set fetch refspec: {err.strip()}")
+    _LOG.warning("repaired fetch refspec of %s to %s", repo, STANDARD_FETCH_REFSPEC)
+    return True
+
+
+async def fetch_refspecs(path: Path, settings: Settings) -> list[str]:
+    code, out, _ = await run_git(
+        path, "config", "--get-all", "remote.origin.fetch",
+        settings=settings,
+        max_output=4000,
+    )
+    return [line.strip() for line in out.splitlines() if line.strip()] if code == 0 else []
+
+
+async def _update_origin_head(path: Path, settings: Settings) -> None:
+    # Best effort: after a single-branch clone origin/HEAD may point at that branch.
+    await run_git(path, "remote", "set-head", "origin", "--auto", settings=settings, max_output=2000)
 
 
 async def _can_auto_fetch(path: Path, repo: str, settings: Settings) -> bool:
@@ -1342,18 +1422,27 @@ async def background_refresh_repo(repo: str, settings: Settings) -> dict[str, An
             elif not await _can_auto_fetch(path, repo, settings):
                 actions.append("local-only")
             else:
-                await _configure_origin(path, repo, settings)
-                last_fetch = _fetch_head_mtime(path)
-                if last_fetch is not None and time.time() - last_fetch < settings.fetch_ttl_seconds:
+                if await _configure_origin(path, repo, settings):
+                    actions.append("refspec-repaired")
+                last_fetch = _full_fetch_mtime(path)
+                if (
+                    "refspec-repaired" not in actions
+                    and last_fetch is not None
+                    and time.time() - last_fetch < settings.fetch_ttl_seconds
+                ):
                     actions.append("fresh")
                 else:
                     code, _, err = await run_git(
                         path, "fetch", "--all", "--prune", "--tags", "--force",
                         settings=settings,
                         max_output=8000,
+                        timeout_seconds=settings.git_history_timeout_seconds,
                     )
                     if code == 0:
+                        _mark_full_fetch(path)
                         actions.append("fetched")
+                        if "refspec-repaired" in actions:
+                            await _update_origin_head(path, settings)
                     else:
                         errors.append(f"fetch failed: {err.strip() or f'git exited {code}'}")
                 if settings.is_full_history_repo(repo) and await is_shallow_repo(path, settings):
@@ -1364,6 +1453,7 @@ async def background_refresh_repo(repo: str, settings: Settings) -> dict[str, An
                         timeout_seconds=settings.git_history_timeout_seconds,
                     )
                     if code == 0:
+                        _mark_full_fetch(path)
                         actions.append("unshallowed")
                     else:
                         errors.append(f"unshallow failed: {err.strip() or f'git exited {code}'}")
@@ -1404,6 +1494,29 @@ async def background_refresh_loop(
         except Exception:  # noqa: BLE001 - keep the loop alive.
             _LOG.exception("background refresh run failed")
         delay = float(interval)
+
+
+_FULL_FETCH_MARKER = "source-mcp-full-fetch"
+
+
+def _git_dir(path: Path) -> Path:
+    return path / ".git" if (path / ".git").is_dir() else path
+
+
+def _mark_full_fetch(path: Path) -> None:
+    """Record a successful `fetch --all`. FETCH_HEAD is also rewritten by the
+    single-ref fetches done on demand, so its mtime cannot tell whether the
+    branches were refreshed."""
+    with suppress(OSError):
+        (_git_dir(path) / _FULL_FETCH_MARKER).touch()
+
+
+def _full_fetch_mtime(path: Path) -> Optional[float]:
+    marker = _git_dir(path) / _FULL_FETCH_MARKER
+    try:
+        return marker.stat().st_mtime
+    except OSError:
+        return None
 
 
 def _fetch_head_mtime(path: Path) -> Optional[float]:

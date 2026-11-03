@@ -213,3 +213,74 @@ def test_unique_component_tag_is_found_without_configured_prefix(monkeypatch, tm
     )
 
     assert result["ref"] == "backend/1.4.0"
+
+
+def test_kustomize_replicas_parse():
+    text = (
+        "images:\n  - name: langgenius/dify-billing\n    newTag: x\n\n"
+        "replicas:\n  - name: billing\n    count: 0\n  - name: worker # c\n    count: '2'\n"
+        "patches:\n  - name: not-a-replica\n    count: 9\n"
+    )
+    assert runtime._kustomize_replicas(text) == {"billing": 0, "worker": 2}
+    assert runtime._declared_replicas({"billing": 0}, "dify-billing", "e/p/saas/billing/k.yaml") == 0
+    assert runtime._declared_replicas({"x": 3}, "dify-rbac", "e/p/dify/rbac/k.yaml") == 3
+    assert runtime._declared_replicas({}, "dify-rbac", "e/p/dify/rbac/k.yaml") is None
+
+
+def _add_scaled_to_zero_billing(repo: Path) -> None:
+    target = repo / "environments/production/saas/billing/kustomization.yaml"
+    target.write_text(
+        "images:\n  - name: langgenius/dify-billing\n    newTag: release-20260616.1\n"
+        "replicas:\n  - name: billing\n    count: 0\n"
+    )
+    _git(repo, "commit", "-qam", "scale billing to zero")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+
+def test_scaled_to_zero_overlay_is_not_a_runtime_version(monkeypatch, tmp_path):
+    _add_scaled_to_zero_billing(_gitops_repo(tmp_path))
+    settings = _settings(monkeypatch, tmp_path)
+
+    async def no_logs(*_args: Any, **_kwargs: Any):
+        return None
+
+    monkeypatch.setattr(runtime, "_query_runtime_image", no_logs)
+
+    async def rev_parse(*_args: Any) -> str:
+        raise AssertionError("a scaled-to-zero tag must not be resolved")
+
+    with pytest.raises(RuntimeRefUnavailable) as exc_info:
+        anyio.run(
+            lambda: runtime.resolve_runtime_ref(
+                repo="dify-billing", deployment=None, settings=settings, rev_parse_func=rev_parse
+            )
+        )
+
+    message = exc_info.value.message
+    assert "0 replicas" in message
+    assert "dify-saas" in message  # the retirement note points to the new repo
+
+
+def test_sandbox_unavailable_explains_app_runner(monkeypatch, tmp_path):
+    _gitops_repo(tmp_path)
+    settings = _settings(monkeypatch, tmp_path)
+
+    async def no_logs(*_args: Any, **_kwargs: Any):
+        return None
+
+    monkeypatch.setattr(runtime, "_query_runtime_image", no_logs)
+
+    with pytest.raises(RuntimeRefUnavailable, match="App Runner"):
+        anyio.run(
+            lambda: runtime.resolve_runtime_ref(
+                repo="dify-sandbox", deployment=None, settings=settings, rev_parse_func=None
+            )
+        )
+
+
+def test_saas_billing_maps_to_dify_saas(monkeypatch):
+    monkeypatch.delenv("SOURCE_MCP_RUNTIME_DEPLOYMENTS", raising=False)
+    settings = Settings(_env_file=None)
+
+    assert runtime.configured_deployments(settings, "dify-saas") == ["dify-saas-billing"]
+    assert "dify-gateway" in settings.repo_component_deployments["dify-saas"]
