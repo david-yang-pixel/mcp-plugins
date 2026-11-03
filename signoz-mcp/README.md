@@ -35,7 +35,7 @@ uv run --locked signoz-mcp
 - 可精确合并：`count`、`sum`（求和）、`min`、`max`、`avg`（子窗口返回 sum/count 后再相除）、指标 `latest`（取时间最新的样本）。分组和 `time_series` 按分组键/时间桶合并，最后按原规则排序并应用 `limit`。子窗口边界使用左闭右开，避免重复计数。
 - 每个子窗口使用 `SIGNOZ_MCP_CHUNK_ROW_LIMIT`（默认 10000）行上限；任一子窗口达到上限时返回 `chunking.approximate: true`。
 - `p50`…`p99` 与 `count_distinct` 无法跨子窗口合并，仍按单次查询执行，并在返回的 `chunking.reason` 中说明。
-- 整体受 `SIGNOZ_MCP_TOTAL_TIMEOUT_SECONDS`（默认 120 秒）限制；单个子窗口仍受 `SIGNOZ_MCP_TIMEOUT_SECONDS` 限制。超时（`SZ_TIMEOUT` / `SZ_TOTAL_TIMEOUT`）时返回结构化错误，包含：`partial.data`（已完成子窗口的合并结果）、`partial.completedWindows` / `remainingWindows`，以及 `suggestion`（建议的最大窗口 `maxHours` 与可直接使用的 `start`/`end` 拆分 `windows`）。单次查询超时同样返回 `window` 与 `suggestion`。
+- 整体受 `SIGNOZ_MCP_TOTAL_TIMEOUT_SECONDS`（默认 50 秒）限制；单个子窗口仍受 `SIGNOZ_MCP_TIMEOUT_SECONDS` 限制。超时（`SZ_TIMEOUT` / `SZ_TOTAL_TIMEOUT`）时返回结构化错误，包含：`partial.data`（已完成子窗口的合并结果）、`partial.completedWindows` / `remainingWindows`，以及 `suggestion`（建议的最大窗口 `maxHours` 与可直接使用的 `start`/`end` 拆分 `windows`）。单次查询超时同样返回 `window` 与 `suggestion`。
 - 日志和链路查询默认附加 `ts_bucket_start` 范围条件（SigNoz logs v2 / traces v3 主键首列），减少扫描量；如目标 SigNoz 版本不支持，可设置 `SIGNOZ_MCP_TS_BUCKET_PRUNING=false` 关闭。
 
 ### 日志结果精简：`fields`、`compact`、`maxFieldChars`
@@ -62,7 +62,7 @@ uv run --locked signoz-mcp
 | `SIGNOZ_MCP_CHUNK_HOURS` | `24` | 子窗口长度 |
 | `SIGNOZ_MCP_CHUNK_CONCURRENCY` | `2` | 单次请求内子窗口并发数（同时受 `SIGNOZ_MCP_MAX_CONCURRENT_RUNS` 限制） |
 | `SIGNOZ_MCP_CHUNK_ROW_LIMIT` | `10000` | 每个子窗口的行上限 |
-| `SIGNOZ_MCP_TOTAL_TIMEOUT_SECONDS` | `120` | 分段查询整体超时 |
+| `SIGNOZ_MCP_TOTAL_TIMEOUT_SECONDS` | `50` | 分段查询整体超时。线上路由前的代理读超时可能是 60 秒，整体预算加上终止子进程的约 5 秒宽限必须低于该值，否则客户端会收到网关 504 而不是部分结果；线上单次查询超时 `SIGNOZ_MCP_TIMEOUT_SECONDS` 为 45 秒 |
 | `SIGNOZ_MCP_TS_BUCKET_PRUNING` | `true` | 是否附加 `ts_bucket_start` 条件 |
 | `SIGNOZ_MCP_LOG_COMPACT_DENYLIST` | 见 `settings.py` | compact 时删除的属性键，逗号分隔 |
 | `SIGNOZ_MCP_LOG_MAX_FIELD_CHARS` | `4000` | compact 时单个字符串截断长度 |

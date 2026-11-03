@@ -327,3 +327,18 @@ async def test_chunk_runner_exception_is_reported_not_treated_as_budget_timeout(
 
     assert payload["code"] == "SZ_FAILED"
     assert "spawn exploded" in payload["error"]
+
+
+def test_deployed_budgets_return_before_a_60s_proxy_timeout():
+    """The legacy route's proxy may cut responses at 60s; partial results must beat it."""
+    import json
+    from pathlib import Path
+
+    env = json.loads((Path(__file__).resolve().parents[1] / "deploy" / "runtime.json").read_text())[
+        "environment"
+    ]
+    settings = Settings(SIGNOZ_MCP_API_KEY="x" * 32, **env)
+    kill_grace = 5  # sz_runner._kill_process waits up to 5s after cancelling sz
+    assert settings.total_timeout_seconds + kill_grace < 60
+    assert settings.timeout_seconds + kill_grace < 60
+    assert settings.timeout_seconds <= settings.total_timeout_seconds
