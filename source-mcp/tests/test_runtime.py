@@ -34,7 +34,6 @@ def test_default_runtime_deployments_match_production_aliases(monkeypatch):
         "dify-sandbox": "dify-sandbox",
         "dify-marketplace": "dify-marketplace-backend,dify-marketplace-ops-backend",
         "rbac": "dify-rbac,rbac",
-        "dify-saas": "dify-saas-billing",
     }
 
 

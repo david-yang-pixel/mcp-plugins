@@ -390,7 +390,8 @@ async def status_for_repo(
     data["head_commit"] = await rev_parse(repo, "HEAD", settings)
     refspecs = await fetch_refspecs(path, settings)
     data["fetch_refspecs"] = refspecs
-    data["fetch_refspec_ok"] = STANDARD_FETCH_REFSPEC in refspecs
+    wanted = await desired_fetch_refspec(path, settings)
+    data["fetch_refspec_ok"] = None if wanted is None else refspecs == [wanted]
     full_fetch = _full_fetch_mtime(path)
     last_fetch = full_fetch if full_fetch is not None else _fetch_head_mtime(path)
     data["last_fetch_at"] = last_fetch
@@ -429,6 +430,7 @@ async def rev_parse(
 ) -> str:
     path = await ensure_repo(repo, settings)
     target = await _preferred_ref(path, ref, settings)
+    await _refresh_branch_on_use(path, repo, ref, target, settings)
     code, out, err = await run_git(
         path, "rev-parse", "--verify", "-q", f"{target}^{{commit}}",
         settings=settings,
@@ -453,6 +455,41 @@ async def rev_parse(
 
 
 _REF_EXPRESSION_CHARS = ("^", "~", ":", "@{", "..")
+# (repo path, branch) -> time of the last on-demand fetch of that branch.
+_BRANCH_FETCHED_AT: dict[tuple[str, str], float] = {}
+
+
+async def _refresh_branch_on_use(
+    path: Path, repo: str, ref: str, target: str, settings: Settings
+) -> None:
+    """Re-fetch a branch outside the fetch refspec when it is used after the TTL.
+
+    Only the default branch is fetched in the background; branches fetched on
+    demand (e.g. hotfix/1.18.0-fix.4) are refreshed here, one ref at a time.
+    """
+    if settings.fetch_all_branches or not target.startswith("refs/remotes/origin/"):
+        return
+    branch = target.removeprefix("refs/remotes/origin/")
+    if branch == await _remote_default_branch_cached(path, settings):
+        return
+    key = (str(path), branch)
+    if time.time() - _BRANCH_FETCHED_AT.get(key, 0.0) < settings.fetch_ttl_seconds:
+        return
+    _BRANCH_FETCHED_AT[key] = time.time()
+    if not await _can_auto_fetch(path, repo, settings):
+        return
+    try:
+        await _configure_origin(path, repo, settings)
+        await _fetch_ref(path, branch, settings)
+    except SourceError as e:
+        _LOG.warning("on-use refresh of %s %s failed: %s", repo, branch, e.message)
+
+
+async def _remote_default_branch_cached(path: Path, settings: Settings) -> Optional[str]:
+    code, out, _ = await run_git(
+        path, "config", "--get", _DEFAULT_BRANCH_CONFIG, settings=settings, max_output=500
+    )
+    return out.strip() if code == 0 and out.strip() else None
 
 
 async def _preferred_ref(path: Path, ref: str, settings: Settings) -> str:
@@ -1135,9 +1172,11 @@ async def _fetch_ref(path: Path, ref: str, settings: Settings) -> bool:
     if source_ref is None:
         raise SourceError("GIT_FETCH_FAILED", f"git ls-remote returned no usable ref for {ref}")
 
-    # Branches go to refs/remotes/origin/*, which the background fetch keeps
-    # current; a local refs/heads/* copy would go stale.
+    # Branches go to refs/remotes/origin/* (refreshed on use); a local
+    # refs/heads/* copy would silently go stale.
     destination = tag_ref if source_ref == tag_ref else f"refs/remotes/origin/{branch}"
+    if destination != tag_ref:
+        _BRANCH_FETCHED_AT[(str(path), branch)] = time.time()
     code, _, err = await run_git(
         path,
         "fetch",
@@ -1296,15 +1335,17 @@ async def _clone_repo(path: Path, repo: str, settings: Settings) -> None:
         raise SourceError("GIT_CLONE_FAILED", f"{repo}: {err.strip()}")
 
 
-STANDARD_FETCH_REFSPEC = "+refs/heads/*:refs/remotes/origin/*"
+ALL_BRANCHES_REFSPEC = "+refs/heads/*:refs/remotes/origin/*"
+_DEFAULT_BRANCH_CONFIG = "source-mcp.defaultbranch"
 
 
 async def _configure_origin(path: Path, repo: str, settings: Settings) -> bool:
-    """Point origin at the repo URL and make it fetch every branch.
+    """Point origin at the repo URL and set the fetch refspec.
 
-    Returns True when the fetch refspec had to be repaired. A clone made with
-    --single-branch/--branch only fetches that one branch, so `fetch --all`
-    "succeeds" while origin/main never moves.
+    By default only the remote default branch is fetched (tags come with --tags,
+    other branches on demand). Returns True when the refspec had to be changed,
+    e.g. a `clone --depth=1`/--single-branch made on a hotfix branch, which made
+    `fetch --all` "succeed" while origin/main never moved.
     """
     url = _repo_url(repo, settings)
     code, out, _ = await run_git(
@@ -1317,17 +1358,57 @@ async def _configure_origin(path: Path, repo: str, settings: Settings) -> bool:
         code, _, err = await run_git(path, *args, settings=settings, max_output=4000)
         if code != 0:
             raise SourceError("GIT_REMOTE_FAILED", f"{repo}: {err.strip()}")
-    if STANDARD_FETCH_REFSPEC in await fetch_refspecs(path, settings):
+    wanted = await desired_fetch_refspec(path, settings)
+    if wanted is None or await fetch_refspecs(path, settings) == [wanted]:
         return False
     code, _, err = await run_git(
-        path, "config", "--replace-all", "remote.origin.fetch", STANDARD_FETCH_REFSPEC,
+        path, "config", "--replace-all", "remote.origin.fetch", wanted,
         settings=settings,
         max_output=4000,
     )
     if code != 0:
         raise SourceError("GIT_REMOTE_FAILED", f"{repo}: cannot set fetch refspec: {err.strip()}")
-    _LOG.warning("repaired fetch refspec of %s to %s", repo, STANDARD_FETCH_REFSPEC)
+    _LOG.warning("set fetch refspec of %s to %s", repo, wanted)
     return True
+
+
+async def desired_fetch_refspec(path: Path, settings: Settings) -> Optional[str]:
+    if settings.fetch_all_branches:
+        return ALL_BRANCHES_REFSPEC
+    branch = await _remote_default_branch(path, settings)
+    if not branch:
+        return None  # unknown (offline); leave the refspec alone
+    return f"+refs/heads/{branch}:refs/remotes/origin/{branch}"
+
+
+async def _remote_default_branch(path: Path, settings: Settings) -> Optional[str]:
+    """Remote HEAD branch, asked once and cached in the clone's git config."""
+    code, out, _ = await run_git(
+        path, "config", "--get", _DEFAULT_BRANCH_CONFIG, settings=settings, max_output=500
+    )
+    if code == 0 and out.strip():
+        return out.strip()
+    code, out, _ = await run_git(
+        path, "ls-remote", "--symref", "origin", "HEAD",
+        settings=settings,
+        max_output=4000,
+        timeout_seconds=min(settings.git_timeout_seconds, 20.0),
+    )
+    branch = None
+    for line in out.splitlines() if code == 0 else []:
+        if line.startswith("ref: refs/heads/") and line.rstrip().endswith("HEAD"):
+            branch = line.split(None, 2)[1].removeprefix("refs/heads/")
+            break
+    if not branch:
+        return None
+    await run_git(path, "config", _DEFAULT_BRANCH_CONFIG, branch, settings=settings, max_output=500)
+    # Keep origin/HEAD (used as default_branch_ref) pointing at the real default.
+    await run_git(
+        path, "symbolic-ref", "refs/remotes/origin/HEAD", f"refs/remotes/origin/{branch}",
+        settings=settings,
+        max_output=500,
+    )
+    return branch
 
 
 async def fetch_refspecs(path: Path, settings: Settings) -> list[str]:
@@ -1337,11 +1418,6 @@ async def fetch_refspecs(path: Path, settings: Settings) -> list[str]:
         max_output=4000,
     )
     return [line.strip() for line in out.splitlines() if line.strip()] if code == 0 else []
-
-
-async def _update_origin_head(path: Path, settings: Settings) -> None:
-    # Best effort: after a single-branch clone origin/HEAD may point at that branch.
-    await run_git(path, "remote", "set-head", "origin", "--auto", settings=settings, max_output=2000)
 
 
 async def _can_auto_fetch(path: Path, repo: str, settings: Settings) -> bool:
@@ -1441,8 +1517,6 @@ async def background_refresh_repo(repo: str, settings: Settings) -> dict[str, An
                     if code == 0:
                         _mark_full_fetch(path)
                         actions.append("fetched")
-                        if "refspec-repaired" in actions:
-                            await _update_origin_head(path, settings)
                     else:
                         errors.append(f"fetch failed: {err.strip() or f'git exited {code}'}")
                 if settings.is_full_history_repo(repo) and await is_shallow_repo(path, settings):

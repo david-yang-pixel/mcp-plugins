@@ -73,8 +73,7 @@ class Settings(BaseSettings):
             '"dify-billing":"dify-billing,billing",'
             '"dify-sandbox":"dify-sandbox",'
             '"dify-marketplace":"dify-marketplace-backend,dify-marketplace-ops-backend",'
-            '"rbac":"dify-rbac,rbac",'
-            '"dify-saas":"dify-saas-billing"}'
+            '"rbac":"dify-rbac,rbac"}'
         ),
         validation_alias="SOURCE_MCP_RUNTIME_DEPLOYMENTS",
     )
@@ -109,20 +108,6 @@ class Settings(BaseSettings):
     repo_component_deployments_json: str = Field(
         default=json.dumps(
             {
-                "dify-saas": [
-                    "dify-saas-billing-cronjob",
-                    "dify-saas-billing-quota-persist",
-                    "dify-saas-billing-coupon-generation",
-                    "dify-saas-billing-quota-history-cdc",
-                    "dify-gateway",
-                    "dify-saas",
-                    "dify-saas-admin",
-                    "dify-saas-admin-web",
-                    "dify-aggregator",
-                    "dify-cdc-cache",
-                    "dify-email-service",
-                    "dify-email-worker",
-                ],
                 "dify-marketplace": [
                     "dify-marketplace-scheduler",
                     "dify-marketplace-web",
@@ -147,14 +132,19 @@ class Settings(BaseSettings):
                     "here. Pass an explicit ref."
                 ),
                 "dify-billing": (
-                    "dify-billing is retired: saas-deploy scales it to 0 replicas and billing "
-                    "runs in dify-saas-billing (repo dify-saas). Use repo=dify-saas."
+                    "dify-billing is retired: saas-deploy scales it to 0 replicas and SaaS "
+                    "billing runs in dify-saas-billing*, built from langgenius/dify-saas, "
+                    "which this service has no access to"
                 ),
             },
             separators=(",", ":"),
         ),
         validation_alias="SOURCE_MCP_RUNTIME_NOTES",
     )
+    # false: fetch only the remote default branch plus tags; other branches are
+    # fetched on demand and re-fetched on use after SOURCE_MCP_FETCH_TTL_SECONDS.
+    # true: fetch every branch (+refs/heads/*), heavy for repos like dify.
+    fetch_all_branches: bool = Field(default=False, validation_alias="SOURCE_MCP_FETCH_ALL_BRANCHES")
     # When telemetry has no image tag for a deployment (no logs shipped, e.g.
     # dify-sandbox, or no production logs, e.g. dify-rbac), fall back to the tag
     # declared in this GitOps repo's environments/<env>/**/kustomization.yaml.
@@ -168,10 +158,6 @@ class Settings(BaseSettings):
                 "dify-sandbox": "langgenius/dify-sandbox",
                 "dify-billing": "langgenius/dify-billing",
                 "billing": "langgenius/dify-billing",
-                "dify-saas-billing": "langgenius/dify-saas-billing",
-                "dify-saas-billing-cronjob": "langgenius/dify-saas-billing",
-                "dify-saas-billing-quota-persist": "langgenius/dify-saas-billing",
-                "dify-gateway": "langgenius/dify-gateway",
             },
             separators=(",", ":"),
         ),
@@ -193,31 +179,23 @@ class Settings(BaseSettings):
     repo_hints_json: str = Field(
         default=json.dumps(
             {
-                "billing": [
-                    {
-                        "repo": "dify-saas",
-                        "paths": [],
-                        "note": (
-                            "SaaS billing (deployments dify-saas-billing*) is built from "
-                            "dify-saas; the legacy dify-billing repo/deployment is scaled to 0"
-                        ),
-                    },
-                ],
-                "dify-saas-billing": [{"repo": "dify-saas", "paths": []}],
+                "billing": (
+                    "SaaS billing runs in the dify-saas-billing* deployments, built from "
+                    "langgenius/dify-saas, which is not configured here (no access); the "
+                    "legacy dify-billing repo/deployment is scaled to 0 replicas"
+                ),
+                "dify-saas-billing": (
+                    "built from langgenius/dify-saas, which is not configured here (no access)"
+                ),
+                "dify-saas": "langgenius/dify-saas is not configured here (no access)",
                 "ops": [{"repo": "dify-marketplace", "paths": ["ops/"]}],
                 "ops-backend": [{"repo": "dify-marketplace", "paths": ["ops/"]}],
                 "ops-web": [{"repo": "dify-marketplace", "paths": ["ops/"]}],
-                "gateway": [
-                    {
-                        "repo": "dify-saas",
-                        "paths": [],
-                        "note": (
-                            "the SaaS image langgenius/dify-gateway is built from dify-saas "
-                            "(saas-deploy promotions/config.json); the Enterprise gateway is "
-                            "dify-enterprise server/cmd/gateway/"
-                        ),
-                    },
-                ],
+                "gateway": (
+                    "the SaaS image langgenius/dify-gateway is built from langgenius/dify-saas "
+                    "(saas-deploy promotions/config.json), which is not configured here (no "
+                    "access); the Enterprise gateway lives in dify-enterprise server/cmd/gateway/"
+                ),
                 "sandbox-gateway": [
                     {"repo": "dify-enterprise", "paths": ["server/cmd/sandbox-gateway/"]},
                 ],

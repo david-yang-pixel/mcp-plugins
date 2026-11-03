@@ -278,9 +278,10 @@ def test_sandbox_unavailable_explains_app_runner(monkeypatch, tmp_path):
         )
 
 
-def test_saas_billing_maps_to_dify_saas(monkeypatch):
+def test_dify_saas_is_not_configured(monkeypatch):
     monkeypatch.delenv("SOURCE_MCP_RUNTIME_DEPLOYMENTS", raising=False)
     settings = Settings(_env_file=None)
 
-    assert runtime.configured_deployments(settings, "dify-saas") == ["dify-saas-billing"]
-    assert "dify-gateway" in settings.repo_component_deployments["dify-saas"]
+    assert "dify-saas" not in settings.runtime_deployments
+    assert "dify-saas" not in settings.repo_component_deployments
+    assert "dify-saas-billing" not in settings.gitops_images
