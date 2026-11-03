@@ -383,3 +383,67 @@ def test_on_demand_branch_is_refreshed_on_use_after_ttl(env, monkeypatch):
     path = env["base"] / "dify"
     # Fetched into the remote-tracking namespace, not a local branch.
     assert _git("rev-parse", "refs/remotes/origin/hotfix/1.18.0-fix.4", cwd=path) == moved
+
+
+def _advance_branch(origin: Path, branch: str, text: str) -> str:
+    _git("checkout", "-q", branch, cwd=origin)
+    (origin / "file.txt").write_text(text, encoding="utf-8")
+    _git("commit", "-qam", text.strip(), cwd=origin)
+    _git("checkout", "-q", "main", cwd=origin)
+    return _git("rev-parse", branch, cwd=origin)
+
+
+def test_refresh_repos_refs_finds_branch_in_remote_tracking_namespace(env, monkeypatch):
+    """Bugbot: refresh_repos refs=[branch] reported not_found after a successful fetch."""
+    origin = env["origin"]
+    _git("branch", "hotfix/1.18.0-fix.4", "main", cwd=origin)
+    tip = _advance_branch(origin, "hotfix/1.18.0-fix.4", "hotfix\n")
+    monkeypatch.setenv("SOURCE_MCP_REPOS", "dify")
+    settings = Settings(_env_file=None)
+
+    result = anyio.run(
+        lambda: git_ops.refresh_repos(settings, repos=["dify"], refs=["hotfix/1.18.0-fix.4"])
+    )
+
+    ref_result = result[0]["refs"][0]
+    assert ref_result["status"] == "fetched"
+    assert ref_result["commit"] == tip
+
+    moved = _advance_branch(origin, "hotfix/1.18.0-fix.4", "hotfix again\n")
+    again = anyio.run(
+        lambda: git_ops.refresh_repos(settings, repos=["dify"], refs=["hotfix/1.18.0-fix.4"])
+    )
+    assert again[0]["refs"][0]["status"] == "refreshed"
+    assert again[0]["refs"][0]["commit"] == moved
+
+
+def test_stale_local_branch_without_remote_tracking_ref_is_refetched(env, monkeypatch):
+    """Bugbot: a leftover refs/heads/<branch> hid the remote and skipped the refresh."""
+    origin = env["origin"]
+    path = env["base"] / "dify"
+    _git("branch", "hotfix/1.17.0-fix.1", "main", cwd=origin)
+    # What the old on-demand fetch left behind: a local branch, no origin/ ref.
+    _git("fetch", "-q", "origin", "+refs/heads/hotfix/1.17.0-fix.1:refs/heads/hotfix/1.17.0-fix.1", cwd=path)
+    stale = _git("rev-parse", "refs/heads/hotfix/1.17.0-fix.1", cwd=path)
+    tip = _advance_branch(origin, "hotfix/1.17.0-fix.1", "newer\n")
+    monkeypatch.setenv("SOURCE_MCP_REPOS", "dify")
+    settings = Settings(_env_file=None)
+    git_ops._BRANCH_FETCHED_AT.clear()
+
+    resolved = anyio.run(git_ops.rev_parse, "dify", "hotfix/1.17.0-fix.1", settings)
+
+    assert stale != tip
+    assert resolved == tip
+    assert _git("rev-parse", "refs/remotes/origin/hotfix/1.17.0-fix.1", cwd=path) == tip
+
+
+def test_local_branch_is_used_when_origin_is_unreachable(env, monkeypatch, tmp_path):
+    path = env["base"] / "dify"
+    _git("branch", "local-only", "HEAD", cwd=path)
+    local = _git("rev-parse", "local-only", cwd=path)
+    monkeypatch.setenv("SOURCE_MCP_REPOS", "dify")
+    monkeypatch.setenv("SOURCE_MCP_REPO_URLS", json.dumps({"dify": (tmp_path / "gone").as_uri()}))
+    settings = Settings(_env_file=None)
+    git_ops._BRANCH_FETCHED_AT.clear()
+
+    assert anyio.run(git_ops.rev_parse, "dify", "local-only", settings) == local
