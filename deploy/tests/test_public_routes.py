@@ -13,7 +13,7 @@ import server
 import catalog
 
 REVISION = 'a' * 40
-OAUTH = {'public_paths': ['/authorize', '/token', '/register', '/revoke', '/login/'],
+OAUTH = {'public_paths': ['/authorize', '/token', '/register', '/revoke', '/login', '/login/start'],
          'oauth_metadata': True, 'max_body_size': '40m', 'hostname': 'difyctl-mcp'}
 
 
@@ -54,14 +54,14 @@ class ContractTests(unittest.TestCase):
         self.assertTrue(resolved['oauth_metadata'])
 
     def test_invalid_public_paths_are_rejected(self):
-        for paths in (['/mcp'], ['/mcp/'], ['/health'], ['/'], ['authorize'], ['/../etc'], ['/a//b'],
+        for paths in (['/mcp'], ['/mcp/'], ['/health'], ['/'], ['/login/'], ['authorize'], ['/../etc'], ['/a//b'],
                       ['/Login/'], ['/a;b'], ['/a b'], ['/token', '/token'], ['/x' + str(i) for i in range(17)], '/token'):
             with self.subTest(paths=paths), self.assertRaises(server.DeployError):
                 target(public_paths=paths)
 
     def test_health_parent_is_not_publishable(self):
         with self.assertRaises(server.DeployError):
-            target(health_path='/internal/health', public_paths=['/internal/'])
+            target(health_path='/internal/health', public_paths=['/internal'])
 
     def test_invalid_hostname_body_size_and_oauth_flag(self):
         for extra in ({'hostname': 'Bad_Host'}, {'hostname': 'a' * 64}, {'hostname': 7}, {'max_body_size': '0m'},
@@ -105,7 +105,8 @@ class RenderTests(unittest.TestCase):
             ('=', '/difyctl-mcp/token', 'http://127.0.0.1:28191/token'),
             ('=', '/difyctl-mcp/register', 'http://127.0.0.1:28191/register'),
             ('=', '/difyctl-mcp/revoke', 'http://127.0.0.1:28191/revoke'),
-            ('^~', '/difyctl-mcp/login/', 'http://127.0.0.1:28191/login/'),
+            ('=', '/difyctl-mcp/login', 'http://127.0.0.1:28191/login'),
+            ('=', '/difyctl-mcp/login/start', 'http://127.0.0.1:28191/login/start'),
             ('=', '/.well-known/oauth-protected-resource/difyctl-mcp/mcp',
              'http://127.0.0.1:28191/.well-known/oauth-protected-resource/difyctl-mcp/mcp'),
             ('=', '/.well-known/oauth-authorization-server/difyctl-mcp',
@@ -117,6 +118,8 @@ class RenderTests(unittest.TestCase):
             body = [c['args'] for c in node['children'] if c['name'] == 'client_max_body_size']
             self.assertEqual(body, [['40m']] if node['args'][1] == '/difyctl-mcp/mcp' else [])
         self.assertNotIn('/health', content)
+        # Only exact locations: a ^~ prefix would bypass regex locations anywhere below it.
+        self.assertEqual({n['args'][0] for n in nodes}, {'='})
         self.assertNotIn('location /difyctl-mcp/ ', content)
 
     def test_render_refuses_unvalidated_values(self):
@@ -170,6 +173,12 @@ class NamespaceTests(unittest.TestCase):
             self.check('location /difyctl-mcp/login/ { return 404; }')
         with self.assertRaisesRegex(server.DeployError, 'conflicts'):
             self.check('location /difyctl { return 404; }')
+
+    def test_regex_routes_below_declared_paths_are_not_taken_over(self):
+        # Exact locations only claim their own path; nginx still applies this regex to /difyctl-mcp/login/admin.
+        self.check('location ~ ^/difyctl-mcp/login/admin { return 403; }')
+        with self.assertRaisesRegex(server.DeployError, 'conflicts'):
+            self.check('location ~ ^/difyctl-mcp/login { return 403; }')
 
     def test_other_service_well_known_paths_do_not_conflict(self):
         self.check('location = /.well-known/oauth-authorization-server/other-mcp { return 404; }')

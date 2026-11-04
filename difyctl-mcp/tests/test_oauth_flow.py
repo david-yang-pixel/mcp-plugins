@@ -102,14 +102,18 @@ def test_other_browser_cannot_continue(live):
     response, _ = live.authorize(client)
     path = live.login_path(response)
     assert live.http.get(path).status_code == 403
-    assert live.http.get(path, headers={"Cookie": "difyctl_login=forged"}).status_code == 403
-    page = live.http.get(path, headers={"Cookie": "difyctl_login=" + live.cookie(response)})
+    name = live.cookie(response).split("=", 1)[0]
+    assert live.http.get(path, headers={"Cookie": name + "=forged"}).status_code == 403
+    page = live.http.get(path, headers={"Cookie": live.cookie(response)})
     assert page.status_code == 200
-    # The cookie is bound to this login path and protected from scripts.
-    assert "HttpOnly" in response.headers["set-cookie"] and "Path=/difyctl-mcp/login/" in response.headers["set-cookie"]
+    # The cookie is specific to this pending login and protected from scripts.
+    assert "HttpOnly" in response.headers["set-cookie"] and "Path=/difyctl-mcp/login;" in response.headers["set-cookie"]
     assert "SameSite=lax" in response.headers["set-cookie"]
+    # Another pending login's cookie does not unlock this one.
+    other, _ = live.authorize(client)
+    assert live.http.get(path, headers={"Cookie": name + "=" + live.cookie(other).split("=", 1)[1]}).status_code == 403
     # CSRF: a cross-site form without the token cannot start the Dify login.
-    forged = live.http.post(path + "/start", data={"csrf": "0" * 64}, headers={"Cookie": "difyctl_login=" + live.cookie(response)})
+    forged = live.start(path, "0" * 64, {"Cookie": live.cookie(response)})
     assert forged.status_code == 403
 
 
@@ -117,10 +121,10 @@ def test_untrusted_verification_page_is_not_shown(live):
     control(live.settings, verification_uri="https://phish.example/device")
     client = live.register().json()
     response, _ = live.authorize(client)
-    path, headers = live.login_path(response), {"Cookie": "difyctl_login=" + live.cookie(response)}
+    path, headers = live.login_path(response), {"Cookie": live.cookie(response)}
     import re
     csrf = re.search(r'name="csrf" value="([0-9a-f]+)"', live.http.get(path, headers=headers).text).group(1)
-    live.http.post(path + "/start", data={"csrf": csrf}, headers=headers)
+    live.start(path, csrf, headers)
     page = live.http.get(path, headers=headers)
     assert page.status_code == 400 and "phish.example" not in page.text
 
@@ -178,6 +182,22 @@ def test_revocation_endpoint(live):
                                                "client_secret": client["client_secret"]})
     assert response.status_code == 200
     assert live.rpc(tokens["access_token"], "tools/list").status_code == 401
+
+
+def test_basic_client_authentication_without_form_client_id(live):
+    import base64
+    client, tokens = live.tokens()
+    basic = base64.b64encode(f"{client['client_id']}:{client['client_secret']}".encode()).decode()
+    refreshed = live.http.post("/token", data={"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"]},
+                               headers={"Authorization": "Basic " + basic})
+    assert refreshed.status_code == 200, refreshed.text
+    wrong = base64.b64encode(f"{client['client_id']}:wrong".encode()).decode()
+    assert live.http.post("/token", data={"grant_type": "refresh_token", "refresh_token": refreshed.json()["refresh_token"]},
+                          headers={"Authorization": "Basic " + wrong}).status_code == 401
+    mismatch = live.http.post("/token", data={"grant_type": "refresh_token", "client_id": "someone-else",
+                                              "refresh_token": refreshed.json()["refresh_token"]},
+                              headers={"Authorization": "Basic " + basic})
+    assert mismatch.status_code == 401
 
 
 def test_rate_limit_on_registration(live):

@@ -1,6 +1,8 @@
 """Assemble the MCP server: OAuth endpoints, the Dify login page and the difyctl tools."""
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import subprocess
@@ -9,7 +11,7 @@ import time
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Annotated, Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
 import uvicorn
 from pydantic import Field
@@ -44,7 +46,7 @@ from .store import Store
 log = logging.getLogger("difyctl_mcp")
 MCP_BODY_LIMIT = 36 * 1024 * 1024  # a 25 MB file as base64 plus JSON-RPC framing
 FORM_BODY_LIMIT = 64 * 1024
-RATE_LIMITS = {"/register": (20, 3600), "/token": (60, 60), "/revoke": (60, 60), "/authorize": (30, 60), "/login/": (120, 60)}
+RATE_LIMITS = {"/register": (20, 3600), "/token": (60, 60), "/revoke": (60, 60), "/authorize": (30, 60), "/login": (120, 60)}
 INSTRUCTIONS = """difyctl for Dify, running as the Dify account that authorized this connection.
 Find operations with difyctl_help (start with no query), then run them with the tool matching their effect:
 difyctl_read (GET), difyctl_write (POST/PUT/PATCH), difyctl_destructive (DELETE, reset, restore). Confirm
@@ -64,7 +66,7 @@ class RateLimit:
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
         if scope["type"] == "http":
             path = scope.get("path", "")
-            rule = next((key for key in RATE_LIMITS if path == key or (key.endswith("/") and path.startswith(key))), None)
+            rule = next((key for key in RATE_LIMITS if path == key or path.startswith(key + "/")), None)
             if rule:
                 headers = dict(scope.get("headers") or [])
                 # The port is published on 127.0.0.1 only, so X-Real-IP comes from the local Nginx.
@@ -91,6 +93,39 @@ def cors(app: ASGIApp, methods: list[str]) -> ASGIApp:
 
 def limited(endpoint) -> ASGIApp:
     return RequestBodyLimitMiddleware(request_response(endpoint), FORM_BODY_LIMIT)
+
+
+def basic_client_id(handler):
+    """RFC 6749 §2.3.1: with Basic credentials the client id need not repeat in the body.
+
+    The SDK's token/revocation request models require a form client_id, so copy it from the
+    Basic header when the body omits it. The secret is still verified by the authenticator.
+    """
+    async def endpoint(request: Request) -> Response:
+        header = request.headers.get("authorization", "")
+        if header.startswith("Basic ") and "application/x-www-form-urlencoded" in request.headers.get("content-type", ""):
+            body = await request.body()
+            fields = parse_qsl(body.decode("utf-8", "replace"), keep_blank_values=True)
+            if not any(key == "client_id" for key, _ in fields):
+                try:
+                    user = unquote(base64.b64decode(header[6:], validate=True).decode().partition(":")[0])
+                except (ValueError, UnicodeDecodeError, binascii.Error):
+                    user = ""
+                if user:
+                    body = urlencode([*fields, ("client_id", user)]).encode()
+                    sent = False
+
+                    async def receive():
+                        nonlocal sent
+                        if sent:
+                            return {"type": "http.disconnect"}
+                        sent = True
+                        return {"type": "http.request", "body": body, "more_body": False}
+                    scope = {**request.scope, "headers": [(k, v) for k, v in request.scope["headers"] if k != b"content-length"]
+                             + [(b"content-length", str(len(body)).encode())]}
+                    request = Request(scope, receive)
+        return await handler(request)
+    return endpoint
 
 
 def tool_result(payload: dict) -> CallToolResult:
@@ -150,14 +185,14 @@ def create_app(settings: Settings | None = None, *, runner: Runner | None = None
         Route("/.well-known/oauth-authorization-server" + issuer_path,
               endpoint=cors(request_response(MetadataHandler(metadata).handle), ["GET", "OPTIONS"]), methods=["GET", "OPTIONS"]),
         Route("/authorize", endpoint=limited(authorize), methods=["GET", "POST"]),
-        Route("/token", endpoint=cors(limited(TokenHandler(provider, authenticator).handle), ["POST", "OPTIONS"]),
+        Route("/token", endpoint=cors(limited(basic_client_id(TokenHandler(provider, authenticator).handle)), ["POST", "OPTIONS"]),
               methods=["POST", "OPTIONS"]),
         Route("/register", endpoint=cors(limited(RegistrationHandler(provider, registration).handle), ["POST", "OPTIONS"]),
               methods=["POST", "OPTIONS"]),
-        Route("/revoke", endpoint=cors(limited(RevocationHandler(provider, authenticator).handle), ["POST", "OPTIONS"]),
+        Route("/revoke", endpoint=cors(limited(basic_client_id(RevocationHandler(provider, authenticator).handle)), ["POST", "OPTIONS"]),
               methods=["POST", "OPTIONS"]),
-        Route("/login/{pending_id}", endpoint=login.show, methods=["GET"]),
-        Route("/login/{pending_id}/start", endpoint=limited(login.start), methods=["POST"]),
+        Route("/login", endpoint=login.show, methods=["GET"]),
+        Route("/login/start", endpoint=limited(login.start), methods=["POST"]),
         Route("/health", endpoint=health, methods=["GET"]),
     ]
     hosts = ["127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*", "[::1]", "[::1]:*"]

@@ -33,12 +33,12 @@ MCP 客户端 → Nginx (HTTPS) → difyctl-mcp 容器 (0.0.0.0:8000, bridge) �
 | `/.well-known/oauth-protected-resource/difyctl-mcp/mcp` | RFC 9728 资源元数据 |
 | `/.well-known/oauth-authorization-server/difyctl-mcp` | RFC 8414 授权服务器元数据，issuer 为 `https://zendesk.smlershou.top/difyctl-mcp` |
 | `/difyctl-mcp/authorize`、`/token`、`/register`、`/revoke` | 授权、换令牌、动态注册、撤销 |
-| `/difyctl-mcp/login/<id>` | Dify 登录页 |
+| `/difyctl-mcp/login`、`/difyctl-mcp/login/start` | Dify 登录页（`?request=<id>`）及“继续”表单；均为精确路由 |
 
 授权流程：
 
 1. 客户端注册（只接受 `MCP_ALLOWED_REDIRECT_URIS` 中的回调），发起带 PKCE S256 的 `/authorize`。
-2. `/authorize` 保存待授权记录，设置绑定该记录路径的 `HttpOnly`、`Secure`、`SameSite=Lax` Cookie，并跳转到登录页。换一个浏览器打开登录页会被拒绝。
+2. `/authorize` 保存待授权记录，设置该记录专属的 `HttpOnly`、`Secure`、`SameSite=Lax` Cookie，并跳转到登录页。换一个浏览器打开登录页会被拒绝。
 3. 登录页显示客户端名称、回调域名和申请的权限。用户点“继续”（POST + CSRF）后，服务创建新的配置目录并运行 `difyctl login --server <DIFY_SERVER> --no-browser --no-wait --no-keyring --json`。只显示位于 `DIFY_SERVER` 同源的验证页。
 4. 页面显示验证码和验证页链接，每 5 秒自动刷新；服务端运行 `difyctl login --resume --json`，同一待授权记录 5 秒内最多一次。
 5. 批准后运行 `describe account` 和 `get account session`，按 `current` 标记或 `device_label = difyctl-mcp` 取登录到期时间，找不到时按 14 天计算。

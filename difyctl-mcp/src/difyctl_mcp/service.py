@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import re
+import secrets
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -217,7 +218,9 @@ class Service:
                             args += ["--only", name]
                     if kind == "file":
                         (account.workdir / "downloads").mkdir(exist_ok=True, mode=0o700)
-                        args += ["--output", str(account.workdir / "downloads" / f"{op}-{int(time.time())}")]
+                        # A unique name per call: concurrent downloads of the same op must not share a file.
+                        name = f"{op}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{secrets.token_hex(6)}"
+                        args += ["--output", str(account.workdir / "downloads" / name)]
                     run = await self._run(account, args, stdin=payload, timeout=timeout)
             except PolicyError as exc:
                 raise Failure(exc.code, exc.message, **exc.extra) from None

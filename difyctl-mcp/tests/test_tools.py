@@ -97,6 +97,15 @@ def test_timeout_interrupts_and_returns_run_id(live):
     assert hard["timed_out"] is True and hard["outcome"] == "failed"
 
 
+def test_file_downloads_get_distinct_output_paths(live):
+    _, tokens = live.tokens()
+    for _ in range(2):
+        assert live.call(tokens["access_token"], "difyctl_read", {"operation": "download.thing"})["outcome"] == "success"
+    outputs = [c["args"][c["args"].index("--output") + 1] for c in op_calls(live.settings, ["download", "thing"])]
+    assert len(outputs) == 2 and outputs[0] != outputs[1]
+    assert all(Path(o).parent == (live.settings.users_dir / "acc-1" / "work" / "downloads") for o in outputs)
+
+
 def test_streaming_returns_task_id_for_stop_run(live):
     _, tokens = live.tokens()
     token = tokens["access_token"]

@@ -4,7 +4,7 @@
     "auth_key": "DIFYCTL_MCP_API_KEY",
     "health_path": "/health",
     "hostname": "difyctl-mcp",
-    "public_paths": ["/authorize", "/token", "/register", "/revoke", "/login/"],
+    "public_paths": ["/authorize", "/token", "/register", "/revoke", "/login", "/login/start"],
     "oauth_metadata": true,
     "max_body_size": "40m",
     "mounts": [

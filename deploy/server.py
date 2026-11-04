@@ -34,7 +34,8 @@ PUBLIC_ORIGIN = "https://zendesk.smlershou.top"
 NGINX_ROUTES = Path("/etc/nginx/mcp-plugins.d")
 NGINX_SITE = Path("/etc/nginx/sites-enabled/zd-agent.conf")
 AUTO_PORTS = range(20000, 30000)
-PUBLIC_PATH = re.compile(r"/[a-z0-9][a-z0-9_-]*(?:/[a-z0-9][a-z0-9_-]*)*/?\Z")
+# Exact paths only: a prefix route would take over regex locations anywhere in its subtree.
+PUBLIC_PATH = re.compile(r"/[a-z0-9][a-z0-9_-]*(?:/[a-z0-9][a-z0-9_-]*)*\Z")
 HOSTNAME = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z")
 BODY_SIZE = re.compile(r"[1-9][0-9]{0,3}[km]?\Z")
 MAX_PUBLIC_PATHS = 16
@@ -89,7 +90,7 @@ def normalize_target(target):
         raise DeployError("Invalid public path contract")
     for p in paths:
         # /mcp is always published; health and other management endpoints are never published.
-        if p.rstrip('/') == '/mcp' or p.rstrip('/') == result["health_path"].rstrip('/') or result["health_path"].startswith(p.rstrip('/') + '/'):
+        if p == '/mcp' or p == result["health_path"].rstrip('/') or result["health_path"].startswith(p + '/'):
             raise DeployError("Public paths may not repeat /mcp or expose the health endpoint")
     if type(result["oauth_metadata"]) is not bool:
         raise DeployError("Invalid OAuth metadata contract")
@@ -485,7 +486,7 @@ def route_paths(service, target=None):
     for path in target.get('public_paths') or []:
         if not isinstance(path, str) or not PUBLIC_PATH.fullmatch(path):
             raise DeployError('Invalid public path contract')
-        routes.append(('^~' if path.endswith('/') else '=', '/' + service + path, path))
+        routes.append(('=', '/' + service + path, path))
     if target.get('oauth_metadata'):
         for path in ('/.well-known/oauth-protected-resource/' + service + '/mcp',
                      '/.well-known/oauth-authorization-server/' + service):

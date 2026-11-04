@@ -117,12 +117,12 @@ Secrets 通过 GitHub 的动态索引逐项引用，每个部署任务只接收�
 
 ```json
 "hostname": "difyctl-mcp",
-"public_paths": ["/authorize", "/token", "/register", "/revoke", "/login/"],
+"public_paths": ["/authorize", "/token", "/register", "/revoke", "/login", "/login/start"],
 "oauth_metadata": true,
 "max_body_size": "40m"
 ```
 
-- `public_paths`：在 `/<服务名>/` 下额外公开的路径，以 `/` 结尾为前缀匹配（`^~`），否则精确匹配，转发到容器内同名路径；最多 16 项，不能是 `/mcp` 或健康接口。
+- `public_paths`：在 `/<服务名>/` 下额外公开的精确路径（`location =`），转发到容器内同名路径；最多 16 项，不能是 `/mcp` 或健康接口。不支持前缀匹配：`^~` 前缀会跳过正则路由，可能接管子树下其他项目的路由。
 - `oauth_metadata`：额外公开本服务自己的 `/.well-known/oauth-protected-resource/<服务名>/mcp` 和 `/.well-known/oauth-authorization-server/<服务名>`。部署和外部复核会校验其中的 `resource`、`issuer` 和端点都属于本服务。
 - `hostname`：固定容器主机名（`--hostname`），更新时检查漂移，修改时就地重建，不需要迁移。
 - `max_body_size`：只作用于 `/<服务名>/mcp` 的 `client_max_body_size`。

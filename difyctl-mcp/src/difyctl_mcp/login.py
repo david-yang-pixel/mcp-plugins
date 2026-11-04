@@ -30,7 +30,7 @@ from .service import Service
 from .store import digest
 
 log = logging.getLogger("difyctl_mcp.login")
-COOKIE = "difyctl_login"
+COOKIE = "difyctl_login_"
 USER_CODE = re.compile(r"[A-Za-z0-9-]{4,32}")
 PENDING_ID = re.compile(r"[A-Za-z0-9_-]{20,64}")
 EXPIRY_FIELDS = ("expires_at", "expire_at", "expired_at", "expires", "expiry")
@@ -104,19 +104,21 @@ class Login:
         self.hostname = socket.gethostname()
 
     # Cookie binding ------------------------------------------------------------------
-    def cookie_path(self, pending_id: str) -> str:
-        return f"{self.settings.base_path}/login/{pending_id}"
+    # Login pages live at fixed paths (/login?request=<id>, /login/start), so Nginx publishes only exact routes.
+    def page_url(self, pending_id: str) -> str:
+        return f"{self.settings.base_path}/login?request={pending_id}"
 
     def attach_cookie(self, response: Response, pending_id: str, cookie: str) -> None:
-        response.set_cookie(COOKIE, cookie, max_age=self.settings.pending_ttl_seconds, path=self.cookie_path(pending_id),
-                            secure=self.settings.secure_cookies, httponly=True, samesite="lax")
+        response.set_cookie(COOKIE + pending_id, cookie, max_age=self.settings.pending_ttl_seconds,
+                            path=f"{self.settings.base_path}/login", secure=self.settings.secure_cookies,
+                            httponly=True, samesite="lax")
 
-    def load(self, request: Request):
-        pending_id = request.path_params.get("pending_id", "")
+    def load(self, request: Request, pending_id):
+        pending_id = pending_id if isinstance(pending_id, str) else ""
         pending = self.store.pending(pending_id) if PENDING_ID.fullmatch(pending_id) else None
         if pending is None or pending["expires_at"] < int(time.time()):
             return None, None, page("授权请求已失效", "<p>此授权请求不存在或已过期（15 分钟）。请回到 MCP 客户端重新连接。</p>", status=404)
-        cookie = request.cookies.get(COOKIE, "")
+        cookie = request.cookies.get(COOKIE + pending_id, "")
         if not cookie or not hmac.compare_digest(digest(cookie), pending["cookie_hash"]):
             return None, None, page("无法继续授权", "<p>只有发起授权的浏览器才能继续。请在原来的浏览器中打开，"
                                     "或回到 MCP 客户端重新连接。</p>", status=403)
@@ -137,14 +139,15 @@ class Login:
                 '在 Dify 页面批准前，请核对页面上显示的账户和工作空间。</div>')
 
     async def show(self, request: Request) -> Response:
-        pending, cookie, error = self.load(request)
+        pending, cookie, error = self.load(request, request.query_params.get("request"))
         if error:
             return error
         details = await self.describe(pending)
         status = pending["status"]
         if status == "new":
-            action = html.escape(self.cookie_path(pending["id"]) + "/start")
+            action = html.escape(self.settings.base_path + "/login/start")
             return page("连接 difyctl MCP", details + f'<form method="post" action="{action}">'
+                        f'<input type="hidden" name="request" value="{html.escape(pending["id"])}">'
                         f'<input type="hidden" name="csrf" value="{csrf_token(cookie, pending["id"])}">'
                         '<button type="submit">继续，登录 Dify</button></form>')
         if status == "waiting":
@@ -174,14 +177,14 @@ class Login:
 
     # Device flow ------------------------------------------------------------------------
     async def start(self, request: Request) -> Response:
-        pending, cookie, error = self.load(request)
+        form = await request.form()
+        pending, cookie, error = self.load(request, form.get("request"))
         if error:
             return error
-        form = await request.form()
         supplied = form.get("csrf")
         if not isinstance(supplied, str) or not hmac.compare_digest(supplied, csrf_token(cookie, pending["id"])):
             return page("无法继续授权", "<p>请求校验失败，请刷新页面后重试。</p>", status=403)
-        back = RedirectResponse(self.cookie_path(pending["id"]), status_code=303)
+        back = RedirectResponse(self.page_url(pending["id"]), status_code=303)
         if not self.store.update_pending(pending["id"], "new", status="starting"):
             return back
         config_dir = self.settings.sessions_dir / secrets.token_hex(16)

@@ -93,22 +93,27 @@ class Live:
         return response, verifier
 
     def login_path(self, response):
-        location = response.headers["location"]
-        return urlsplit(location).path.replace("/difyctl-mcp", "", 1)
+        location = urlsplit(response.headers["location"])
+        return location.path.replace("/difyctl-mcp", "", 1) + "?" + location.query
 
     def cookie(self, response):
-        return re.search(r"difyctl_login=([^;]+)", response.headers["set-cookie"]).group(1)
+        """The Cookie header value for this pending login: difyctl_login_<id>=<secret>."""
+        return re.search(r"(difyctl_login_[A-Za-z0-9_-]+=[^;]+)", response.headers["set-cookie"]).group(1)
+
+    def start(self, path, csrf, headers):
+        request = parse_qs(urlsplit(path).query)["request"][0]
+        return self.http.post("/login/start", data={"request": request, "csrf": csrf}, headers=headers)
 
     def approve(self, client, scope=None, email="alice@example.com", account_id="acc-1"):
         """Drive the whole browser step and return (code, verifier, cookie, login path)."""
         response, verifier = self.authorize(client, scope)
         assert response.status_code == 302, response.text
         path, cookie = self.login_path(response), self.cookie(response)
-        headers = {"Cookie": "difyctl_login=" + cookie}
+        headers = {"Cookie": cookie}
         page = self.http.get(path, headers=headers)
         assert page.status_code == 200 and "Test client" in page.text and "client.example" in page.text
         csrf = re.search(r'name="csrf" value="([0-9a-f]+)"', page.text).group(1)
-        started = self.http.post(path + "/start", data={"csrf": csrf}, headers=headers)
+        started = self.start(path, csrf, headers)
         assert started.status_code == 303
         waiting = self.http.get(path, headers=headers)
         assert "ABCD-1234" in waiting.text, waiting.text

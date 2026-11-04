@@ -136,7 +136,7 @@ class Provider:
         holder = authorize_cookie.get()
         if holder is not None:
             holder["pending"], holder["cookie"] = pending_id, cookie
-        return f"{self.settings.issuer}/login/{pending_id}"
+        return f"{self.settings.issuer}/login?request={pending_id}"
 
     def issue_code(self, pending: dict, params: dict, account_id: str) -> str:
         code = secrets.token_urlsafe(32)
@@ -228,23 +228,26 @@ class HashedClientAuthenticator(ClientAuthenticator):
     async def authenticate_request(self, request: Request) -> OAuthClientInformationFull:
         form = await request.form()
         client_id = form.get("client_id")
+        supplied = None
+        header = request.headers.get("Authorization", "")
+        if header.startswith("Basic "):
+            # RFC 6749 §2.3.1: Basic credentials may carry the client id without repeating it in the body.
+            try:
+                user, separator, password = base64.b64decode(header[6:], validate=True).decode().partition(":")
+            except (ValueError, UnicodeDecodeError, binascii.Error):
+                raise AuthenticationError("Invalid Basic authentication header") from None
+            if not separator or not user:
+                raise AuthenticationError("Invalid Basic authentication header")
+            if client_id is not None and unquote(user) != client_id:
+                raise AuthenticationError("Client ID mismatch in Basic auth")
+            client_id, supplied = unquote(user), unquote(password)
+        elif isinstance(form.get("client_secret"), str):
+            supplied = form.get("client_secret")
         if not isinstance(client_id, str) or not client_id:
             raise AuthenticationError("Missing client_id")
         client = await self.provider.get_client(client_id)
         if client is None:
             raise AuthenticationError("Invalid client_id")
-        supplied = None
-        header = request.headers.get("Authorization", "")
-        if header.startswith("Basic "):
-            try:
-                user, _, password = base64.b64decode(header[6:]).decode().partition(":")
-            except (ValueError, UnicodeDecodeError, binascii.Error):
-                raise AuthenticationError("Invalid Basic authentication header") from None
-            if unquote(user) != client_id:
-                raise AuthenticationError("Client ID mismatch in Basic auth")
-            supplied = unquote(password)
-        elif isinstance(form.get("client_secret"), str):
-            supplied = form.get("client_secret")
         if not self.provider.secret_matches(client_id, supplied):
             raise AuthenticationError("Invalid client credentials")
         return client
