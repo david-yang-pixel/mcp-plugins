@@ -34,6 +34,7 @@ MCP 客户端 → Nginx (HTTPS) → difyctl-mcp 容器 (0.0.0.0:8000, bridge) �
 | `/.well-known/oauth-authorization-server/difyctl-mcp` | RFC 8414 授权服务器元数据，issuer 为 `https://zendesk.smlershou.top/difyctl-mcp` |
 | `/difyctl-mcp/authorize`、`/token`、`/register`、`/revoke` | 授权、换令牌、动态注册、撤销 |
 | `/difyctl-mcp/login`、`/difyctl-mcp/login/start` | Dify 登录页（`?request=<id>`）及“继续”表单；均为精确路由 |
+| `/difyctl-mcp/login/renew` | 续期页：只续期已保存的 Dify 登录，不签发授权码 |
 
 授权流程：
 
@@ -69,6 +70,20 @@ MCP 客户端 → Nginx (HTTPS) → difyctl-mcp 容器 (0.0.0.0:8000, bridge) �
 客户端未申请 scope 时授予不超过 `DIFYCTL_MAX_EFFECT` 的全部权限（登录页会显示）。
 
 部署器的冒烟检查使用 `DIFYCTL_MCP_API_KEY`：它只能列出工具，没有账号和 scope，任何工具调用都会被拒绝。
+
+## 服务令牌（不支持 OAuth 的客户端）
+
+openconnector 的 Custom Remote MCP 这类客户端只能发送固定的认证头，不能走 OAuth。服务令牌就是给它们用的固定凭据：
+
+1. 绑定的 Dify 账号先用浏览器登录一次，登录入口可以是续期页 `https://zendesk.smlershou.top/difyctl-mcp/login/renew`，也可以是任何 OAuth 客户端。
+2. 配置 Secret `MCP_DIFYCTL_MCP__DIFYCTL_MCP_SERVICE_TOKEN`（至少 32 个字符的随机串）和 `MCP_DIFYCTL_MCP__DIFYCTL_MCP_SERVICE_ACCOUNT_EMAIL`（绑定账号的邮箱，必须在 `MCP_ALLOWED_EMAILS` 中）。权限范围由 `DIFYCTL_MCP_SERVICE_SCOPE` 决定，默认 `destructive`（全部权限），且不超过 `DIFYCTL_MAX_EFFECT`。
+3. 客户端地址填 `https://zendesk.smlershou.top/difyctl-mcp/mcp`，认证头填 `Authorization: Bearer <服务令牌>`。
+
+服务令牌绑定的是账号，不是某一次登录：这个账号在任何地方重新授权后，服务令牌都会自动改用最新的 Dify 登录，令牌本身不用更换。
+
+Dify 登录 14 天到期，不能延长，也没有 refresh token，所以无法全自动续期，必须有人在 Dify 网页上重新批准。到期前 3 天起，每次工具结果都会附带续期提醒和链接。到期，或 Dify 报告登录失效后，工具返回 `dify_login_required` 和 `renew_url`，不再启动 difyctl。打开续期页在 Dify 批准即可，续期页不会向任何客户端签发授权码。
+
+服务令牌相当于该账号的长期凭据，泄露后可以一直以这个账号的身份操作，直到更换这个 Secret 并重新部署。部署冒烟检查用的 `DIFYCTL_MCP_API_KEY` 与服务令牌必须不同。
 
 ## 工具
 
@@ -135,6 +150,8 @@ MCP 客户端 → Nginx (HTTPS) → difyctl-mcp 容器 (0.0.0.0:8000, bridge) �
 | `MCP_ALLOWED_REDIRECT_URIS` | runtime.json | 允许的回调地址（空格或逗号分隔）。`http://localhost/callback` 这类不带端口的 loopback 地址按 RFC 8252 匹配任意端口 |
 | `MCP_ALLOWED_EMAILS` | Secret `MCP_DIFYCTL_MCP__MCP_ALLOWED_EMAILS`（必填） | 允许登录的 Dify 邮箱，默认拒绝 |
 | `DIFYCTL_MCP_API_KEY` | Secret `MCP_DIFYCTL_MCP__DIFYCTL_MCP_API_KEY`（必填） | 部署冒烟检查用，只能列出工具 |
+| `DIFYCTL_MCP_SERVICE_TOKEN`、`DIFYCTL_MCP_SERVICE_ACCOUNT_EMAIL` | Secret（可选，需同时设置） | 服务令牌及其绑定的 Dify 账号邮箱，见“服务令牌” |
+| `DIFYCTL_MCP_SERVICE_SCOPE` | runtime.json | 服务令牌的权限：`read`、`write` 或 `destructive`（默认） |
 | `MCP_STATIC_CLIENT_ID`、`MCP_STATIC_CLIENT_SECRET` | Secret（可选） | 不支持动态注册的客户端使用的预注册 client；回调地址同 `MCP_ALLOWED_REDIRECT_URIS` |
 | `DIFY_SERVER` | runtime.json | 默认 `https://cloud.dify.ai` |
 | `DIFYCTL_MAX_EFFECT` | runtime.json | 默认 `destructive`；更低时不注册更高等级的工具，也不授予对应 scope |

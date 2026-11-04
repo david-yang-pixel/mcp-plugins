@@ -239,6 +239,7 @@ def create_app(settings: Settings | None = None, *, runner: Runner | None = None
               methods=["POST", "OPTIONS"]),
         Route("/login", endpoint=login.show, methods=["GET"]),
         Route("/login/start", endpoint=limited(login.start), methods=["POST"]),
+        Route("/login/renew", endpoint=login.renew, methods=["GET"]),
         Route("/health", endpoint=health, methods=["GET"]),
     ]
     hosts = ["127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*", "[::1]", "[::1]:*"]

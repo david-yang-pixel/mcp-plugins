@@ -42,6 +42,9 @@ class Settings:
     dify_server: str = "https://cloud.dify.ai"
     dify_version: str = "1.18.0"
     static_client_id: str = ""
+    service_token: str = ""
+    service_email: str = ""
+    service_scope: str = "destructive"
     static_client_secret: str = ""
     max_effect: str = "destructive"
     timeout_seconds: int = 90
@@ -83,6 +86,9 @@ class Settings:
             dify_version=env.get("DIFY_VERSION", "1.18.0"),
             static_client_id=env.get("MCP_STATIC_CLIENT_ID", ""),
             static_client_secret=env.get("MCP_STATIC_CLIENT_SECRET", ""),
+            service_token=env.get("DIFYCTL_MCP_SERVICE_TOKEN", ""),
+            service_email=env.get("DIFYCTL_MCP_SERVICE_ACCOUNT_EMAIL", "").strip().lower(),
+            service_scope=env.get("DIFYCTL_MCP_SERVICE_SCOPE", "destructive") or "destructive",
             max_effect=env.get("DIFYCTL_MAX_EFFECT", "destructive") or "destructive",
             timeout_seconds=_int(env, "DIFYCTL_TIMEOUT_SECONDS", 90, 1, 3600),
             max_timeout_seconds=_int(env, "DIFYCTL_MAX_TIMEOUT_SECONDS", 600, 1, 3600),
@@ -108,6 +114,14 @@ class Settings:
             loopback = public.hostname in ("127.0.0.1", "localhost", "::1")
             if (public.scheme != "https" and not loopback) or not public.netloc or public.query or public.fragment:
                 raise ValueError("MCP_PUBLIC_URL must be an https URL without query or fragment")
+        if self.service_scope not in LEVELS:
+            raise ValueError("DIFYCTL_MCP_SERVICE_SCOPE must be read, write or destructive")
+        if bool(self.service_token) != bool(self.service_email):
+            raise ValueError("DIFYCTL_MCP_SERVICE_TOKEN and DIFYCTL_MCP_SERVICE_ACCOUNT_EMAIL must be set together")
+        if self.service_token and len(self.service_token) < 32:
+            raise ValueError("DIFYCTL_MCP_SERVICE_TOKEN must be at least 32 characters")
+        if self.service_token and self.service_token == self.api_key:
+            raise ValueError("DIFYCTL_MCP_SERVICE_TOKEN must differ from DIFYCTL_MCP_API_KEY")
         if self.static_client_secret and not self.static_client_id:
             raise ValueError("MCP_STATIC_CLIENT_SECRET requires MCP_STATIC_CLIENT_ID")
 
@@ -135,6 +149,16 @@ class Settings:
     @property
     def secure_cookies(self) -> bool:
         return urlsplit(self.public_url).scheme == "https"
+
+    @property
+    def renew_url(self) -> str:
+        return self.public_url + "/login/renew"
+
+    @property
+    def service_scopes(self) -> list[str]:
+        """Scopes of the service token: its configured effect, capped by DIFYCTL_MAX_EFFECT."""
+        level = min(LEVELS[self.service_scope], self.max_level)
+        return [SCOPES[name] for name, value in LEVELS.items() if value <= level]
 
     @property
     def max_level(self) -> int:

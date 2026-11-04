@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .files import STORAGE_LOCK, check_quota, remove_if_over_quota, remove_tree, save_output, workdir
 from .policy import (TOOL_FOR_LEVEL, PolicyError, check_files, check_input, classify, effect_name, tool_for, words)
+from .oauth import SERVICE_CLIENT
 from .runner import Run, Runner, RunnerBusy, redact_value
 from .settings import LEVELS, SCOPES, Settings
 from .store import Store
@@ -143,7 +144,17 @@ class Service:
         self.descriptors: dict[tuple[str, tuple[str, ...]], tuple[float, dict]] = {}
 
     # Identity ------------------------------------------------------------------
+    def renewal(self) -> Failure:
+        return Failure("dify_login_required",
+                       f"The service token's Dify account ({self.settings.service_email}) has no valid Dify login.",
+                       next_step=f"Open {self.settings.renew_url} in a browser and approve the Dify login as "
+                                 f"{self.settings.service_email}; the service token then works again unchanged.",
+                       renew_url=self.settings.renew_url)
+
     def account(self, token, required_level: int) -> Account:
+        service = token is not None and token.client_id == SERVICE_CLIENT
+        if service and not token.subject:
+            raise self.renewal()
         if token is None or not token.subject:
             raise Failure("oauth_required", "This tool needs an OAuth access token issued after a Dify login.")
         level = min(token_level(token.scopes), self.settings.max_level)
@@ -151,6 +162,8 @@ class Service:
             raise Failure("insufficient_scope", f"Token scope does not allow {effect_name(required_level)} tools.",
                           next_step="Reconnect and approve the " + SCOPES[effect_name(required_level)] + " scope.")
         user = self.store.user(token.subject)
+        if service and (not user or not user["config_dir"] or user["session_expires_at"] <= int(time.time())):
+            raise self.renewal()
         if not user or not user["config_dir"]:
             raise Failure("not_logged_in", "No Dify login is stored for this account.",
                           next_step="Reconnect this MCP server to authorize again.")
@@ -158,8 +171,12 @@ class Service:
                        workdir(self.settings.users_dir, token.subject), user["session_expires_at"], level)
 
     def end_session(self, account: Account) -> None:
-        """Dify rejected the stored login: revoke all MCP tokens so the next request gets 401."""
+        """Dify rejected the stored login: revoke all MCP tokens so the next request gets 401.
+
+        The login is also marked expired, so the service token reports the renewal link instead of retrying.
+        """
         self.store.revoke_account(account.account_id)
+        self.store.end_session(account.account_id)
         self.clear_descriptors(account.account_id)
 
     def clear_descriptors(self, account_id: str) -> None:
@@ -274,6 +291,10 @@ class Service:
                "next_step": None, "notices": run.notices[-20:], "timed_out": run.timed_out}
         if run.truncated:
             out["notices"].append("Output exceeded the capture limit and was truncated.")
+        remaining = account.session_expires_at - int(time.time())
+        if 0 < remaining < WARN_BEFORE_SECONDS:
+            out["notices"].append(f"The Dify login of {account.email} expires in {remaining // 3600} hours and cannot be "
+                                  f"extended: open {self.settings.renew_url} and approve a new Dify login before then.")
         if run.exit_code != 0 and not run.timed_out:
             out["outcome"] = "failed"
         elif needs_attention(result) or run.timed_out:
@@ -382,7 +403,7 @@ class Service:
         warnings = []
         if remaining < WARN_BEFORE_SECONDS:
             warnings.append(f"The Dify login expires in {max(remaining, 0) // 3600} hours; Dify logins cannot be "
-                            "extended, so reconnect and approve again before it ends.")
+                            f"extended, so open {self.settings.renew_url} (or reconnect) and approve again before it ends.")
         if client and server and client != server:
             warnings.append(f"difyctl {client} differs from the Dify server {server}; operations may be missing or changed.")
         return {"outcome": "needs_attention" if warnings else "success", "exit_code": 0,
