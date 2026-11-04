@@ -191,7 +191,8 @@ def difyctl_version(binary: str, home: Path) -> str | None:
 def create_app(settings: Settings | None = None, *, runner: Runner | None = None) -> ASGIApp:
     settings = settings or Settings.from_env()
     store = Store(settings.database)
-    runner = runner or Runner(settings.difyctl_bin, settings.home_dir, max_concurrent=settings.max_concurrent_runs)
+    runner = runner or Runner(settings.difyctl_bin, settings.home_dir, max_concurrent=settings.max_concurrent_runs,
+                              max_login=settings.max_concurrent_logins)
     service = Service(settings, store, runner)
     provider = Provider(settings, store)
     login = Login(service, provider)

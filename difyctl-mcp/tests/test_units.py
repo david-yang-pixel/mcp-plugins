@@ -329,10 +329,23 @@ def test_concurrency_limits_fail_fast(tmp_path):
         await asyncio.sleep(0.05)
         with pytest.raises(RunnerBusy):
             await runner.run(["0"], config_dir=tmp_path)
-        unlimited = await runner.run(["0"], config_dir=tmp_path, limited=False)
+        approved = await runner.run(["0"], config_dir=tmp_path, pool="approved")
         await first
-        return unlimited
+        return approved
     assert asyncio.run(global_limit()).exit_code == 0 and runner.active == 0
+
+    # Login steps have their own global pool: tool load cannot block them, nor they the tools.
+    logins = Runner("/bin/sleep", tmp_path, max_concurrent=1, max_login=1)
+
+    async def login_limit():
+        first = asyncio.create_task(logins.run(["1"], config_dir=tmp_path, pool="login"))
+        await asyncio.sleep(0.05)
+        with pytest.raises(RunnerBusy):
+            await logins.run(["0"], config_dir=tmp_path, pool="login")
+        tool = await logins.run(["0"], config_dir=tmp_path)
+        await first
+        return tool
+    assert asyncio.run(login_limit()).exit_code == 0 and logins.login_active == 0
 
 
 def test_cleanup_during_completion_never_adopts_a_removed_login(tmp_path):
@@ -388,7 +401,8 @@ def test_cleanup_gives_a_completing_login_a_grace_period(tmp_path):
 
 def test_storage_quotas_are_enforced_before_writing(tmp_path):
     users = tmp_path / "users"
-    quota = files.Quota(users, account_bytes=100, account_files=3, total_bytes=150)
+    D = files.DIRECTORY_COST  # users/acc, users/acc/work, users/other, users/other/work count as directories
+    quota = files.Quota(users, account_bytes=100, account_files=3, total_bytes=150 + 4 * D)
     work = files.workdir(users, "acc")
     files.put_file(work, "a.txt", "x" * 60, "text", False, 1024, 60, quota)
     with pytest.raises(PolicyError, match="limited to"):
@@ -494,3 +508,51 @@ def test_large_mcp_requests_are_bounded_before_the_body_is_read(tmp_path):
         await asyncio.gather(first, second, small)
     asyncio.run(scenario())
     assert responses == [503, 503] and len(read) == 3 and limiter.active == 0 and not limiter.per_account
+
+
+def test_directories_count_against_the_quota_and_depth_is_capped(tmp_path):
+    users = tmp_path / "users"
+    quota = files.Quota(users, account_bytes=3 * files.DIRECTORY_COST, account_files=1000, total_bytes=10 ** 9)
+    work = files.workdir(users, "acc")
+    files.put_file(work, "a/b/x.txt", "1", "text", False, 1024, 60, quota)   # two directories, one file
+    assert files.usage(work) == (2 * files.DIRECTORY_COST + 1, 3)
+    with pytest.raises(PolicyError, match="limited to"):
+        files.put_file(work, "c/d/e/y.txt", "1", "text", False, 1024, 60, quota)
+    with pytest.raises(PolicyError, match="at most 8 segments"):
+        files.relative_path("/".join(["d"] * 9))
+    files.relative_path("/".join(["d"] * 8))
+
+
+def test_client_registrations_are_bounded_and_reclaimed(tmp_path):
+    store = Store(tmp_path / "auth.db")
+    for i in range(3):
+        assert store.save_client(f"c{i}", None, {"redirect_uris": []}, max_clients=3)
+    store.mark_client_used("c1")
+    # At capacity, the oldest never-used registration (c0) makes room; used ones are kept.
+    assert store.save_client("c3", None, {"redirect_uris": []}, max_clients=3)
+    assert store.client("c0") is None and store.client("c1") is not None
+    store.mark_client_used("c2")
+    store.mark_client_used("c3")
+    assert not store.save_client("c4", None, {"redirect_uris": []}, max_clients=3)  # every client is in use
+    store.save_client("idle", None, {"redirect_uris": []})
+    store._run("UPDATE clients SET created_at = ? WHERE client_id = 'idle'", (int(time.time()) - 2 * 86400,))
+    store.purge()
+    assert store.client("idle") is None and store.client("c1") is not None
+
+
+def test_login_steps_fail_soft_when_the_login_pool_is_full(tmp_path):
+    from difyctl_mcp.runner import RunnerBusy
+    settings = Settings(public_url="https://mcp.example/difyctl-mcp", allowed_emails=["a@example.com"],
+                        allowed_redirect_uris=["https://c.example/cb"], api_key="k", data_dir=tmp_path)
+    store = Store(settings.database)
+
+    class Busy:
+        async def run(self, args, **kwargs):
+            assert kwargs.get("pool") == "login"
+            raise RunnerBusy()
+    login = Login(Service(settings, store, Busy()), Provider(settings, store))
+    login.ensure_dirs()
+    store.create_pending("w" * 32, "client", {}, "cookie", ttl=900)
+    store.update_pending("w" * 32, status="waiting", config_dir=str(settings.sessions_dir / "x"))
+    assert asyncio.run(login.check(store.pending("w" * 32))) is None
+    assert store.pending("w" * 32)["status"] == "waiting"

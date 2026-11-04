@@ -109,7 +109,8 @@ def test_file_downloads_get_distinct_output_paths(live):
 def test_downloads_count_against_the_storage_quota(live):
     _, tokens = live.tokens()
     token = tokens["access_token"]
-    live.settings.max_account_storage_bytes = 100
+    from difyctl_mcp.files import DIRECTORY_COST
+    live.settings.max_account_storage_bytes = 100 + DIRECTORY_COST  # downloads/ itself counts as one directory
     control(live.settings, download_size=60)
     first = live.call(token, "difyctl_read", {"operation": "download.thing"})
     assert first["outcome"] == "success" and first["result"]["size"] == 60
@@ -123,7 +124,7 @@ def test_downloads_count_against_the_storage_quota(live):
     assert live.call(token, "difyctl_read", {"operation": "download.thing"})["error"]["code"] == "quota_exceeded"
     assert len(op_calls(live.settings, ["download", "thing"])) == calls_before + 1
     # Already over the limit (e.g. after lowering it): refused before difyctl runs at all.
-    live.settings.max_account_storage_bytes = 50
+    live.settings.max_account_storage_bytes = 50 + DIRECTORY_COST
     full = live.call(token, "difyctl_read", {"operation": "download.thing"})
     assert full["error"]["code"] == "quota_exceeded"
     assert len(op_calls(live.settings, ["download", "thing"])) == calls_before + 1

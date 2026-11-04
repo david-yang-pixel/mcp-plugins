@@ -29,10 +29,16 @@ class Quota:
     total_bytes: int
 
 
+DIRECTORY_COST = 4096
+MAX_PATH_DEPTH = 8
+
+
 def usage(folder: Path) -> tuple[int, int]:
-    """Bytes and regular files under folder, without following symlinks."""
+    """Bytes and entries under folder, without following symlinks; each directory costs one entry and a block."""
     size = count = 0
-    for current, _, names in os.walk(folder, followlinks=False):
+    for current, dirs, names in os.walk(folder, followlinks=False):
+        size += DIRECTORY_COST * len(dirs)
+        count += len(dirs)
         for name in names:
             try:
                 info = os.lstat(os.path.join(current, name))
@@ -43,13 +49,27 @@ def usage(folder: Path) -> tuple[int, int]:
     return size, count
 
 
-def check_quota(quota: Quota | None, root: Path, adding: int, replacing: int | None = None) -> None:
-    """Refuse a write that would exceed the account or server storage limit (replacing: size of an overwritten file)."""
+def missing_directories(root: Path, path: Path) -> int:
+    """How many directories writing path would create below root."""
+    count, parent = 0, path.parent
+    while parent != root and root in parent.parents and not parent.exists():
+        count += 1
+        parent = parent.parent
+    return count
+
+
+def check_quota(quota: Quota | None, root: Path, adding: int, replacing: int | None = None, new_dirs: int = 0) -> None:
+    """Refuse a write that would exceed the account or server storage limit.
+
+    replacing: size of an overwritten file; new_dirs: directories the write creates, charged like usage() does.
+    """
     if quota is None:
         return
     used, files = usage(root)
     freed = replacing or 0
-    if used - freed + adding > quota.account_bytes or files + (0 if replacing is not None else 1) > quota.account_files:
+    adding += new_dirs * DIRECTORY_COST
+    entries = new_dirs + (0 if replacing is not None else 1)
+    if used - freed + adding > quota.account_bytes or files + entries > quota.account_files:
         raise PolicyError("quota_exceeded", f"This account's work directory is limited to {quota.account_bytes // (1024 * 1024)} MiB "
                           f"and {quota.account_files} files; files expire after 24 hours.")
     if usage(quota.users_dir)[0] - freed + adding > quota.total_bytes:
@@ -88,6 +108,8 @@ def relative_path(value: str) -> Path:
     if not isinstance(value, str) or not value or len(value) > 512:
         raise PolicyError("invalid_file_path", "path must be a relative path such as uploads/report.pdf.")
     parts = value.replace("\\", "/").strip("/").split("/")
+    if len(parts) > MAX_PATH_DEPTH:
+        raise PolicyError("invalid_file_path", f"path may have at most {MAX_PATH_DEPTH} segments.")
     if value.startswith("/") or any(not SEGMENT.fullmatch(p) or p in (".", "..") for p in parts):
         raise PolicyError("invalid_file_path", "path segments may use letters, digits, '.', '_' and '-', and cannot start with '.' or be '..'.")
     return Path(*parts)
@@ -129,7 +151,8 @@ def put_file(root: Path, value: str, content: str, encoding: str, overwrite: boo
             raise PolicyError("file_exists", "File exists; pass overwrite=true to replace it.")
         if path.exists() and not path.is_file():
             raise PolicyError("invalid_file_path", "A directory already uses that path.")
-        check_quota(quota, root, len(data), path.stat().st_size if path.is_file() else None)
+        check_quota(quota, root, len(data), path.stat().st_size if path.is_file() else None,
+                    missing_directories(root, path))
         _publish(path, data, overwrite)
     relative = str(path.relative_to(root))
     return {"path": relative, "absolute_path": str(path), "size": len(data),

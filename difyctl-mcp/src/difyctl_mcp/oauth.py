@@ -107,15 +107,14 @@ class Provider:
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         if not self.settings.configured:
             raise RegistrationError("invalid_client_metadata", "OAuth is not configured on this server")
-        if self.store.client_count() >= self.settings.max_clients:
-            raise RegistrationError("invalid_client_metadata", "Client registration limit reached")
         uris = [str(u) for u in client_info.redirect_uris or []]
         if not uris or any(not redirect_allowed(u, self.settings.allowed_redirect_uris) for u in uris):
             raise RegistrationError("invalid_redirect_uri", "Redirect URI is not in MCP_ALLOWED_REDIRECT_URIS")
         if set(client_info.grant_types) - {"authorization_code", "refresh_token"}:
             raise RegistrationError("invalid_client_metadata", "Only authorization_code and refresh_token are supported")
         info = client_info.model_dump(mode="json", exclude={"client_secret"}, exclude_none=True)
-        self.store.save_client(client_info.client_id, client_info.client_secret, info)
+        if not self.store.save_client(client_info.client_id, client_info.client_secret, info, self.settings.max_clients):
+            raise RegistrationError("invalid_client_metadata", "Client registration limit reached")
 
     # Authorization -----------------------------------------------------------------
     async def authorize(self, client: Client, params: AuthorizationParams) -> str:
@@ -165,6 +164,7 @@ class Provider:
         access, refresh = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         access_expires = min(now + self.settings.access_token_ttl_seconds, session_end)
         self.store.save_tokens(access, refresh, client_id, account_id, scopes, resource, access_expires, session_end, family)
+        self.store.mark_client_used(client_id)
         return OAuthToken(access_token=access, token_type="Bearer", expires_in=max(access_expires - now, 1),
                           refresh_token=refresh, scope=" ".join(scopes))
 

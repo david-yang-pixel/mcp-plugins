@@ -57,7 +57,8 @@ MCP 客户端 → Nginx (HTTPS) → difyctl-mcp 容器 (0.0.0.0:8000, bridge) �
 - 工具遇到 `auth_expired` / `not_logged_in` 时撤销该账号全部 MCP 令牌，下一次请求收到 401。
 - 同一账号从多个客户端授权时共用最新的 Dify 登录。
 - 令牌只对本 MCP 有效：`resource` 参数必须是本服务，资源服务器校验令牌的 `resource`。
-- `/register`、`/token`、`/revoke`、`/authorize`、`/login` 按客户端 IP 限流。
+- `/register`、`/token`、`/revoke`、`/authorize`、`/login` 按客户端 IP 限流。动态注册最多 1000 个客户端：满额时淘汰最早的从未完成授权的注册，超过 24 小时仍未使用的注册会被清理。
+- 登录页触发的 difyctl 调用（发起登录、检查授权状态）有独立的全局并发上限 8，超限时提示稍后重试，不占用工具调用的名额。
 
 | Scope | 可调用的工具 |
 | --- | --- |
@@ -106,7 +107,7 @@ MCP 客户端 → Nginx (HTTPS) → difyctl-mcp 容器 (0.0.0.0:8000, bridge) �
 `run.console_app.*`、`test.console_app.*`、`test.node.*`、`submit.run.form`、`upload.console_app.file` 等操作中 `bind=file` 的字段会被 difyctl 当作本地路径读取并上传。
 
 - 先用 `difyctl_put_file` 上传，再在文件字段里写返回的相对路径。
-- 写入前检查存储配额：每个账户工作目录默认最多 256 MiB、1000 个文件，所有账户合计默认 2 GiB（`DIFYCTL_MAX_ACCOUNT_STORAGE_MB`、`DIFYCTL_MAX_TOTAL_STORAGE_MB`）。超限立即拒绝；大结果超限时只返回预览，不落盘。
+- 写入前检查存储配额：每个账户工作目录默认最多 256 MiB、1000 个文件，所有账户合计默认 2 GiB（`DIFYCTL_MAX_ACCOUNT_STORAGE_MB`、`DIFYCTL_MAX_TOTAL_STORAGE_MB`）。超限立即拒绝；大结果超限时只返回预览，不落盘。目录同样计入配额（每个按 1 个文件、4 KiB 计），上传路径最多 8 层。
 - 每个文件字段的值（路径、文件夹、列表、名称 → 路径映射）都用 realpath 校验必须位于本账号工作目录内；文件夹内不能有符号链接。子进程 cwd 为工作目录。
 - difyctl 还会把对象、列表、JSON 字段中以 `@` 开头的字符串当文件读取（`@-` 为 stdin），这类值一律拒绝。
 - MCP 请求体上限 36 MiB（25 MB 文件的 base64），Nginx 只对 `/mcp` 放宽到 40 MB。超过 1 MiB 的 `/mcp` 请求在读取请求体前占用并发名额：全局 4 个、单账户 2 个，超出立即返回 503。

@@ -26,7 +26,7 @@ from mcp.server.auth.provider import construct_redirect_uri
 
 from .files import remove_tree
 from .oauth import Provider
-from .runner import Runner
+from .runner import Runner, RunnerBusy
 from .service import Service
 from .store import digest
 
@@ -194,8 +194,14 @@ class Login:
         config_dir = self.settings.sessions_dir / secrets.token_hex(16)
         config_dir.mkdir(parents=True, mode=0o700)
         self.store.update_pending(pending["id"], config_dir=str(config_dir))
-        run = await self.runner.run(["login", "--server", self.settings.dify_server, "--no-browser", "--no-wait",
-                                     "--no-keyring", "--json"], config_dir=config_dir, timeout=60, limited=False)
+        try:
+            run = await self.runner.run(["login", "--server", self.settings.dify_server, "--no-browser", "--no-wait",
+                                         "--no-keyring", "--json"], config_dir=config_dir, timeout=60, pool="login")
+        except RunnerBusy:
+            # Too many logins starting at once: undo this attempt so the user can simply press continue again.
+            remove_tree(config_dir, self.settings.sessions_dir)
+            self.store.update_pending(pending["id"], "starting", status="new", config_dir=None)
+            return page("服务繁忙", "<p>同时进行的登录过多，请稍后返回上一页重试。</p>", status=503)
         data = run.json() if run.exit_code == 0 else None
         uri = data.get("verification_uri") if isinstance(data, dict) else None
         code = data.get("user_code") if isinstance(data, dict) else None
@@ -220,7 +226,10 @@ class Login:
         self.busy.add(pending["id"])
         try:
             config_dir = Path(pending["config_dir"])
-            run = await self.runner.run(["login", "--resume", "--json"], config_dir=config_dir, timeout=60, limited=False)
+            try:
+                run = await self.runner.run(["login", "--resume", "--json"], config_dir=config_dir, timeout=60, pool="login")
+            except RunnerBusy:
+                return None  # keep waiting; the page checks again on its next refresh
             data = run.json()
             if run.exit_code == 0 and isinstance(data, dict) and data.get("status") == "pending":
                 return None
@@ -240,7 +249,7 @@ class Login:
     async def complete(self, pending: dict, config_dir: Path, login: dict) -> Response:
         params = json.loads(pending["params"])
         account_run = await self.runner.run(["describe", "account", "--input", "@-", "--json"], config_dir=config_dir,
-                                            stdin=b"{}", timeout=60, limited=False)
+                                            stdin=b"{}", timeout=60, pool="approved")
         account = account_run.json() if account_run.exit_code == 0 else None
         account = account if isinstance(account, dict) else {}
         saved = login.get("account") if isinstance(login.get("account"), dict) else {}
@@ -257,7 +266,7 @@ class Login:
             return await self.show_failed(pending)
         now = int(time.time())
         sessions = await self.runner.run(["get", "account", "session", "--input", "@-", "--json"], config_dir=config_dir,
-                                         stdin=b"{}", timeout=60, limited=False)
+                                         stdin=b"{}", timeout=60, pool="approved")
         expires = session_expiry(sessions.json() if sessions.exit_code == 0 else None, self.hostname, now,
                                  self.settings.session_fallback_seconds)
         async with self.service.locks[account_id].write():
@@ -286,7 +295,7 @@ class Login:
 
     async def discard(self, config_dir: Path) -> None:
         """End the Dify session on the server, then delete its local files."""
-        await self.runner.run(["logout", "--json"], config_dir=config_dir, timeout=60, limited=False)
+        await self.runner.run(["logout", "--json"], config_dir=config_dir, timeout=60, pool="approved")
         remove_tree(config_dir, self.settings.sessions_dir)
 
     async def show_failed(self, pending: dict) -> Response:
@@ -315,7 +324,7 @@ class Login:
                 # Orphans older than the pending lifetime: never a directory a login is still using.
                 if str(entry) not in referenced and entry.stat().st_mtime < time.time() - 2 * self.settings.pending_ttl_seconds:
                     remove_tree(entry, sessions)
-        self.store.purge()
+        self.store.purge(unused_client_ttl=self.settings.unused_client_ttl_seconds)
 
     def ensure_dirs(self) -> None:
         for path in (self.settings.sessions_dir, self.settings.users_dir, self.settings.home_dir):

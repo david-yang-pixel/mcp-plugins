@@ -58,6 +58,8 @@ class Settings:
     max_clients: int = 1000
     max_concurrent_runs: int = 16
     max_concurrent_uploads: int = 4
+    max_concurrent_logins: int = 8
+    unused_client_ttl_seconds: int = 24 * 3600
     max_account_uploads: int = 2
     max_account_storage_bytes: int = 256 * 1024 * 1024
     max_account_files: int = 1000

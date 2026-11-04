@@ -87,12 +87,14 @@ class RunnerBusy(Exception):
 
 
 class Runner:
-    def __init__(self, binary: str, home: Path, environ=None, max_concurrent: int = 16):
+    def __init__(self, binary: str, home: Path, environ=None, max_concurrent: int = 16, max_login: int = 8):
         self.binary = binary
         self.home = home
         self.environ = os.environ if environ is None else environ
         self.max_concurrent = max_concurrent
         self.active = 0
+        self.max_login = max_login
+        self.login_active = 0
 
     def environment(self, config_dir: Path) -> dict[str, str]:
         # DIFY_TOKEN and DIFY_WORKSPACE_ID are deliberately never set: they disable logout and use workspace.
@@ -104,19 +106,25 @@ class Runner:
         return env
 
     async def run(self, args: list[str], *, config_dir: Path, cwd: Path | None = None,
-                  stdin: bytes | None = None, timeout: float = 90, limited: bool = True) -> Run:
-        """Run once. limited=False is only for the login page, which is rate limited per client IP."""
+                  stdin: bytes | None = None, timeout: float = 90, pool: str = "tools") -> Run:
+        """Run once within a concurrency pool, failing fast with RunnerBusy when it is full.
+
+        "tools": authenticated tool calls (max_concurrent). "login": login steps an unauthenticated
+        browser can trigger (max_login), kept separate so tool load never blocks authorization.
+        "approved": steps that only follow a user's approval in Dify, bounded by real approvals.
+        """
         if any(not isinstance(a, str) or "\0" in a for a in args):
             raise ValueError("Invalid difyctl argument")
-        if not limited:
+        if pool == "approved":
             return await self._run(args, config_dir, cwd, stdin, timeout)
-        if self.active >= self.max_concurrent:
+        counter, limit = ("login_active", self.max_login) if pool == "login" else ("active", self.max_concurrent)
+        if getattr(self, counter) >= limit:
             raise RunnerBusy()
-        self.active += 1
+        setattr(self, counter, getattr(self, counter) + 1)
         try:
             return await self._run(args, config_dir, cwd, stdin, timeout)
         finally:
-            self.active -= 1
+            setattr(self, counter, getattr(self, counter) - 1)
 
     async def _run(self, args, config_dir, cwd, stdin, timeout) -> Run:
         started = time.monotonic()

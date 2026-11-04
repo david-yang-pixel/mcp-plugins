@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS clients (
     redirect_uris TEXT NOT NULL,
     client_name TEXT,
     info TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    used_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS pending (
     id TEXT PRIMARY KEY,
@@ -127,10 +128,25 @@ class Store:
     def client_count(self) -> int:
         return self._one("SELECT COUNT(*) FROM clients")[0]
 
-    def save_client(self, client_id: str, secret: str | None, info: dict) -> None:
-        self._run("INSERT INTO clients VALUES (?, ?, ?, ?, ?, ?)",
-                  (client_id, digest(secret) if secret else None, json.dumps(info.get("redirect_uris") or []),
-                   info.get("client_name"), json.dumps(info), int(time.time())))
+    def save_client(self, client_id: str, secret: str | None, info: dict, max_clients: int | None = None) -> bool:
+        """Register atomically; at capacity, evict the oldest client that never completed an authorization.
+
+        Returns False only when every registered client is in use.
+        """
+        with self.lock:
+            if max_clients is not None and self.client_count() >= max_clients:
+                evicted = self._run("DELETE FROM clients WHERE client_id = (SELECT client_id FROM clients "
+                                    "WHERE used_at IS NULL ORDER BY created_at, rowid LIMIT 1)")
+                if not evicted:
+                    return False
+            self._run("INSERT INTO clients (client_id, secret_hash, redirect_uris, client_name, info, created_at, used_at) "
+                      "VALUES (?, ?, ?, ?, ?, ?, NULL)",
+                      (client_id, digest(secret) if secret else None, json.dumps(info.get("redirect_uris") or []),
+                       info.get("client_name"), json.dumps(info), int(time.time())))
+        return True
+
+    def mark_client_used(self, client_id: str) -> None:
+        self._run("UPDATE clients SET used_at = ? WHERE client_id = ?", (int(time.time()), client_id))
 
     def client(self, client_id: str):
         row = self._one("SELECT * FROM clients WHERE client_id = ?", (client_id,))
@@ -283,10 +299,12 @@ class Store:
     def delete_pending(self, pending_id: str) -> None:
         self._run("DELETE FROM pending WHERE id = ?", (pending_id,))
 
-    def purge(self, now: int | None = None) -> None:
+    def purge(self, now: int | None = None, unused_client_ttl: int = 24 * 3600) -> None:
         now = int(time.time()) if now is None else now
         # Revoked rows are kept until they expire so that refresh-token reuse remains detectable.
         with self.lock:
             self._run("DELETE FROM auth_codes WHERE expires_at < ?", (now,))
             self._run("DELETE FROM access_tokens WHERE expires_at < ?", (now,))
             self._run("DELETE FROM refresh_tokens WHERE expires_at < ?", (now,))
+            # Registrations that never completed an authorization are reclaimed after a day.
+            self._run("DELETE FROM clients WHERE used_at IS NULL AND created_at < ?", (now - unused_client_ttl,))
