@@ -165,6 +165,10 @@ def main():
                 out({"status": "incomplete", "text": {"answer": ""}, "hints": [], "run_id": "run-1"})
             signal.signal(signal.SIGINT, interrupted)
         time.sleep(data["sleep"])
+    if "--output" in args:
+        target = Path(args[args.index("--output") + 1])
+        target.write_bytes(b"d" * CONTROL.get("download_size", 10))
+        out({"path": str(target), "size": target.stat().st_size})
     if "big" in data:
         out({"data": "x" * data["big"]})
     if "--stream" in args:

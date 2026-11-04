@@ -56,6 +56,18 @@ def check_quota(quota: Quota | None, root: Path, adding: int, replacing: int | N
         raise PolicyError("quota_exceeded", "The server's work storage is full; try again later.")
 
 
+def remove_if_over_quota(quota: Quota | None, root: Path, path: Path) -> bool:
+    """After a write whose size was unknown in advance (a download): delete it if limits are now exceeded."""
+    if quota is None or not path.is_file() or path.is_symlink():
+        return False
+    with STORAGE_LOCK:
+        used, files = usage(root)
+        if used <= quota.account_bytes and files <= quota.account_files and usage(quota.users_dir)[0] <= quota.total_bytes:
+            return False
+        path.unlink()
+        return True
+
+
 SEGMENT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}")
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}")
 

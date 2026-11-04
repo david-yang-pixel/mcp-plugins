@@ -106,6 +106,29 @@ def test_file_downloads_get_distinct_output_paths(live):
     assert all(Path(o).parent == (live.settings.users_dir / "acc-1" / "work" / "downloads") for o in outputs)
 
 
+def test_downloads_count_against_the_storage_quota(live):
+    _, tokens = live.tokens()
+    token = tokens["access_token"]
+    live.settings.max_account_storage_bytes = 100
+    control(live.settings, download_size=60)
+    first = live.call(token, "difyctl_read", {"operation": "download.thing"})
+    assert first["outcome"] == "success" and first["result"]["size"] == 60
+    second = live.call(token, "difyctl_read", {"operation": "download.thing"})
+    assert second["error"]["code"] == "quota_exceeded"
+    downloads = live.settings.users_dir / "acc-1" / "work" / "downloads"
+    assert [p.stat().st_size for p in downloads.iterdir()] == [60]
+    control(live.settings, download_size=50)
+    live.call(token, "difyctl_put_file", {"path": "fill.txt", "content": "x" * 40})
+    calls_before = len(op_calls(live.settings, ["download", "thing"]))
+    assert live.call(token, "difyctl_read", {"operation": "download.thing"})["error"]["code"] == "quota_exceeded"
+    assert len(op_calls(live.settings, ["download", "thing"])) == calls_before + 1
+    # Already over the limit (e.g. after lowering it): refused before difyctl runs at all.
+    live.settings.max_account_storage_bytes = 50
+    full = live.call(token, "difyctl_read", {"operation": "download.thing"})
+    assert full["error"]["code"] == "quota_exceeded"
+    assert len(op_calls(live.settings, ["download", "thing"])) == calls_before + 1
+
+
 def test_streaming_returns_task_id_for_stop_run(live):
     _, tokens = live.tokens()
     token = tokens["access_token"]

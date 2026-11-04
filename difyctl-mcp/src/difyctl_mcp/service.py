@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from .files import remove_tree, save_output, workdir
+from .files import STORAGE_LOCK, check_quota, remove_if_over_quota, remove_tree, save_output, workdir
 from .policy import (TOOL_FOR_LEVEL, PolicyError, check_files, check_input, classify, effect_name, tool_for, words)
 from .runner import Run, Runner, RunnerBusy, redact_value
 from .settings import LEVELS, SCOPES, Settings
@@ -239,14 +239,23 @@ class Service:
                         args.append("--stream")
                         for name in only or []:
                             args += ["--only", name]
+                    download = None
                     if kind == "file":
+                        # Downloads count against the storage quota: refuse when no room is left.
+                        with STORAGE_LOCK:
+                            check_quota(self.settings.quota, account.workdir, 0)
                         (account.workdir / "downloads").mkdir(exist_ok=True, mode=0o700)
                         # A unique name per call: concurrent downloads of the same op must not share a file.
                         name = f"{op}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{secrets.token_hex(6)}"
-                        args += ["--output", str(account.workdir / "downloads" / name)]
+                        download = account.workdir / "downloads" / name
+                        args += ["--output", str(download)]
                     run = await self._run(account, args, stdin=payload, timeout=timeout)
             except PolicyError as exc:
                 raise Failure(exc.code, exc.message, **exc.extra) from None
+            if download is not None and remove_if_over_quota(self.settings.quota, account.workdir, download):
+                # The size was only known afterwards; the over-quota file is removed again.
+                raise Failure("quota_exceeded", "The downloaded file exceeded the storage quota and was deleted.",
+                              next_step="Free space by waiting for files to expire (24 hours), then retry.")
             result = self.shape(account, op, run, None, stream=bool(stream or only), data=data)
             return result
         except Failure as failure:
