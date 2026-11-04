@@ -22,6 +22,8 @@ def main():
     if service == "zendesk-browser-relay":
         env["ZENDESK_SESSION_SUPERVISOR_ENABLED"] = "false"
     args = ["docker", "run", "-d", "--name", name, "--network", target['network']]
+    if target.get('hostname'):
+        args += ["--hostname", target['hostname']]
     if target['network'] == 'bridge':
         # CI host ports need not match the production allocation or container port.
         with socket.socket() as listener:

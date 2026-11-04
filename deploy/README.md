@@ -109,4 +109,22 @@ Secrets 通过 GitHub 的动态索引逐项引用，每个部署任务只接收�
 ]
 ```
 
-服务器自动创建 `/opt/mcp-plugins/data/example-mcp/cache`，只供该服务挂载。新服务不接受任意主机目录、Docker socket 或 host 网络。文件密钥通过 `secret_files` 声明 `name`、`required: true` 和 `destination`，路径必须在 `/run/mcp-secrets/` 内。已有服务端口和挂载的变更需要单独迁移，首次接入后普通代码及环境变量变动仍自动按服务部署。
+服务器自动创建 `/opt/mcp-plugins/data/example-mcp/cache`，只供该服务挂载。目录不存在时按镜像的数字用户（如 `USER 10001`）设置属主，root 镜像保持 root；已存在的目录不改属主和内容。新服务不接受任意主机目录、Docker socket 或 host 网络。文件密钥通过 `secret_files` 声明 `name`、`required: true` 和 `destination`，路径必须在 `/run/mcp-secrets/` 内。已有服务端口和挂载的变更需要单独迁移，首次接入后普通代码及环境变量变动仍自动按服务部署。
+
+### 可选：OAuth 公开路径、固定主机名和请求体上限
+
+需要 MCP OAuth 等额外公开入口的新服务可在 `deployment` 声明以下字段（旧服务不可添加，否则要求管理员迁移）：
+
+```json
+"hostname": "difyctl-mcp",
+"public_paths": ["/authorize", "/token", "/register", "/revoke", "/login", "/login/start"],
+"oauth_metadata": true,
+"max_body_size": "40m"
+```
+
+- `public_paths`：在 `/<服务名>/` 下额外公开的精确路径（`location =`），转发到容器内同名路径；最多 16 项，不能是 `/mcp` 或健康接口。不支持前缀匹配：`^~` 前缀会跳过正则路由，可能接管子树下其他项目的路由。
+- `oauth_metadata`：额外公开本服务自己的 `/.well-known/oauth-protected-resource/<服务名>/mcp` 和 `/.well-known/oauth-authorization-server/<服务名>`。部署和外部复核会校验其中的 `resource`、`issuer` 和端点都属于本服务。
+- `hostname`：固定容器主机名（`--hostname`），更新时检查漂移，修改时就地重建，不需要迁移。
+- `max_body_size`：只作用于 `/<服务名>/mcp` 的 `client_max_body_size`。
+
+所有路径写在同一个 `/etc/nginx/mcp-plugins.d/<服务名>.conf`，整体写入、`nginx -t`、graceful reload 和回滚。名称空间检查覆盖每个路径：已有的同名、上级前缀或匹配的正则路由（例如 `location /.well-known/` 或 `location ~ /\.`）都会拒绝部署。不声明这些字段的服务，路由文件与之前逐字节相同。

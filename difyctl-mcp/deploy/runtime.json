@@ -1,0 +1,52 @@
+{
+  "deployment": {
+    "container_port": 8000,
+    "auth_key": "DIFYCTL_MCP_API_KEY",
+    "health_path": "/health",
+    "hostname": "difyctl-mcp",
+    "public_paths": ["/authorize", "/token", "/register", "/revoke", "/login", "/login/start"],
+    "oauth_metadata": true,
+    "max_body_size": "40m",
+    "mounts": [
+      {"source": "@data/state", "destination": "/var/lib/mcp/difyctl", "readonly": false}
+    ]
+  },
+  "environment": {
+    "DIFYCTL_MCP_HOST": "0.0.0.0",
+    "DIFYCTL_MCP_PORT": "8000",
+    "DIFYCTL_MCP_DATA_DIR": "/var/lib/mcp/difyctl",
+    "MCP_PUBLIC_URL": "https://zendesk.smlershou.top/difyctl-mcp",
+    "MCP_ALLOWED_REDIRECT_URIS": "https://claude.ai/api/mcp/auth_callback https://claude.com/api/mcp/auth_callback http://localhost/callback http://127.0.0.1/callback",
+    "DIFY_SERVER": "https://cloud.dify.ai",
+    "DIFYCTL_MAX_EFFECT": "destructive",
+    "DIFYCTL_TIMEOUT_SECONDS": "90",
+    "DIFYCTL_MAX_TIMEOUT_SECONDS": "600",
+    "DIFYCTL_MAX_OUTPUT_CHARS": "100000"
+  },
+  "smoke_environment": {
+    "DIFYCTL_MCP_HOST": "0.0.0.0",
+    "DIFYCTL_MCP_PORT": "8000",
+    "MCP_PUBLIC_URL": "https://zendesk.smlershou.top/difyctl-mcp",
+    "MCP_ALLOWED_REDIRECT_URIS": "https://claude.ai/api/mcp/auth_callback",
+    "MCP_ALLOWED_EMAILS": "smoke-test@example.invalid"
+  },
+  "secrets": {
+    "DIFYCTL_MCP_API_KEY": {
+      "name": "MCP_DIFYCTL_MCP__DIFYCTL_MCP_API_KEY",
+      "required": true
+    },
+    "MCP_ALLOWED_EMAILS": {
+      "name": "MCP_DIFYCTL_MCP__MCP_ALLOWED_EMAILS",
+      "required": true
+    },
+    "MCP_STATIC_CLIENT_ID": {
+      "name": "MCP_DIFYCTL_MCP__MCP_STATIC_CLIENT_ID",
+      "required": false
+    },
+    "MCP_STATIC_CLIENT_SECRET": {
+      "name": "MCP_DIFYCTL_MCP__MCP_STATIC_CLIENT_SECRET",
+      "required": false
+    }
+  },
+  "secret_files": {}
+}
