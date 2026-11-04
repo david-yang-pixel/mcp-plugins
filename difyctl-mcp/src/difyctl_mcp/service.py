@@ -194,6 +194,8 @@ class Service:
                 if type(timeout) is not int or not 1 <= timeout <= self.settings.max_timeout_seconds:
                     raise PolicyError("invalid_input", f"timeout_seconds must be 1-{self.settings.max_timeout_seconds}.")
                 async with self.locks[account.account_id].read():
+                    # A login switch may have replaced the config directory while this call waited.
+                    account = self.account(token, tool_level)
                     descriptor = await self.descriptor(account, op_words)
                     op, level = classify(descriptor)
                     if level > self.settings.max_level:
@@ -290,6 +292,7 @@ class Service:
             account = self.account(token, level)
             lock = self.locks[account.account_id]
             async with (lock.write() if exclusive else lock.read()):
+                account = self.account(token, level)
                 run = await self._run(account, args)
                 result = self.shape(account, " ".join(args[:2]), run, None)
                 if after and run.exit_code == 0:
@@ -318,6 +321,10 @@ class Service:
         except Failure as failure:
             return failure.payload
         async with self.locks[account.account_id].read():
+            try:
+                account = self.account(token, LEVELS["read"])
+            except Failure as failure:
+                return failure.payload
             version, login = await asyncio.gather(self._run(account, ["version", "--json"]),
                                                   self._run(account, ["login", "--resume", "--json"]))
         login_view = self.shape(account, "login resume", login, None)

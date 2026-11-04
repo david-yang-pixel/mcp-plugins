@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import codecs
 import hashlib
 import os
 import re
@@ -80,7 +81,14 @@ def put_file(root: Path, value: str, content: str, encoding: str, overwrite: boo
         with os.fdopen(fd, "wb") as output:
             output.write(data)
         os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
+        if overwrite:
+            os.replace(temporary, path)
+        else:
+            try:
+                # link() fails if the path appeared meanwhile, so a concurrent upload is never replaced.
+                os.link(temporary, path)
+            except FileExistsError:
+                raise PolicyError("file_exists", "File exists; pass overwrite=true to replace it.") from None
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -95,15 +103,23 @@ def get_file(root: Path, value: str, offset: int, length: int, encoding: str) ->
     size = path.stat().st_size
     if offset < 0 or length <= 0:
         raise PolicyError("invalid_range", "offset must be >= 0 and length > 0.")
+    if encoding not in ("text", "base64"):
+        raise PolicyError("invalid_content", "encoding must be text or base64.")
     with open(path, "rb") as source:
         source.seek(offset)
         data = source.read(length)
-    if encoding == "base64":
-        content = base64.b64encode(data).decode()
-    elif encoding == "text":
-        content = redact(data.decode("utf-8", "replace"))
-    else:
-        raise PolicyError("invalid_content", "encoding must be text or base64.")
+        if encoding == "text" and offset + len(data) < size:
+            # Never split a UTF-8 character: stop before an incomplete trailing sequence.
+            decoder = codecs.getincrementaldecoder("utf-8")("replace")
+            decoder.decode(data, final=False)
+            pending = len(decoder.getstate()[0])
+            if pending and pending == len(data):
+                data += source.read(4)
+                decoder = codecs.getincrementaldecoder("utf-8")("replace")
+                decoder.decode(data, final=False)
+                pending = len(decoder.getstate()[0])
+            data = data[:len(data) - pending]
+    content = base64.b64encode(data).decode() if encoding == "base64" else redact(data.decode("utf-8", "replace"))
     end = offset + len(data)
     return {"path": str(path.relative_to(root)), "size": size, "offset": offset, "length": len(data),
             "next_offset": end if end < size else None, "eof": end >= size, "encoding": encoding, "content": content}

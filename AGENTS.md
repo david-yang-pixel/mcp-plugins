@@ -27,7 +27,8 @@
 
 ## Nginx 路由与端口归属
 
-- 新服务的路由只写入 `/etc/nginx/mcp-plugins.d/<服务名>.conf`，仅公开精确路径 `/<服务名>/mcp`，转发到该服务分配的本机端口；不自动公开健康接口或其他管理接口。
+- 新服务的路由只写入 `/etc/nginx/mcp-plugins.d/<服务名>.conf`，默认仅公开精确路径 `/<服务名>/mcp`，转发到该服务分配的本机端口；不自动公开健康接口或其他管理接口。
+- 例外仅限 MCP OAuth 等确需浏览器或客户端访问的入口：服务须在自身 `deploy/runtime.json` 显式声明 `public_paths`（只能位于 `/<服务名>/` 下，最多 16 项，不能是 `/mcp` 或健康接口，以 `/` 结尾的前缀只用于登录页这类必要子树）和 `oauth_metadata`（只公开本服务自己的 `/.well-known/oauth-protected-resource/<服务名>/mcp` 与 `/.well-known/oauth-authorization-server/<服务名>`）。部署及外部复核须校验元数据的 issuer、resource 和端点都属于本服务；每条路径同样执行名称空间冲突检查。旧服务不得添加这些字段。
 - 路由写入前检查名称空间冲突、已有文件归属与哈希漂移。存在同名路径或人工修改时应拒绝覆盖并定位原因，不得接管其他项目路由。
 - 每次只修改目标服务的路由，先运行 `nginx -t`，成功后 graceful reload；不得 restart Nginx 或修改其他服务的路由。原有 8 个 MCP 的既有路由与别名保持兼容。
 - 公共站点仅由管理员安装器一次性添加 managed include，并备份原配置；普通服务部署不能重写公共 TLS 站点、证书或 DNS。新增服务不得再要求编辑公共站点。

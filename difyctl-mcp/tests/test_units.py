@@ -188,3 +188,68 @@ def test_settings_require_secure_public_url():
     assert settings.resource == "https://mcp.example/difyctl-mcp/mcp" and settings.base_path == "/difyctl-mcp"
     assert settings.scopes == ["difyctl:read", "difyctl:write"]
     assert not Settings.from_env({}).configured
+
+
+def test_text_chunks_never_split_utf8(tmp_path):
+    work = files.workdir(tmp_path, "acc")
+    (work / "zh.txt").write_text("你好，世界 ok", encoding="utf-8")
+    for length in (1, 2, 4, 5, 7):
+        offset, parts = 0, []
+        while offset is not None:
+            part = files.get_file(work, "zh.txt", offset, length, "text")
+            assert "�" not in part["content"]
+            parts.append(part["content"])
+            offset = part["next_offset"]
+        assert "".join(parts) == "你好，世界 ok", length
+
+
+def test_put_file_never_replaces_a_concurrent_upload(tmp_path, monkeypatch):
+    work = files.workdir(tmp_path, "acc")
+    real_mkstemp = files.tempfile.mkstemp
+
+    def racing_mkstemp(*args, **kwargs):
+        (work / "same.txt").write_text("first upload")  # another request finished in between
+        return real_mkstemp(*args, **kwargs)
+    monkeypatch.setattr(files.tempfile, "mkstemp", racing_mkstemp)
+    with pytest.raises(PolicyError, match="exists"):
+        files.put_file(work, "same.txt", "second upload", "text", False, 1024, 60)
+    assert (work / "same.txt").read_text() == "first upload"
+    assert [p.name for p in work.iterdir()] == ["same.txt"]
+
+
+def test_omitted_redirect_uri_is_checked_against_the_current_allowlist(tmp_path):
+    settings = Settings(public_url="https://mcp.example/difyctl-mcp", allowed_emails=["a@example.com"],
+                        allowed_redirect_uris=["https://new.example/cb"], api_key="k", data_dir=tmp_path)
+    provider = Provider(settings, Store(settings.database))
+    from mcp.shared.auth import InvalidRedirectUriError
+    old = provider._client({"client_id": "c", "redirect_uris": ["https://old.example/cb"]})
+    with pytest.raises(InvalidRedirectUriError):
+        old.validate_redirect_uri(None)
+    current = provider._client({"client_id": "c2", "redirect_uris": ["https://new.example/cb"]})
+    assert str(current.validate_redirect_uri(None)) == "https://new.example/cb"
+
+
+def test_calls_waiting_on_a_login_switch_use_the_new_config_dir(tmp_path):
+    from types import SimpleNamespace
+    from difyctl_mcp.runner import Run
+    settings = Settings(public_url="https://mcp.example/difyctl-mcp", allowed_emails=["a@example.com"],
+                        allowed_redirect_uris=["https://c.example/cb"], api_key="k", data_dir=tmp_path)
+    store = Store(settings.database)
+    store.adopt_session("acc", "a@example.com", str(tmp_path / "old"), int(time.time()) + 3600)
+    used = []
+
+    class Recorder:
+        async def run(self, args, *, config_dir, cwd=None, stdin=None, timeout=90):
+            used.append(str(config_dir))
+            return Run(0, '{"logged_out": true}', "")
+    service = Service(settings, store, Recorder())
+    token = SimpleNamespace(subject="acc", client_id="client", scopes=["difyctl:destructive"])
+
+    async def scenario():
+        async with service.locks["acc"].write():
+            waiting = asyncio.create_task(service.refresh_catalog(token))
+            await asyncio.sleep(0.05)
+            store.adopt_session("acc", "a@example.com", str(tmp_path / "new"), int(time.time()) + 3600)
+        return await waiting
+    assert asyncio.run(scenario())["outcome"] == "success"
+    assert used == [str(tmp_path / "new")]

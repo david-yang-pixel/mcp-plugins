@@ -51,7 +51,8 @@ class Client(OAuthClientInformationFull):
 
     def validate_redirect_uri(self, redirect_uri: AnyUrl | None) -> AnyUrl:
         if redirect_uri is None:
-            return super().validate_redirect_uri(None)
+            # The single registered default goes through the same current-allowlist check below.
+            redirect_uri = super().validate_redirect_uri(None)
         registered = [str(u) for u in self.redirect_uris or []]
         text = str(redirect_uri)
         # The current allowlist always applies, including to clients registered before it changed.
