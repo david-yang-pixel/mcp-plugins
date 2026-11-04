@@ -34,6 +34,10 @@ PUBLIC_ORIGIN = "https://zendesk.smlershou.top"
 NGINX_ROUTES = Path("/etc/nginx/mcp-plugins.d")
 NGINX_SITE = Path("/etc/nginx/sites-enabled/zd-agent.conf")
 AUTO_PORTS = range(20000, 30000)
+PUBLIC_PATH = re.compile(r"/[a-z0-9][a-z0-9_-]*(?:/[a-z0-9][a-z0-9_-]*)*/?\Z")
+HOSTNAME = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z")
+BODY_SIZE = re.compile(r"[1-9][0-9]{0,3}[km]?\Z")
+MAX_PUBLIC_PATHS = 16
 
 
 class DeployError(Exception):
@@ -48,11 +52,13 @@ def validate_service_name(service):
 def normalize_target(target):
     if not isinstance(target, dict):
         raise DeployError("Invalid deployment contract")
-    result = {"init": False, "mounts": [], "command": [], "network": "bridge", "port": "auto", "shm_size": None, **target}
+    result = {"init": False, "mounts": [], "command": [], "network": "bridge", "port": "auto", "shm_size": None,
+              "hostname": None, "public_paths": [], "oauth_metadata": False, "max_body_size": None, **target}
     result.setdefault('container_port', result['port'])
     allowed = {
         "port", "container_port", "auth_key", "health_path", "init", "mounts", "command",
         "network", "env_keys", "secret_file_paths", "shm_size",
+        "hostname", "public_paths", "oauth_metadata", "max_body_size",
     }
     if set(result) != allowed:
         raise DeployError("Unexpected deployment contract fields")
@@ -74,6 +80,22 @@ def normalize_target(target):
         raise DeployError("Invalid shared memory size")
     if result['network'] == 'host' and result['port'] != result['container_port']:
         raise DeployError("Host networking requires the original fixed port")
+    hostname = result["hostname"]
+    if hostname is not None and (not isinstance(hostname, str) or len(hostname) > 63 or not HOSTNAME.fullmatch(hostname)):
+        raise DeployError("Invalid container hostname")
+    paths = result["public_paths"]
+    if (not isinstance(paths, list) or len(paths) > MAX_PUBLIC_PATHS or len(paths) != len(set(map(str, paths)))
+            or any(not isinstance(p, str) or not PUBLIC_PATH.fullmatch(p) for p in paths)):
+        raise DeployError("Invalid public path contract")
+    for p in paths:
+        # /mcp is always published; health and other management endpoints are never published.
+        if p.rstrip('/') == '/mcp' or p.rstrip('/') == result["health_path"].rstrip('/') or result["health_path"].startswith(p.rstrip('/') + '/'):
+            raise DeployError("Public paths may not repeat /mcp or expose the health endpoint")
+    if type(result["oauth_metadata"]) is not bool:
+        raise DeployError("Invalid OAuth metadata contract")
+    body = result["max_body_size"]
+    if body is not None and (not isinstance(body, str) or not BODY_SIZE.fullmatch(body)):
+        raise DeployError("Invalid request body size")
     if not isinstance(result["command"], list) or any(not isinstance(v, str) or "\0" in v for v in result["command"]):
         raise DeployError("Invalid container command")
     keys = result["env_keys"]
@@ -236,6 +258,8 @@ def validate_current(current, target, service):
             raise DeployError("Live mount source drifted")
     if bool(host.get("Init")) != target["init"] or (target.get("network", "host") == "host" and current["Config"].get("User", "")):
         raise DeployError("Live process configuration drifted")
+    if target.get("hostname") and current["Config"].get("Hostname") != target["hostname"]:
+        raise DeployError("Live container hostname drifted")
     expected_shm = shm_bytes(target.get("shm_size"))
     if expected_shm is not None and host.get("ShmSize") != expected_shm:
         raise DeployError("Live shared memory size drifted")
@@ -449,14 +473,37 @@ def install_nginx_include():
     return {'changed': True, 'site_sha256': hashlib.sha256(after.encode()).hexdigest()}
 
 
-def check_route_namespace(service, own_file):
+def route_paths(service, target=None):
+    """Public (match, path, upstream) routes: /mcp plus declared service paths and OAuth metadata.
+
+    Declared paths stay inside /<service>/; only the two RFC 8414/9728 metadata
+    documents for this service's own issuer and resource live at the site root.
+    """
+    validate_service_name(service)
+    target = target or {}
+    routes = [('=', '/' + service + '/mcp', '/mcp')]
+    for path in target.get('public_paths') or []:
+        if not isinstance(path, str) or not PUBLIC_PATH.fullmatch(path):
+            raise DeployError('Invalid public path contract')
+        routes.append(('^~' if path.endswith('/') else '=', '/' + service + path, path))
+    if target.get('oauth_metadata'):
+        for path in ('/.well-known/oauth-protected-resource/' + service + '/mcp',
+                     '/.well-known/oauth-authorization-server/' + service):
+            routes.append(('=', path, path))
+    return routes
+
+
+def check_route_namespace(service, own_file, target=None):
     documents = nginx_documents()
     block = public_server(documents)
     nodes = list(expanded_nodes(block['children'], documents))
     if not any(n['name'] == 'include' and n['args'] == [str(NGINX_ROUTES / '*.conf')] for n in nodes):
         raise DeployError('Managed route include is not installed in the HTTPS server')
-    path = '/' + service + '/mcp'
-    namespace = '/' + service
+    checks = []
+    for _, path, _ in route_paths(service, target):
+        # The service namespace is reserved as a whole; root metadata paths only reserve themselves.
+        namespace = '/' + service if path.startswith('/' + service + '/') else path.rstrip('/')
+        checks.append((path, namespace))
     for node in nodes:
         if node['name'] != 'location' or node['source'] == str(own_file):
             continue
@@ -464,38 +511,47 @@ def check_route_namespace(service, own_file):
         if not args:
             raise DeployError('Invalid Nginx location')
         kind, location = (args[0], args[1]) if len(args) > 1 else ('', args[0])
-        if kind in ('~', '~*'):
-            try:
-                conflict = re.search(location, path, re.I if kind == '~*' else 0) is not None
-            except re.error:
-                raise DeployError('Cannot safely compare an existing regex route') from None
-        else:
-            conflict = location == namespace or location.startswith(namespace + '/') or (kind != '=' and location != '/' and path.startswith(location))
-        if conflict:
-            raise DeployError('MCP path conflicts with an existing Nginx route')
+        for path, namespace in checks:
+            if kind in ('~', '~*'):
+                try:
+                    conflict = re.search(location, path, re.I if kind == '~*' else 0) is not None
+                except re.error:
+                    raise DeployError('Cannot safely compare an existing regex route') from None
+            else:
+                conflict = location == namespace or location.startswith(namespace + '/') or (kind != '=' and location != '/' and path.startswith(location))
+            if conflict:
+                raise DeployError('MCP path conflicts with an existing Nginx route')
 
 
-def render_route(service, port, revision):
+def render_route(service, port, revision, target=None):
     validate_service_name(service)
     if type(port) is not int or not 1024 <= port <= 65535 or not SHA.fullmatch(revision):
         raise DeployError('Invalid route target')
-    return f'''# Managed by mcp-plugins-deploy; service={service}
-location = /{service}/mcp {{
-    proxy_pass http://127.0.0.1:{port}/mcp;
+    body = (target or {}).get('max_body_size')
+    if body is not None and (not isinstance(body, str) or not BODY_SIZE.fullmatch(body)):
+        raise DeployError('Invalid request body size')
+    blocks = []
+    for kind, path, upstream in route_paths(service, target):
+        extra = ''
+        if path == '/' + service + '/mcp':
+            # Only the MCP endpoint carries uploads; OAuth and login pages keep Nginx's default limit.
+            extra = (f'    client_max_body_size {body};\n' if body else '') + f'    proxy_set_header X-MCP-Endpoint /{service}/mcp;\n'
+        blocks.append(f'''location {kind} {path} {{
+    proxy_pass http://127.0.0.1:{port}{upstream};
     proxy_http_version 1.1;
     proxy_set_header Connection "";
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header X-MCP-Endpoint /{service}/mcp;
-    proxy_buffering off;
+{extra}    proxy_buffering off;
     proxy_request_buffering off;
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
     add_header X-MCP-Deployment {revision} always;
 }}
-'''
+''')
+    return f'# Managed by mcp-plugins-deploy; service={service}\n' + ''.join(blocks)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -513,10 +569,33 @@ def public_request(service, key):
         return json.loads(response.read(1024 * 1024)), response.headers.get('X-MCP-Deployment')
 
 
+def public_metadata(path):
+    request = urllib.request.Request(PUBLIC_ORIGIN + path, headers={'Accept': 'application/json'})
+    opener = urllib.request.build_opener(NoRedirect())
+    with opener.open(request, timeout=10) as response:
+        return json.loads(response.read(1024 * 1024)), response.headers.get('X-MCP-Deployment')
+
+
+def verify_oauth_metadata(service, revision=None):
+    """The published discovery documents must name this service's own issuer and resource."""
+    resource, issuer = PUBLIC_ORIGIN + '/' + service + '/mcp', PUBLIC_ORIGIN + '/' + service
+    protected, first = public_metadata('/.well-known/oauth-protected-resource/' + service + '/mcp')
+    server_metadata, second = public_metadata('/.well-known/oauth-authorization-server/' + service)
+    if (protected.get('resource', '').rstrip('/') != resource or
+            [str(v).rstrip('/') for v in protected.get('authorization_servers') or []] != [issuer] or
+            str(server_metadata.get('issuer', '')).rstrip('/') != issuer or
+            not str(server_metadata.get('authorization_endpoint', '')).startswith(issuer + '/') or
+            not str(server_metadata.get('token_endpoint', '')).startswith(issuer + '/') or
+            (revision and (first != revision or second != revision))):
+        raise DeployError('Public OAuth discovery metadata check failed')
+
+
 def verify_public(service, env, target, revision=None):
     tools, header = public_request(service, env[target['auth_key']])
     if not tools.get('result', {}).get('tools') or (revision and header != revision):
         raise DeployError('Public HTTPS MCP discovery or route identity check failed')
+    if target.get('oauth_metadata'):
+        verify_oauth_metadata(service, revision)
     try:
         public_request(service, 'invalid-ci-probe')
     except urllib.error.HTTPError as exc:
@@ -554,16 +633,16 @@ class RouteTransaction:
             state = previous_state(service) or {}
             if hashlib.sha256(self.previous.encode()).hexdigest() != state.get('route_sha256'):
                 raise DeployError('Existing managed Nginx route has unexpected ownership or drift')
-        check_route_namespace(service, self.path)
+        check_route_namespace(service, self.path, target)
 
     def publish(self, env):
         if not self.legacy:
             # Repeat immediately before the mutation, in case an administrator edited Nginx.
-            check_route_namespace(self.service, self.path)
+            check_route_namespace(self.service, self.path, self.target)
             current = self.path.read_text() if self.path.exists() else None
             if current != self.previous:
                 raise DeployError('Nginx route changed during deployment')
-            content = render_route(self.service, self.target['port'], self.revision)
+            content = render_route(self.service, self.target['port'], self.revision, self.target)
             if content != self.previous:
                 secure_write(self.path, content)
                 self.changed = True
@@ -575,7 +654,7 @@ class RouteTransaction:
     def rollback(self):
         if not self.changed:
             return
-        candidate = render_route(self.service, self.target['port'], self.revision)
+        candidate = render_route(self.service, self.target['port'], self.revision, self.target)
         if self.path.is_symlink() or not self.path.exists() or self.path.read_text() != candidate:
             raise DeployError('Nginx route changed after publication; refusing to overwrite administrator changes')
         if self.previous is None:
@@ -597,6 +676,36 @@ def mount_source(service, source):
     if source.startswith('@data/'):
         return str(ROOT / 'data' / service / source.split('/', 1)[1])
     return source
+
+
+def image_owner(metadata):
+    """Numeric uid/gid the image runs as, or None for root; names cannot be resolved safely."""
+    user = (metadata.get("Config") or {}).get("User") or ""
+    if user in ("", "0", "0:0", "root"):
+        return None
+    match = re.fullmatch(r"([1-9][0-9]{0,9})(?::([0-9]{1,10}))?", user)
+    if not match:
+        raise DeployError("Managed data directories require a numeric image user")
+    uid = int(match[1])
+    return uid, int(match[2]) if match[2] is not None else uid
+
+
+def prepare_data_dirs(service, target, owner):
+    """Create this service's missing data directories, owned by the image's non-root user.
+
+    Existing directories keep their ownership and contents; this never changes them.
+    """
+    for mount in target["mounts"]:
+        if not mount["source"].startswith('@data/'):
+            continue
+        path = Path(mount_source(service, mount["source"]))
+        if path.is_symlink():
+            raise DeployError("Managed data directory must not be a symlink")
+        if path.exists():
+            continue
+        path.mkdir(parents=True, mode=0o700)
+        if owner is not None:
+            os.chown(path, *owner)
 
 
 def pull_image(image, revision, payload):
@@ -623,6 +732,8 @@ def run_arguments(service, image, revision, target, release):
         args.append("--init")
     if target.get("shm_size"):
         args += ["--shm-size", str(target["shm_size"])]
+    if target.get("hostname"):
+        args += ["--hostname", target["hostname"]]
     for mount in target["mounts"]:
         source = {"@env": str(release / "runtime.env"), "@settings": str(release / "config.yaml")}.get(mount["source"], mount_source(service, mount["source"]))
         if mount["source"].startswith('@data/'):
@@ -662,7 +773,8 @@ def verify_readback(service, expected_image, environment, target=None):
         host = deployed["HostConfig"]
         expected_shm = shm_bytes(target.get("shm_size"))
         shm_mismatch = expected_shm is not None and host.get("ShmSize") != expected_shm
-        if bool(host.get("Init")) != target["init"] or shm_mismatch:
+        hostname_mismatch = bool(target.get("hostname")) and deployed["Config"].get("Hostname") != target["hostname"]
+        if bool(host.get("Init")) != target["init"] or shm_mismatch or hostname_mismatch:
             raise DeployError("Replacement process configuration mismatch")
     return deployed
 
@@ -773,7 +885,7 @@ def preflight(service, target, installed, current):
         old_target = normalize_target({'network': 'host' if service in installed else 'bridge', **old_target})
         if recreate_migration_blocked(old_target, target):
             raise DeployError("Existing infrastructure changed; an explicit migration is required")
-        changes = [key for key in ('init', 'command', 'shm_size', 'secret_file_paths') if old_target[key] != target[key]]
+        changes = [key for key in ('init', 'command', 'shm_size', 'hostname', 'secret_file_paths') if old_target[key] != target[key]]
         if changes:
             print(json.dumps({"service": service, "stage": "recreate", "changes": changes}), flush=True)
         validate_current(current, old_target, service)
@@ -837,6 +949,8 @@ def deploy(service, revision, payload, target, installed=None):
     route = RouteTransaction(service, target, revision, legacy=service in (installed or {}))
     print(json.dumps({"service": service, "stage": "pulling", "revision": revision}), flush=True)
     expected_image = pull_image(image, revision, payload)
+    if service not in (installed or {}):
+        prepare_data_dirs(service, target, image_owner(json.loads(command(["docker", "image", "inspect", expected_image]))[0]))
     base = ROOT / "releases" / service
     base.mkdir(parents=True, exist_ok=True, mode=0o700)
     release = Path(tempfile.mkdtemp(prefix=revision[:12] + "-", dir=base))

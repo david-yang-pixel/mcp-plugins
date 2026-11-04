@@ -1,6 +1,6 @@
 # MCP 服务仓库
 
-每个一级项目目录对应一个独立 MCP 服务，包含该服务全部业务源码、测试、配置示例、依赖锁文件和 Dockerfile。最初 8 个服务的基线来自 2026-10-16 核对的腾讯云运行容器；`zendesk-kg-mcp` 是之后新增的历史工单知识库检索服务。
+每个一级项目目录对应一个独立 MCP 服务，包含该服务全部业务源码、测试、配置示例、依赖锁文件和 Dockerfile。最初 8 个服务的基线来自 2026-10-16 核对的腾讯云运行容器；`zendesk-kg-mcp` 是之后新增的历史工单知识库检索服务；`difyctl-mcp` 把 difyctl 封装为 MCP，用户通过 MCP OAuth 登录自己的 Dify 账号。
 
 ```text
 mcp-plugins/
@@ -12,7 +12,8 @@ mcp-plugins/
 ├── notification-service/
 ├── zendesk-mcp/
 ├── zendesk-browser-relay/
-└── zendesk-kg-mcp/
+├── zendesk-kg-mcp/
+└── difyctl-mcp/
 ```
 
 GitHub、文档、通知原先共用 tool_services 包，这里按各自线上版本拆为三个完整项目，不依赖共享目录或兄弟项目。sandbox-worker 不在本仓库维护范围。

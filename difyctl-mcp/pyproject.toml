@@ -1,0 +1,25 @@
+[project]
+name = "difyctl-mcp"
+version = "0.1.0"
+description = "Streamable HTTP MCP for difyctl with per-user Dify login through MCP OAuth."
+requires-python = ">=3.12"
+dependencies = [
+    "mcp==2.3.0",
+    "uvicorn>=0.52,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+
+[project.scripts]
+difyctl-mcp = "difyctl_mcp.app:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
