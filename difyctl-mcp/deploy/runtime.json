@@ -4,7 +4,7 @@
     "auth_key": "DIFYCTL_MCP_API_KEY",
     "health_path": "/health",
     "hostname": "difyctl-mcp",
-    "public_paths": ["/authorize", "/token", "/register", "/revoke", "/login", "/login/start"],
+    "public_paths": ["/authorize", "/token", "/register", "/revoke", "/login", "/login/start", "/login/renew"],
     "oauth_metadata": true,
     "max_body_size": "40m",
     "mounts": [
@@ -21,7 +21,8 @@
     "DIFYCTL_MAX_EFFECT": "destructive",
     "DIFYCTL_TIMEOUT_SECONDS": "90",
     "DIFYCTL_MAX_TIMEOUT_SECONDS": "600",
-    "DIFYCTL_MAX_OUTPUT_CHARS": "100000"
+    "DIFYCTL_MAX_OUTPUT_CHARS": "100000",
+    "DIFYCTL_MCP_SERVICE_SCOPE": "destructive"
   },
   "smoke_environment": {
     "DIFYCTL_MCP_HOST": "0.0.0.0",
@@ -38,6 +39,14 @@
     "MCP_ALLOWED_EMAILS": {
       "name": "MCP_DIFYCTL_MCP__MCP_ALLOWED_EMAILS",
       "required": true
+    },
+    "DIFYCTL_MCP_SERVICE_TOKEN": {
+      "name": "MCP_DIFYCTL_MCP__DIFYCTL_MCP_SERVICE_TOKEN",
+      "required": false
+    },
+    "DIFYCTL_MCP_SERVICE_ACCOUNT_EMAIL": {
+      "name": "MCP_DIFYCTL_MCP__DIFYCTL_MCP_SERVICE_ACCOUNT_EMAIL",
+      "required": false
     },
     "MCP_STATIC_CLIENT_ID": {
       "name": "MCP_DIFYCTL_MCP__MCP_STATIC_CLIENT_ID",

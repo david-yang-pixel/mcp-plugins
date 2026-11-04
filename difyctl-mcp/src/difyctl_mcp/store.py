@@ -185,6 +185,15 @@ class Store:
         row = self._one("SELECT * FROM users WHERE account_id = ?", (account_id,))
         return dict(row) if row is not None else None
 
+    def user_by_email(self, email: str):
+        row = self._one("SELECT * FROM users WHERE email = ? ORDER BY updated_at DESC LIMIT 1", (email.lower(),))
+        return dict(row) if row is not None else None
+
+    def end_session(self, account_id: str) -> None:
+        """Dify rejected the stored login: mark it expired so no token is accepted for it until a new approval."""
+        self._run("UPDATE users SET session_expires_at = ? WHERE account_id = ? AND session_expires_at > ?",
+                  (int(time.time()), account_id, int(time.time())))
+
     def adopt_session(self, account_id: str, email: str, config_dir: str, expires_at: int) -> str | None:
         """Point the account at its newest Dify login and return the replaced directory."""
         with self.lock:

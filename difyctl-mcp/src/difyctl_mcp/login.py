@@ -32,6 +32,7 @@ from .store import digest
 
 log = logging.getLogger("difyctl_mcp.login")
 COOKIE = "difyctl_login_"
+RENEWAL_CLIENT = "__renewal__"
 USER_CODE = re.compile(r"[A-Za-z0-9-]{4,32}")
 PENDING_ID = re.compile(r"[A-Za-z0-9_-]{20,64}")
 COMPLETING_GRACE_SECONDS = 300
@@ -129,8 +130,30 @@ class Login:
         return pending, cookie, None
 
     # Pages ---------------------------------------------------------------------------
+    async def renew(self, request: Request) -> Response:
+        """Start a Dify login that only refreshes the stored session; no OAuth client receives anything.
+
+        Used to renew the login behind the service token (and every other client of that account).
+        """
+        if not self.settings.configured:
+            return page("服务未配置", "<p>OAuth 尚未配置。</p>", status=503)
+        pending_id, cookie = secrets.token_urlsafe(24), secrets.token_urlsafe(32)
+        self.store.create_pending(pending_id, RENEWAL_CLIENT, {"renew": True, "scopes": [], "state": None},
+                                  cookie, self.settings.pending_ttl_seconds)
+        response = RedirectResponse(self.page_url(pending_id), status_code=303, headers={"Cache-Control": "no-store"})
+        self.attach_cookie(response, pending_id, cookie)
+        return response
+
     async def describe(self, pending: dict) -> str:
         params = json.loads(pending["params"])
+        if params.get("renew"):
+            account = (f'<dt>服务令牌绑定的账号</dt><dd>{html.escape(self.settings.service_email)}</dd>'
+                       if self.settings.service_email else "")
+            return (f'<div class="box"><dl><dt>操作</dt><dd>续期 difyctl MCP 保存的 Dify 登录</dd>{account}'
+                    f'<dt>Dify 服务器</dt><dd>{html.escape(self.settings.dify_server)}</dd></dl></div>'
+                    '<div class="box warn">批准后，服务器会用这次登录替换该 Dify 账号原来的登录，'
+                    '服务令牌和该账号已授权的客户端都会改用新的登录。不会向任何客户端发送授权码。'
+                    '在 Dify 页面批准前，请核对页面上显示的账户和工作空间。</div>')
         client = await self.provider.get_client(pending["client_id"])
         name = (client.client_name if client and client.client_name else pending["client_id"])
         redirect_host = urlsplit(params["redirect_uri"]).netloc
@@ -163,6 +186,8 @@ class Login:
             if pending["status"] == "waiting":
                 return self.waiting(pending, details)
         if pending["status"] == "approved":
+            if json.loads(pending["params"]).get("renew"):
+                return page("续期完成", "<p>Dify 登录已续期，可以关闭此页面。</p>")
             return page("授权已完成", "<p>授权已完成，可以关闭此页面。</p>")
         if pending["status"] in ("starting", "completing"):
             return page("正在处理", "<p>正在处理，请稍候……</p>", refresh=self.settings.poll_interval_seconds)
@@ -287,6 +312,14 @@ class Login:
                 return page("授权请求已失效", "<p>此授权请求已过期。请回到 MCP 客户端重新连接。</p>", status=404)
             remove_tree(replaced, self.settings.sessions_dir)
             self.service.clear_descriptors(account_id)
+        if params.get("renew"):
+            log.info("renewed the Dify login of account %s", account_id)
+            note = ""
+            if self.settings.service_email and email != self.settings.service_email:
+                note = (f"<p>注意：这次登录的账号是 {html.escape(email)}，不是服务令牌绑定的 "
+                        f"{html.escape(self.settings.service_email)}，服务令牌的登录没有变化。</p>")
+            return page("续期完成", f"<p>{html.escape(email)} 的 Dify 登录已续期，"
+                        f"有效期至 {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(expires))}。</p>{note}")
         code = self.provider.issue_code(pending, params, account_id)
         log.info("authorized account %s for client %s", account_id, pending["client_id"])
         return RedirectResponse(construct_redirect_uri(params["redirect_uri"], code=code, state=params["state"],

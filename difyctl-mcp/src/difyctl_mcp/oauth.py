@@ -23,6 +23,7 @@ from .store import Store, digest
 
 log = logging.getLogger("difyctl_mcp.oauth")
 PROBE_CLIENT = "deploy-probe"
+SERVICE_CLIENT = "service-token"
 LOOPBACK = ("localhost", "127.0.0.1", "::1")
 # The /authorize wrapper hands the pending-login cookie to the response through this holder.
 authorize_cookie: contextvars.ContextVar[dict | None] = contextvars.ContextVar("authorize_cookie", default=None)
@@ -201,6 +202,14 @@ class Provider:
             # Deployment probe: may list tools, but carries no account and no scope, so every tool call is refused.
             return AccessToken(token=token, client_id=PROBE_CLIENT, scopes=[], expires_at=None,
                                resource=self.settings.resource, subject=None)
+        service = self.settings.service_token
+        if service and hmac.compare_digest(token.encode(), service.encode()):
+            # A static credential for clients without OAuth (e.g. openconnector). It is bound to an account email,
+            # so it always uses that account's newest Dify login; tools explain how to renew an expired one.
+            user = self.store.user_by_email(self.settings.service_email)
+            return AccessToken(token=token, client_id=SERVICE_CLIENT, scopes=self.settings.service_scopes,
+                               expires_at=None, resource=self.settings.resource,
+                               subject=user["account_id"] if user else None)
         row = self.store.access_token(token)
         now = int(time.time())
         if row is None or row.revoked_at is not None or row.expires_at <= now:
@@ -213,7 +222,7 @@ class Provider:
 
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
         if isinstance(token, AccessToken):
-            if token.client_id != PROBE_CLIENT:
+            if token.client_id not in (PROBE_CLIENT, SERVICE_CLIENT):
                 self.store.revoke_family(access=token.token)
         else:
             self.store.revoke_family(refresh=token.token)
