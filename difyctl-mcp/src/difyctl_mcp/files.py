@@ -9,11 +9,52 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from .policy import PolicyError
 from .runner import redact
+
+# Quota checks and the writes they admit are serialized, so concurrent uploads cannot overshoot.
+STORAGE_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class Quota:
+    users_dir: Path
+    account_bytes: int
+    account_files: int
+    total_bytes: int
+
+
+def usage(folder: Path) -> tuple[int, int]:
+    """Bytes and regular files under folder, without following symlinks."""
+    size = count = 0
+    for current, _, names in os.walk(folder, followlinks=False):
+        for name in names:
+            try:
+                info = os.lstat(os.path.join(current, name))
+            except FileNotFoundError:
+                continue
+            size += info.st_size
+            count += 1
+    return size, count
+
+
+def check_quota(quota: Quota | None, root: Path, adding: int, replacing: int | None = None) -> None:
+    """Refuse a write that would exceed the account or server storage limit (replacing: size of an overwritten file)."""
+    if quota is None:
+        return
+    used, files = usage(root)
+    freed = replacing or 0
+    if used - freed + adding > quota.account_bytes or files + (0 if replacing is not None else 1) > quota.account_files:
+        raise PolicyError("quota_exceeded", f"This account's work directory is limited to {quota.account_bytes // (1024 * 1024)} MiB "
+                          f"and {quota.account_files} files; files expire after 24 hours.")
+    if usage(quota.users_dir)[0] - freed + adding > quota.total_bytes:
+        raise PolicyError("quota_exceeded", "The server's work storage is full; try again later.")
+
 
 SEGMENT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}")
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}")
@@ -56,7 +97,7 @@ def resolve(root: Path, value: str, *, must_exist: bool) -> Path:
 
 
 def put_file(root: Path, value: str, content: str, encoding: str, overwrite: bool, max_bytes: int,
-             retention: int) -> dict:
+             retention: int, quota: Quota | None = None) -> dict:
     if encoding == "base64":
         if len(content) > (max_bytes * 4) // 3 + 4:
             raise PolicyError("file_too_large", f"Files are limited to {max_bytes} bytes.")
@@ -71,10 +112,20 @@ def put_file(root: Path, value: str, content: str, encoding: str, overwrite: boo
     if len(data) > max_bytes:
         raise PolicyError("file_too_large", f"Files are limited to {max_bytes} bytes.")
     path = resolve(root, value, must_exist=False)
-    if path.exists() and not overwrite:
-        raise PolicyError("file_exists", "File exists; pass overwrite=true to replace it.")
-    if path.exists() and not path.is_file():
-        raise PolicyError("invalid_file_path", "A directory already uses that path.")
+    with STORAGE_LOCK:
+        if path.exists() and not overwrite:
+            raise PolicyError("file_exists", "File exists; pass overwrite=true to replace it.")
+        if path.exists() and not path.is_file():
+            raise PolicyError("invalid_file_path", "A directory already uses that path.")
+        check_quota(quota, root, len(data), path.stat().st_size if path.is_file() else None)
+        _publish(path, data, overwrite)
+    relative = str(path.relative_to(root))
+    return {"path": relative, "absolute_path": str(path), "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(), "expires_at": int(time.time()) + retention,
+            "usage": f"Use \"{relative}\" (relative to the work directory) as the value of a file field."}
+
+
+def _publish(path: Path, data: bytes, overwrite: bool) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, temporary = tempfile.mkstemp(prefix=".upload-", dir=path.parent)
     try:
@@ -92,10 +143,6 @@ def put_file(root: Path, value: str, content: str, encoding: str, overwrite: boo
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-    relative = str(path.relative_to(root))
-    return {"path": relative, "absolute_path": str(path), "size": len(data),
-            "sha256": hashlib.sha256(data).hexdigest(), "expires_at": int(time.time()) + retention,
-            "usage": f"Use \"{relative}\" (relative to the work directory) as the value of a file field."}
 
 
 def get_file(root: Path, value: str, offset: int, length: int, encoding: str) -> dict:
@@ -125,15 +172,18 @@ def get_file(root: Path, value: str, offset: int, length: int, encoding: str) ->
             "next_offset": end if end < size else None, "eof": end >= size, "encoding": encoding, "content": content}
 
 
-def save_output(root: Path, operation: str, text: str) -> str:
+def save_output(root: Path, operation: str, text: str, quota: Quota | None = None) -> str:
     folder = root / "outputs"
     folder.mkdir(exist_ok=True, mode=0o700)
     name = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + re.sub(r"[^a-z0-9_.-]", "_", operation)[:80] + \
         "-" + os.urandom(4).hex() + ".json"
     path = folder / name
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as output:
-        output.write(text)
+    data = text.encode("utf-8")
+    with STORAGE_LOCK:
+        check_quota(quota, root, len(data))
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as output:
+            output.write(data)
     return str(path.relative_to(root))
 
 

@@ -57,6 +57,9 @@ class Settings:
     session_fallback_seconds: int = 14 * 24 * 3600
     max_clients: int = 1000
     max_concurrent_runs: int = 16
+    max_account_storage_bytes: int = 256 * 1024 * 1024
+    max_account_files: int = 1000
+    max_total_storage_bytes: int = 2 * 1024 * 1024 * 1024
     max_account_runs: int = 4
 
     @classmethod
@@ -82,6 +85,8 @@ class Settings:
             max_output_chars=_int(env, "DIFYCTL_MAX_OUTPUT_CHARS", 100_000, 1_000, 10_000_000),
             max_concurrent_runs=_int(env, "DIFYCTL_MAX_CONCURRENT", 16, 1, 256),
             max_account_runs=_int(env, "DIFYCTL_MAX_ACCOUNT_CONCURRENT", 4, 1, 64),
+            max_account_storage_bytes=_int(env, "DIFYCTL_MAX_ACCOUNT_STORAGE_MB", 256, 1, 100_000) * 1024 * 1024,
+            max_total_storage_bytes=_int(env, "DIFYCTL_MAX_TOTAL_STORAGE_MB", 2048, 1, 1_000_000) * 1024 * 1024,
         )
         settings.validate()
         return settings
@@ -135,6 +140,11 @@ class Settings:
     def scopes(self) -> list[str]:
         """Scopes this deployment grants, capped by DIFYCTL_MAX_EFFECT."""
         return [SCOPES[name] for name, level in LEVELS.items() if level <= self.max_level]
+
+    @property
+    def quota(self):
+        from .files import Quota
+        return Quota(self.users_dir, self.max_account_storage_bytes, self.max_account_files, self.max_total_storage_bytes)
 
     @property
     def sessions_dir(self) -> Path:

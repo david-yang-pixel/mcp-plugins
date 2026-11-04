@@ -279,11 +279,11 @@ def register_tools(server: MCPServer, service: Service, settings: Settings) -> N
                                    content: Annotated[str, Field(description="File content: text, or base64 with encoding=base64")],
                                    encoding: Literal["text", "base64"] = "text",
                                    overwrite: bool = False) -> CallToolResult:
-            """Store a file (max 25 MB, kept 24 hours) in this account's work directory so file fields can reference it."""
+            """Store a file (max 25 MB, kept 24 hours, within the account storage quota) in this account's work directory so file fields can reference it."""
             try:
                 account = service.account(get_access_token(), LEVELS["write"])
                 data = await asyncio.to_thread(files.put_file, account.workdir, path, content, encoding, overwrite,
-                                               settings.max_file_bytes, settings.file_retention_seconds)
+                                               settings.max_file_bytes, settings.file_retention_seconds, settings.quota)
                 return tool_result({"outcome": "success", "result": data, "error": None, "next_step": None, "notices": [], "timed_out": False})
             except Failure as failure:
                 return tool_result(failure.payload)

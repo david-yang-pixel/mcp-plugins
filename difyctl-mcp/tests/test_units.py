@@ -384,3 +384,48 @@ def test_cleanup_gives_a_completing_login_a_grace_period(tmp_path):
     store._run("UPDATE pending SET expires_at = ?", (int(time.time()) - 3600,))
     login.cleanup()
     assert not folder.exists() and store.pending("c" * 32) is None
+
+
+def test_storage_quotas_are_enforced_before_writing(tmp_path):
+    users = tmp_path / "users"
+    quota = files.Quota(users, account_bytes=100, account_files=3, total_bytes=150)
+    work = files.workdir(users, "acc")
+    files.put_file(work, "a.txt", "x" * 60, "text", False, 1024, 60, quota)
+    with pytest.raises(PolicyError, match="limited to"):
+        files.put_file(work, "b.txt", "x" * 41, "text", False, 1024, 60, quota)
+    assert not (work / "b.txt").exists()
+    # Overwriting counts the replaced file as freed.
+    files.put_file(work, "a.txt", "y" * 90, "text", True, 1024, 60, quota)
+    files.put_file(work, "c.txt", "z", "text", False, 1024, 60, quota)
+    files.put_file(work, "d.txt", "z", "text", False, 1024, 60, quota)
+    with pytest.raises(PolicyError, match="3 files"):
+        files.put_file(work, "e.txt", "z", "text", False, 1024, 60, quota)
+    other = files.workdir(users, "other")
+    files.put_file(other, "big.txt", "w" * 50, "text", False, 1024, 60, quota)
+    with pytest.raises(PolicyError, match="server's work storage is full"):
+        files.put_file(other, "more.txt", "w" * 10, "text", False, 1024, 60, quota)
+    with pytest.raises(PolicyError, match="limited to"):
+        files.save_output(work, "op", "x" * 20, quota)
+    assert not (work / "outputs").exists() or not any((work / "outputs").iterdir())
+
+
+def test_concurrent_uploads_cannot_overshoot_the_quota(tmp_path):
+    import threading as _threading
+    users = tmp_path / "users"
+    quota = files.Quota(users, account_bytes=100, account_files=100, total_bytes=10_000)
+    work = files.workdir(users, "acc")
+    barrier, outcomes = _threading.Barrier(8), []
+
+    def upload(i):
+        barrier.wait()
+        try:
+            files.put_file(work, f"f{i}.txt", "x" * 30, "text", False, 1024, 60, quota)
+            outcomes.append("ok")
+        except PolicyError:
+            outcomes.append("rejected")
+    threads = [_threading.Thread(target=upload, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert outcomes.count("ok") == 3 and files.usage(work)[0] == 90

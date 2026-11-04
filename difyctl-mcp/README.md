@@ -106,6 +106,7 @@ MCP 客户端 → Nginx (HTTPS) → difyctl-mcp 容器 (0.0.0.0:8000, bridge) �
 `run.console_app.*`、`test.console_app.*`、`test.node.*`、`submit.run.form`、`upload.console_app.file` 等操作中 `bind=file` 的字段会被 difyctl 当作本地路径读取并上传。
 
 - 先用 `difyctl_put_file` 上传，再在文件字段里写返回的相对路径。
+- 写入前检查存储配额：每个账户工作目录默认最多 256 MiB、1000 个文件，所有账户合计默认 2 GiB（`DIFYCTL_MAX_ACCOUNT_STORAGE_MB`、`DIFYCTL_MAX_TOTAL_STORAGE_MB`）。超限立即拒绝；大结果超限时只返回预览，不落盘。
 - 每个文件字段的值（路径、文件夹、列表、名称 → 路径映射）都用 realpath 校验必须位于本账号工作目录内；文件夹内不能有符号链接。子进程 cwd 为工作目录。
 - difyctl 还会把对象、列表、JSON 字段中以 `@` 开头的字符串当文件读取（`@-` 为 stdin），这类值一律拒绝。
 - MCP 请求体上限 36 MiB（25 MB 文件的 base64），Nginx 只对 `/mcp` 放宽到 40 MB。

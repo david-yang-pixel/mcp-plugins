@@ -294,9 +294,15 @@ class Service:
             out["next_step"] = "Follow hints: pass each hint's op as operation and its input as input to the matching tool."
         text = json.dumps(out["result"], ensure_ascii=False)
         if len(text) > self.settings.max_output_chars:
-            path = save_output(account.workdir, op, text)
-            out["result"] = {"output_file": path, "size_chars": len(text), "preview": text[:PREVIEW_CHARS]}
-            out["notices"].append(f"Result saved to {path}; read it in parts with difyctl_get_file.")
+            try:
+                path = save_output(account.workdir, op, text, self.settings.quota)
+            except PolicyError as exc:
+                # Over quota: return the preview only rather than growing storage further.
+                out["result"] = {"output_file": None, "size_chars": len(text), "preview": text[:PREVIEW_CHARS]}
+                out["notices"].append("Result too large to return and not saved: " + exc.message)
+            else:
+                out["result"] = {"output_file": path, "size_chars": len(text), "preview": text[:PREVIEW_CHARS]}
+                out["notices"].append(f"Result saved to {path}; read it in parts with difyctl_get_file.")
         return out
 
     def audit(self, tool, account, token, op, data, result, started) -> None:
