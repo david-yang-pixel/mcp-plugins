@@ -57,6 +57,8 @@ class Settings:
     session_fallback_seconds: int = 14 * 24 * 3600
     max_clients: int = 1000
     max_concurrent_runs: int = 16
+    max_concurrent_uploads: int = 4
+    max_account_uploads: int = 2
     max_account_storage_bytes: int = 256 * 1024 * 1024
     max_account_files: int = 1000
     max_total_storage_bytes: int = 2 * 1024 * 1024 * 1024

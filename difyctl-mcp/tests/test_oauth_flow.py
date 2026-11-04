@@ -147,7 +147,7 @@ def test_refresh_rotates_and_reuse_revokes_the_client(live):
 
 def test_expired_dify_login_blocks_refresh_until_reauthorized(live):
     client, tokens = live.tokens()
-    store = live.server.config.app.app.state.login.store
+    store = live.server.config.app.state.login.store
     store._run("UPDATE users SET session_expires_at = ?", (int(time.time()) - 1,))
     assert live.rpc(tokens["access_token"], "tools/list").status_code == 401
     refresh = live.http.post("/token", data={"grant_type": "refresh_token", "client_id": client["client_id"],
@@ -160,7 +160,7 @@ def test_expired_dify_login_blocks_refresh_until_reauthorized(live):
 
 def test_new_login_replaces_the_previous_config_directory(live):
     _, first = live.tokens()
-    store = live.server.config.app.app.state.login.store
+    store = live.server.config.app.state.login.store
     old = store.user("acc-1")["config_dir"]
     control(live.settings, approve=False)
     _, second = live.tokens()

@@ -206,7 +206,7 @@ def test_workspace_refresh_and_logout(live):
     assert live.call(token, "difyctl_use_workspace", {"workspace_id": "ws-2"})["result"]["workspace_id"] == "ws-2"
     assert live.call(token, "difyctl_use_workspace", {"workspace_id": "ws 2;"})["error"]["code"] == "invalid_input"
     assert live.call(token, "difyctl_refresh_catalog")["outcome"] == "success"
-    config = live.server.config.app.app.state.login.store.user("acc-1")["config_dir"]
+    config = live.server.config.app.state.login.store.user("acc-1")["config_dir"]
     logout = live.call(token, "difyctl_logout")
     assert logout["outcome"] == "success" and not Path(config).exists()
     assert live.rpc(token, "tools/list").status_code == 401

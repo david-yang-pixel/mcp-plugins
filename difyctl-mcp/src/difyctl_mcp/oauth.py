@@ -159,11 +159,12 @@ class Provider:
             raise TokenError("invalid_grant", "The Dify login has ended; authorize again")
         return user["session_expires_at"]
 
-    def _issue(self, client_id: str, account_id: str, scopes: list[str], resource: str, session_end: int) -> OAuthToken:
+    def _issue(self, client_id: str, account_id: str, scopes: list[str], resource: str, session_end: int,
+               family: str | None = None) -> OAuthToken:
         now = int(time.time())
         access, refresh = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         access_expires = min(now + self.settings.access_token_ttl_seconds, session_end)
-        self.store.save_tokens(access, refresh, client_id, account_id, scopes, resource, access_expires, session_end)
+        self.store.save_tokens(access, refresh, client_id, account_id, scopes, resource, access_expires, session_end, family)
         return OAuthToken(access_token=access, token_type="Bearer", expires_in=max(access_expires - now, 1),
                           refresh_token=refresh, scope=" ".join(scopes))
 
@@ -186,12 +187,13 @@ class Provider:
 
     async def exchange_refresh_token(self, client: OAuthClientInformationFull, refresh_token: RefreshToken,
                                      scopes: list[str]) -> OAuthToken:
-        if not self.store.rotate_refresh(refresh_token.token):
+        family = self.store.rotate_refresh(refresh_token.token)
+        if family is None:
             self.store.revoke_account(refresh_token.subject, client.client_id)
             raise TokenError("invalid_grant", "Refresh token was already used")
         session_end = self._session(refresh_token.subject)
         return self._issue(client.client_id, refresh_token.subject, scopes, refresh_token.resource or self.settings.resource,
-                           session_end)
+                           session_end, family)
 
     async def load_access_token(self, token: str) -> AccessToken | None:
         key = self.settings.api_key

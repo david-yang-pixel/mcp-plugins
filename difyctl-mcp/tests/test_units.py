@@ -429,3 +429,68 @@ def test_concurrent_uploads_cannot_overshoot_the_quota(tmp_path):
     for t in threads:
         t.join()
     assert outcomes.count("ok") == 3 and files.usage(work)[0] == 90
+
+
+def test_refresh_history_is_bounded_but_recent_reuse_is_detected(tmp_path):
+    from difyctl_mcp.store import RETIRED_PER_FAMILY
+    store = Store(tmp_path / "auth.db")
+    tokens = ["r0"]
+    store.save_tokens("a0", "r0", "client", "acc", ["difyctl:read"], "res", int(time.time()) + 60, int(time.time()) + 600)
+    for i in range(1, 50):
+        family = store.rotate_refresh(tokens[-1])
+        assert family is not None
+        tokens.append(f"r{i}")
+        store.save_tokens(f"a{i}", f"r{i}", "client", "acc", ["difyctl:read"], "res", int(time.time()) + 60,
+                          int(time.time()) + 600, family)
+    assert store._one("SELECT COUNT(*) FROM refresh_tokens")[0] == RETIRED_PER_FAMILY + 1
+    assert store._one("SELECT COUNT(*) FROM access_tokens")[0] == 1
+    assert store.refresh_token(tokens[-2]).revoked_at is not None  # a recently retired token is still recognized
+    assert store.refresh_token(tokens[0]) is None and store.rotate_refresh(tokens[-2]) is None
+
+
+def test_large_mcp_requests_are_bounded_before_the_body_is_read(tmp_path):
+    from types import SimpleNamespace
+    from difyctl_mcp.app import LargeRequestLimit
+    settings = Settings(max_concurrent_uploads=2, max_account_uploads=1)
+    gate = asyncio.Event()
+    read = []
+
+    class Inner:
+        state = SimpleNamespace()
+
+        async def __call__(self, scope, receive, send):
+            read.append(scope["headers"])
+            await gate.wait()
+
+    class Provider_:
+        async def load_access_token(self, token):
+            return SimpleNamespace(subject=token.split("-")[0], client_id="c")
+
+    limiter = LargeRequestLimit(Inner(), Provider_(), settings)
+    responses = []
+
+    def request(token, length=b"5000000"):
+        scope = {"type": "http", "path": "/mcp", "method": "POST",
+                 "headers": [(b"authorization", b"Bearer " + token.encode()), (b"content-length", length)]}
+
+        async def receive():
+            raise AssertionError("a refused request must not be read")
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                responses.append(message["status"])
+        return limiter(scope, receive, send)
+
+    async def scenario():
+        first = asyncio.create_task(request("alice-1"))
+        await asyncio.sleep(0.01)
+        await request("alice-2")                  # same account: refused
+        second = asyncio.create_task(request("bob-1"))
+        await asyncio.sleep(0.01)
+        await request("carol-1")                  # global limit of 2 reached: refused
+        small = asyncio.create_task(request("alice-3", b"100"))  # small requests are not limited
+        await asyncio.sleep(0.01)
+        gate.set()
+        await asyncio.gather(first, second, small)
+    asyncio.run(scenario())
+    assert responses == [503, 503] and len(read) == 3 and limiter.active == 0 and not limiter.per_account

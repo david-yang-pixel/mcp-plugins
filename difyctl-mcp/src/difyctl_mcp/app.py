@@ -45,6 +45,7 @@ from .store import Store
 
 log = logging.getLogger("difyctl_mcp")
 MCP_BODY_LIMIT = 36 * 1024 * 1024  # a 25 MB file as base64 plus JSON-RPC framing
+LARGE_REQUEST_BYTES = 1024 * 1024
 FORM_BODY_LIMIT = 64 * 1024
 RATE_LIMITS = {"/register": (20, 3600), "/token": (60, 60), "/revoke": (60, 60), "/authorize": (30, 60), "/login": (120, 60)}
 INSTRUCTIONS = """difyctl for Dify, running as the Dify account that authorized this connection.
@@ -61,6 +62,7 @@ class RateLimit:
 
     def __init__(self, app: ASGIApp):
         self.app = app
+        self.state = app.state
         self.hits: dict[tuple[str, str], deque] = defaultdict(deque)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
@@ -85,6 +87,49 @@ class RateLimit:
                 if len(self.hits) > 50_000:
                     self.hits.clear()
         await self.app(scope, receive, send)
+
+
+class LargeRequestLimit:
+    """Bound concurrent large /mcp requests (uploads) before their body is read or decoded.
+
+    A request whose Content-Length exceeds LARGE_REQUEST_BYTES, or that has none, takes a global slot
+    and a per-account slot; when none is free it is refused at once with 503 instead of being buffered.
+    """
+
+    def __init__(self, app: ASGIApp, provider, settings: Settings):
+        self.app, self.provider, self.settings = app, provider, settings
+        self.state = app.state
+        self.active = 0
+        self.per_account: dict[str, int] = defaultdict(int)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] != "http" or scope.get("path") != "/mcp" or scope.get("method") != "POST":
+            await self.app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers") or [])
+        length = headers.get(b"content-length", b"").decode()
+        if length.isdigit() and int(length) <= LARGE_REQUEST_BYTES:
+            await self.app(scope, receive, send)
+            return
+        authorization = headers.get(b"authorization", b"").decode()
+        token = await self.provider.load_access_token(authorization[7:]) if authorization.lower().startswith("bearer ") else None
+        if token is None:
+            await self.app(scope, receive, send)  # rejected with 401 by the auth middleware before the body is read
+            return
+        key = token.subject or token.client_id
+        if self.active >= self.settings.max_concurrent_uploads or self.per_account[key] >= self.settings.max_account_uploads:
+            await JSONResponse({"error": "busy", "error_description": "Too many large requests in progress; retry shortly"},
+                               status_code=503, headers={"Retry-After": "5"})(scope, receive, send)
+            return
+        self.active += 1
+        self.per_account[key] += 1
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            self.active -= 1
+            self.per_account[key] -= 1
+            if not self.per_account[key]:
+                del self.per_account[key]
 
 
 def cors(app: ASGIApp, methods: list[str]) -> ASGIApp:
@@ -206,7 +251,7 @@ def create_app(settings: Settings | None = None, *, runner: Runner | None = None
                                      transport_security=security)
     app.router.routes.extend(routes)
     app.state.login = login
-    return RateLimit(app)
+    return RateLimit(LargeRequestLimit(app, provider, settings))
 
 
 def register_tools(server: MCPServer, service: Service, settings: Settings) -> None:
@@ -332,7 +377,7 @@ def guide(skills_dir: Path, document: str | None) -> dict:
 
 
 def maintenance(app, settings: Settings, stop: threading.Event) -> None:
-    login: Login = app.app.state.login
+    login: Login = app.state.login
     while not stop.wait(300):
         try:
             login.cleanup()
@@ -346,7 +391,7 @@ def main():
     settings = Settings.from_env()
     app = create_app(settings)
     stop = threading.Event()
-    app.app.state.login.cleanup()
+    app.state.login.cleanup()
     threading.Thread(target=maintenance, args=(app, settings, stop), daemon=True).start()
     try:
         uvicorn.run(app, host=settings.host, port=settings.port, access_log=False, log_level="warning")

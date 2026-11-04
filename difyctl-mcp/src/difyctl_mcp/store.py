@@ -71,11 +71,17 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     scopes TEXT NOT NULL,
     resource TEXT NOT NULL,
     expires_at INTEGER NOT NULL,
-    revoked_at INTEGER
+    revoked_at INTEGER,
+    family TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS refresh_family ON refresh_tokens(family, revoked_at);
 CREATE INDEX IF NOT EXISTS access_account ON access_tokens(account_id, client_id);
 CREATE INDEX IF NOT EXISTS refresh_account ON refresh_tokens(account_id, client_id);
 """
+
+
+# Retired refresh tokens kept per token family to detect reuse; older ones are deleted (constant space).
+RETIRED_PER_FAMILY = 5
 
 
 def digest(value: str) -> str:
@@ -204,10 +210,12 @@ class Store:
 
     # Tokens ----------------------------------------------------------------------
     def save_tokens(self, access: str, refresh: str, client_id: str, account_id: str, scopes: list[str],
-                    resource: str, access_expires: int, refresh_expires: int) -> None:
+                    resource: str, access_expires: int, refresh_expires: int, family: str | None = None) -> None:
         with self.lock:
-            self._run("INSERT INTO refresh_tokens VALUES (?, ?, ?, ?, ?, ?, NULL)",
-                      (digest(refresh), client_id, account_id, " ".join(scopes), resource, refresh_expires))
+            self._run("INSERT INTO refresh_tokens (token_hash, client_id, account_id, scopes, resource, expires_at, "
+                      "revoked_at, family) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)",
+                      (digest(refresh), client_id, account_id, " ".join(scopes), resource, refresh_expires,
+                       family or digest(refresh)))
             self._run("INSERT INTO access_tokens VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
                       (digest(access), client_id, account_id, " ".join(scopes), resource, digest(refresh), access_expires))
 
@@ -225,15 +233,23 @@ class Store:
     def refresh_token(self, token: str) -> TokenRow | None:
         return self._token(self._one("SELECT * FROM refresh_tokens WHERE token_hash = ?", (digest(token),)))
 
-    def rotate_refresh(self, token: str) -> bool:
-        """Retire a refresh token and the access tokens it produced; False if it was already used."""
+    def rotate_refresh(self, token: str) -> str | None:
+        """Retire a refresh token, drop its access tokens and return its family; None if it was already used.
+
+        Only the newest RETIRED_PER_FAMILY retired tokens of a family are kept, so endless rotation
+        cannot grow the database while recent reuse is still detected.
+        """
         now = int(time.time())
         with self.lock:
-            changed = self._run("UPDATE refresh_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL",
-                                (now, digest(token)))
-            self._run("UPDATE access_tokens SET revoked_at = ? WHERE refresh_hash = ? AND revoked_at IS NULL",
-                      (now, digest(token)))
-        return changed == 1
+            row = self._one("SELECT family FROM refresh_tokens WHERE token_hash = ? AND revoked_at IS NULL", (digest(token),))
+            if row is None:
+                return None
+            self._run("UPDATE refresh_tokens SET revoked_at = ? WHERE token_hash = ?", (now, digest(token)))
+            self._run("DELETE FROM access_tokens WHERE refresh_hash = ?", (digest(token),))
+            self._run("DELETE FROM refresh_tokens WHERE family = ? AND revoked_at IS NOT NULL AND token_hash NOT IN "
+                      "(SELECT token_hash FROM refresh_tokens WHERE family = ? AND revoked_at IS NOT NULL "
+                      "ORDER BY revoked_at DESC, rowid DESC LIMIT ?)", (row["family"], row["family"], RETIRED_PER_FAMILY))
+        return row["family"]
 
     def revoke_family(self, *, access: str | None = None, refresh: str | None = None) -> None:
         now = int(time.time())
