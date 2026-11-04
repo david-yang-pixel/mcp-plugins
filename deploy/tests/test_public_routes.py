@@ -223,6 +223,19 @@ class PublicVerificationTests(unittest.TestCase):
                 with self.assertRaisesRegex(server.DeployError, 'OAuth discovery'):
                     server.verify_oauth_metadata('difyctl-mcp', REVISION)
 
+    def test_every_published_endpoint_must_belong_to_the_issuer(self):
+        for key in ('registration_endpoint', 'revocation_endpoint'):
+            metadata = self.metadata()
+            metadata[1][0][key] = 'https://evil.example/' + key
+            with self.subTest(key=key), patch.object(server, 'public_metadata', side_effect=metadata):
+                with self.assertRaisesRegex(server.DeployError, 'OAuth discovery'):
+                    server.verify_oauth_metadata('difyctl-mcp', REVISION)
+        metadata = self.metadata()
+        issuer = server.PUBLIC_ORIGIN + '/difyctl-mcp'
+        metadata[1][0].update(registration_endpoint=issuer + '/register', revocation_endpoint=issuer + '/revoke')
+        with patch.object(server, 'public_metadata', side_effect=metadata):
+            server.verify_oauth_metadata('difyctl-mcp', REVISION)
+
     def test_services_without_oauth_skip_metadata(self):
         unauthorized = urllib.error.HTTPError('https://example.invalid', 401, 'Unauthorized', {}, None)
         response = ({'result': {'tools': [{'name': 'example'}]}}, REVISION)

@@ -587,6 +587,9 @@ def verify_oauth_metadata(service, revision=None):
             str(server_metadata.get('issuer', '')).rstrip('/') != issuer or
             not str(server_metadata.get('authorization_endpoint', '')).startswith(issuer + '/') or
             not str(server_metadata.get('token_endpoint', '')).startswith(issuer + '/') or
+            # Every published endpoint (registration, revocation, ...) must belong to this service too.
+            any(key.endswith('_endpoint') and not str(value).startswith(issuer + '/')
+                for key, value in server_metadata.items()) or
             (revision and (first != revision or second != revision))):
         raise DeployError('Public OAuth discovery metadata check failed')
 

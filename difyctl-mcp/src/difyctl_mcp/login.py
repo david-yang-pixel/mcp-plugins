@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import socket
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +34,7 @@ log = logging.getLogger("difyctl_mcp.login")
 COOKIE = "difyctl_login_"
 USER_CODE = re.compile(r"[A-Za-z0-9-]{4,32}")
 PENDING_ID = re.compile(r"[A-Za-z0-9_-]{20,64}")
+COMPLETING_GRACE_SECONDS = 300
 EXPIRY_FIELDS = ("expires_at", "expire_at", "expired_at", "expires", "expiry")
 MAX_SESSION_SECONDS = 30 * 24 * 3600
 SCOPE_TEXT = {"difyctl:read": "读取（read）", "difyctl:write": "读取和修改（write）",
@@ -102,6 +104,8 @@ class Login:
         self.settings, self.store, self.runner = service.settings, service.store, service.runner
         self.busy: set[str] = set()
         self.hostname = socket.gethostname()
+        # Serializes session adoption with the maintenance thread's cleanup of pending logins.
+        self.adoption = threading.Lock()
 
     # Cookie binding ------------------------------------------------------------------
     # Login pages live at fixed paths (/login?request=<id>, /login/start), so Nginx publishes only exact routes.
@@ -257,11 +261,24 @@ class Login:
         expires = session_expiry(sessions.json() if sessions.exit_code == 0 else None, self.hostname, now,
                                  self.settings.session_fallback_seconds)
         async with self.service.locks[account_id].write():
-            replaced = self.store.adopt_session(account_id, email, str(config_dir), expires)
+            with self.adoption:
+                current = self.store.pending(pending["id"])
+                if current is None or current["status"] != "completing" or not config_dir.is_dir():
+                    # Cleanup removed this expired login meanwhile: adopt nothing, keep the previous session.
+                    valid = False
+                else:
+                    valid = True
+                    replaced = self.store.adopt_session(account_id, email, str(config_dir), expires)
+                    self.store.update_pending(pending["id"], status="approved", config_dir=None, user_code=None)
+            if not valid:
+                if config_dir.is_dir():
+                    await self.discard(config_dir)
+                if current is not None:
+                    self.fail(pending["id"], None, "授权请求已过期，请回到 MCP 客户端重新连接。")
+                return page("授权请求已失效", "<p>此授权请求已过期。请回到 MCP 客户端重新连接。</p>", status=404)
             remove_tree(replaced, self.settings.sessions_dir)
             self.service.clear_descriptors(account_id)
         code = self.provider.issue_code(pending, params, account_id)
-        self.store.update_pending(pending["id"], status="approved", config_dir=None, user_code=None)
         log.info("authorized account %s for client %s", account_id, pending["client_id"])
         return RedirectResponse(construct_redirect_uri(params["redirect_uri"], code=code, state=params["state"],
                                                        iss=self.settings.issuer),
@@ -278,9 +295,17 @@ class Login:
 
     # Maintenance ---------------------------------------------------------------------------
     def cleanup(self) -> None:
+        with self.adoption:
+            self._cleanup()
+
+    def _cleanup(self) -> None:
         sessions = self.settings.sessions_dir
         adopted = self.store.user_dirs()
+        now = int(time.time())
         for pending in self.store.expired_pending():
+            # A login being completed right at expiry gets a short grace period before it is removed.
+            if pending["status"] == "completing" and pending["expires_at"] > now - COMPLETING_GRACE_SECONDS:
+                continue
             if pending["config_dir"] and pending["config_dir"] not in adopted:
                 remove_tree(pending["config_dir"], sessions)
             self.store.delete_pending(pending["id"])

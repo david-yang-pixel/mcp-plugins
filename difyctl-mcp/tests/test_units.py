@@ -333,3 +333,54 @@ def test_concurrency_limits_fail_fast(tmp_path):
         await first
         return unlimited
     assert asyncio.run(global_limit()).exit_code == 0 and runner.active == 0
+
+
+def test_cleanup_during_completion_never_adopts_a_removed_login(tmp_path):
+    import json as _json
+    from difyctl_mcp.runner import Run
+    settings = Settings(public_url="https://mcp.example/difyctl-mcp", allowed_emails=["a@example.com"],
+                        allowed_redirect_uris=["https://c.example/cb"], api_key="k", data_dir=tmp_path)
+    store = Store(settings.database)
+    holder = {}
+
+    class Runner_:
+        async def run(self, args, *, config_dir, **_):
+            if args[:3] == ["describe", "account", "--input"]:
+                return Run(0, _json.dumps({"id": "acc", "email": "a@example.com"}), "")
+            if args[:3] == ["get", "account", "session"]:
+                # The pending login expires and maintenance runs while Dify is being queried.
+                store._run("UPDATE pending SET expires_at = ?", (int(time.time()) - 3600,))
+                holder["login"].cleanup()
+                return Run(0, "{}", "")
+            return Run(0, "{}", "")
+    login = Login(Service(settings, store, Runner_()), Provider(settings, store))
+    holder["login"] = login
+    login.ensure_dirs()
+    previous, fresh = settings.sessions_dir / "previous", settings.sessions_dir / "fresh"
+    previous.mkdir()
+    fresh.mkdir()
+    store.adopt_session("acc", "a@example.com", str(previous), int(time.time()) + 3600)
+    store.create_pending("q" * 32, "client", {"redirect_uri": "https://c.example/cb", "state": None, "scopes": ["difyctl:read"],
+                                              "code_challenge": "x", "explicit": True, "resource": settings.resource}, "cookie", ttl=900)
+    store.update_pending("q" * 32, status="completing", config_dir=str(fresh))
+    response = asyncio.run(login.complete(store.pending("q" * 32), fresh, {"email": "a@example.com"}))
+    assert response.status_code == 404
+    assert store.user("acc")["config_dir"] == str(previous) and previous.is_dir() and not fresh.exists()
+    assert store._one("SELECT COUNT(*) FROM auth_codes")[0] == 0
+
+
+def test_cleanup_gives_a_completing_login_a_grace_period(tmp_path):
+    settings = Settings(public_url="https://mcp.example/difyctl-mcp", allowed_emails=["a@example.com"],
+                        allowed_redirect_uris=["https://c.example/cb"], api_key="k", data_dir=tmp_path)
+    store = Store(settings.database)
+    login = Login(Service(settings, store, Runner("/bin/true", tmp_path)), Provider(settings, store))
+    login.ensure_dirs()
+    folder = settings.sessions_dir / "busy"
+    folder.mkdir()
+    store.create_pending("c" * 32, "client", {}, "cookie", ttl=-10)
+    store.update_pending("c" * 32, status="completing", config_dir=str(folder))
+    login.cleanup()
+    assert folder.is_dir() and store.pending("c" * 32) is not None
+    store._run("UPDATE pending SET expires_at = ?", (int(time.time()) - 3600,))
+    login.cleanup()
+    assert not folder.exists() and store.pending("c" * 32) is None
