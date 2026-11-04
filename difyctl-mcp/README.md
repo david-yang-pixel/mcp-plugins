@@ -90,7 +90,7 @@ MCP 客户端 → Nginx (HTTPS) → difyctl-mcp 容器 (0.0.0.0:8000, bridge) �
 - 账号由访问令牌的 subject 确定，调用方不能指定配置目录；不经过 shell，业务参数全部用 JSON 走 stdin。
 - 操作名需匹配 `^[a-z0-9_]+([. ][a-z0-9_]+)*$`，且 `difyctl help <id> --json` 返回的 descriptor 必须带 `op`（本地命令如 `install skills`、`set config`、`login` 不能执行）。descriptor 缓存 5 分钟。
 - 子进程环境变量只有 `PATH`、`HOME`、`DIFY_CONFIG_DIR`、`DIFY_OUTPUT=json` 和代理变量；不设置 `DIFY_TOKEN`、`DIFY_WORKSPACE_ID`。
-- 同一账号的登录切换、`use workspace`、`logout` 与普通调用用读写锁隔开。
+- 同一账号的登录切换、`use workspace`、`logout` 与普通调用用读写锁隔开；锁为写者优先，持续的调用不能阻止 logout 或重新授权。
 
 ### 权限分类
 
@@ -138,6 +138,7 @@ MCP 客户端 → Nginx (HTTPS) → difyctl-mcp 容器 (0.0.0.0:8000, bridge) �
 | `DIFYCTL_MAX_EFFECT` | runtime.json | 默认 `destructive`；更低时不注册更高等级的工具，也不授予对应 scope |
 | `DIFYCTL_TIMEOUT_SECONDS`、`DIFYCTL_MAX_TIMEOUT_SECONDS` | runtime.json | 默认 90、600 |
 | `DIFYCTL_MAX_OUTPUT_CHARS` | runtime.json | 默认 100000 |
+| `DIFYCTL_MAX_CONCURRENT`、`DIFYCTL_MAX_ACCOUNT_CONCURRENT` | 可选环境变量 | 全局和单账户同时运行的 difyctl 进程上限，默认 16、4；超限立即返回 `busy` 和 `retry_after_seconds`，不排队 |
 
 升级 difyctl：修改 Dockerfile 的 `DIFY_VERSION` 和 `DIFYCTL_SHA256`（取自新 release 的 checksums 文件），重新构建；数据卷保留登录信息。升级后要回归登录流程（依赖 `login --no-wait` 和 `--resume`）。
 

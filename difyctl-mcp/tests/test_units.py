@@ -253,3 +253,83 @@ def test_calls_waiting_on_a_login_switch_use_the_new_config_dir(tmp_path):
         return await waiting
     assert asyncio.run(scenario())["outcome"] == "success"
     assert used == [str(tmp_path / "new")]
+
+
+def test_waiting_writer_blocks_new_readers_and_cancellation_releases_them():
+    from difyctl_mcp.service import RWLock
+
+    async def scenario():
+        lock, order = RWLock(), []
+        release = asyncio.Event()
+
+        async def reader(name, hold=None):
+            async with lock.read():
+                order.append(name)
+                if hold:
+                    await hold.wait()
+
+        async def writer():
+            async with lock.write():
+                order.append("writer")
+        first = asyncio.create_task(reader("r1", release))
+        await asyncio.sleep(0.01)
+        pending_writer = asyncio.create_task(writer())
+        await asyncio.sleep(0.01)
+        late = asyncio.create_task(reader("r2"))
+        await asyncio.sleep(0.01)
+        assert order == ["r1"]  # the late reader queues behind the waiting writer
+        release.set()
+        await asyncio.gather(first, pending_writer, late)
+        assert order == ["r1", "writer", "r2"]
+        # A writer cancelled while waiting must not leave readers blocked.
+        release.clear()
+        holder = asyncio.create_task(reader("r3", release))
+        await asyncio.sleep(0.01)
+        cancelled = asyncio.create_task(writer())
+        await asyncio.sleep(0.01)
+        cancelled.cancel()
+        await asyncio.wait_for(reader("r4"), 1)
+        release.set()
+        await holder
+        return order
+    assert asyncio.run(scenario())[-2:] == ["r3", "r4"]
+
+
+def test_concurrency_limits_fail_fast(tmp_path):
+    from types import SimpleNamespace
+    from difyctl_mcp.runner import Run, RunnerBusy
+    settings = Settings(public_url="https://mcp.example/difyctl-mcp", allowed_emails=["a@example.com"],
+                        allowed_redirect_uris=["https://c.example/cb"], api_key="k", data_dir=tmp_path, max_account_runs=2)
+    store = Store(settings.database)
+    store.adopt_session("acc", "a@example.com", str(tmp_path / "cfg"), int(time.time()) + 3600)
+    gate = asyncio.Event()
+
+    class Slow:
+        async def run(self, args, **_):
+            await gate.wait()
+            return Run(0, "{}", "")
+    service = Service(settings, store, Slow())
+    token = SimpleNamespace(subject="acc", client_id="client", scopes=["difyctl:read"])
+
+    async def scenario():
+        running = [asyncio.create_task(service.refresh_catalog(token)) for _ in range(2)]
+        await asyncio.sleep(0.01)
+        rejected = await service.refresh_catalog(token)
+        gate.set()
+        done = await asyncio.gather(*running)
+        return rejected, done
+    rejected, done = asyncio.run(scenario())
+    assert rejected["error"]["code"] == "busy" and rejected["retry_after_seconds"] == 5
+    assert [d["outcome"] for d in done] == ["success", "success"] and service.running["acc"] == 0
+
+    runner = Runner("/bin/sleep", tmp_path, max_concurrent=1)
+
+    async def global_limit():
+        first = asyncio.create_task(runner.run(["1"], config_dir=tmp_path))
+        await asyncio.sleep(0.05)
+        with pytest.raises(RunnerBusy):
+            await runner.run(["0"], config_dir=tmp_path)
+        unlimited = await runner.run(["0"], config_dir=tmp_path, limited=False)
+        await first
+        return unlimited
+    assert asyncio.run(global_limit()).exit_code == 0 and runner.active == 0

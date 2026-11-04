@@ -191,7 +191,7 @@ class Login:
         config_dir.mkdir(parents=True, mode=0o700)
         self.store.update_pending(pending["id"], config_dir=str(config_dir))
         run = await self.runner.run(["login", "--server", self.settings.dify_server, "--no-browser", "--no-wait",
-                                     "--no-keyring", "--json"], config_dir=config_dir, timeout=60)
+                                     "--no-keyring", "--json"], config_dir=config_dir, timeout=60, limited=False)
         data = run.json() if run.exit_code == 0 else None
         uri = data.get("verification_uri") if isinstance(data, dict) else None
         code = data.get("user_code") if isinstance(data, dict) else None
@@ -216,7 +216,7 @@ class Login:
         self.busy.add(pending["id"])
         try:
             config_dir = Path(pending["config_dir"])
-            run = await self.runner.run(["login", "--resume", "--json"], config_dir=config_dir, timeout=60)
+            run = await self.runner.run(["login", "--resume", "--json"], config_dir=config_dir, timeout=60, limited=False)
             data = run.json()
             if run.exit_code == 0 and isinstance(data, dict) and data.get("status") == "pending":
                 return None
@@ -236,7 +236,7 @@ class Login:
     async def complete(self, pending: dict, config_dir: Path, login: dict) -> Response:
         params = json.loads(pending["params"])
         account_run = await self.runner.run(["describe", "account", "--input", "@-", "--json"], config_dir=config_dir,
-                                            stdin=b"{}", timeout=60)
+                                            stdin=b"{}", timeout=60, limited=False)
         account = account_run.json() if account_run.exit_code == 0 else None
         account = account if isinstance(account, dict) else {}
         saved = login.get("account") if isinstance(login.get("account"), dict) else {}
@@ -253,7 +253,7 @@ class Login:
             return await self.show_failed(pending)
         now = int(time.time())
         sessions = await self.runner.run(["get", "account", "session", "--input", "@-", "--json"], config_dir=config_dir,
-                                         stdin=b"{}", timeout=60)
+                                         stdin=b"{}", timeout=60, limited=False)
         expires = session_expiry(sessions.json() if sessions.exit_code == 0 else None, self.hostname, now,
                                  self.settings.session_fallback_seconds)
         async with self.service.locks[account_id].write():
@@ -269,7 +269,7 @@ class Login:
 
     async def discard(self, config_dir: Path) -> None:
         """End the Dify session on the server, then delete its local files."""
-        await self.runner.run(["logout", "--json"], config_dir=config_dir, timeout=60)
+        await self.runner.run(["logout", "--json"], config_dir=config_dir, timeout=60, limited=False)
         remove_tree(config_dir, self.settings.sessions_dir)
 
     async def show_failed(self, pending: dict) -> Response:

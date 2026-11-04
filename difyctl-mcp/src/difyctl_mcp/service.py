@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .files import remove_tree, save_output, workdir
 from .policy import (TOOL_FOR_LEVEL, PolicyError, check_files, check_input, classify, effect_name, tool_for, words)
-from .runner import Run, Runner, redact_value
+from .runner import Run, Runner, RunnerBusy, redact_value
 from .settings import LEVELS, SCOPES, Settings
 from .store import Store
 
@@ -30,17 +30,22 @@ WARN_BEFORE_SECONDS = 3 * 24 * 3600
 
 
 class RWLock:
-    """Many concurrent difyctl calls, or one exclusive login switch / logout / workspace change."""
+    """Many concurrent difyctl calls, or one exclusive login switch / logout / workspace change.
+
+    Writer-preferring: once a writer waits, new readers queue behind it, so a stream of calls
+    cannot keep a logout or re-authorization from ever running.
+    """
 
     def __init__(self):
         self._readers = 0
         self._writer = False
+        self._writers_waiting = 0
         self._condition = asyncio.Condition()
 
     @asynccontextmanager
     async def read(self):
         async with self._condition:
-            await self._condition.wait_for(lambda: not self._writer)
+            await self._condition.wait_for(lambda: not self._writer and self._writers_waiting == 0)
             self._readers += 1
         try:
             yield
@@ -52,7 +57,13 @@ class RWLock:
     @asynccontextmanager
     async def write(self):
         async with self._condition:
-            await self._condition.wait_for(lambda: not self._writer and self._readers == 0)
+            self._writers_waiting += 1
+            try:
+                await self._condition.wait_for(lambda: not self._writer and self._readers == 0)
+            finally:
+                # Also on cancellation: readers queued behind this writer must be released.
+                self._writers_waiting -= 1
+                self._condition.notify_all()
             self._writer = True
         try:
             yield
@@ -128,6 +139,7 @@ class Service:
     def __init__(self, settings: Settings, store: Store, runner: Runner):
         self.settings, self.store, self.runner = settings, store, runner
         self.locks: dict[str, RWLock] = defaultdict(RWLock)
+        self.running: dict[str, int] = defaultdict(int)
         self.descriptors: dict[tuple[str, tuple[str, ...]], tuple[float, dict]] = {}
 
     # Identity ------------------------------------------------------------------
@@ -157,8 +169,19 @@ class Service:
     # Running -------------------------------------------------------------------
     async def _run(self, account: Account, args: list[str], *, stdin: bytes | None = None,
                    timeout: float | None = None) -> Run:
-        return await self.runner.run(args, config_dir=account.config_dir, cwd=account.workdir, stdin=stdin,
-                                     timeout=timeout or self.settings.timeout_seconds)
+        # Fail fast instead of queueing: each run holds a process and up to 64 MiB of captured output.
+        if self.running[account.account_id] >= self.settings.max_account_runs:
+            raise Failure("busy", f"This account already has {self.settings.max_account_runs} difyctl calls running.",
+                          retry_after_seconds=5, next_step="Wait for running calls to finish, then retry.")
+        self.running[account.account_id] += 1
+        try:
+            return await self.runner.run(args, config_dir=account.config_dir, cwd=account.workdir, stdin=stdin,
+                                         timeout=timeout or self.settings.timeout_seconds)
+        except RunnerBusy:
+            raise Failure("busy", "The server is at its difyctl concurrency limit.", retry_after_seconds=5,
+                          next_step="Retry in a few seconds.") from None
+        finally:
+            self.running[account.account_id] -= 1
 
     async def descriptor(self, account: Account, op_words: list[str]) -> dict:
         key = (account.account_id, tuple(op_words))
@@ -328,8 +351,11 @@ class Service:
                 account = self.account(token, LEVELS["read"])
             except Failure as failure:
                 return failure.payload
-            version, login = await asyncio.gather(self._run(account, ["version", "--json"]),
-                                                  self._run(account, ["login", "--resume", "--json"]))
+            try:
+                version = await self._run(account, ["version", "--json"])
+                login = await self._run(account, ["login", "--resume", "--json"])
+            except Failure as failure:
+                return failure.payload
         login_view = self.shape(account, "login resume", login, None)
         if login_view["outcome"] == "failed":
             return login_view

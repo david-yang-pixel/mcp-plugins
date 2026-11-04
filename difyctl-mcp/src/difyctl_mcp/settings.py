@@ -56,6 +56,8 @@ class Settings:
     code_ttl_seconds: int = 300
     session_fallback_seconds: int = 14 * 24 * 3600
     max_clients: int = 1000
+    max_concurrent_runs: int = 16
+    max_account_runs: int = 4
 
     @classmethod
     def from_env(cls, env=None) -> "Settings":
@@ -78,6 +80,8 @@ class Settings:
             timeout_seconds=_int(env, "DIFYCTL_TIMEOUT_SECONDS", 90, 1, 3600),
             max_timeout_seconds=_int(env, "DIFYCTL_MAX_TIMEOUT_SECONDS", 600, 1, 3600),
             max_output_chars=_int(env, "DIFYCTL_MAX_OUTPUT_CHARS", 100_000, 1_000, 10_000_000),
+            max_concurrent_runs=_int(env, "DIFYCTL_MAX_CONCURRENT", 16, 1, 256),
+            max_account_runs=_int(env, "DIFYCTL_MAX_ACCOUNT_CONCURRENT", 4, 1, 64),
         )
         settings.validate()
         return settings

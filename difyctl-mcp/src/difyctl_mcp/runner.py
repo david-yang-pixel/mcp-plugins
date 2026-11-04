@@ -82,11 +82,17 @@ def split_stderr(stderr: str) -> tuple[list[str], dict | None]:
     return [l for l in lines if l.strip()], None
 
 
+class RunnerBusy(Exception):
+    """The global limit on concurrent difyctl processes is reached."""
+
+
 class Runner:
-    def __init__(self, binary: str, home: Path, environ=None):
+    def __init__(self, binary: str, home: Path, environ=None, max_concurrent: int = 16):
         self.binary = binary
         self.home = home
         self.environ = os.environ if environ is None else environ
+        self.max_concurrent = max_concurrent
+        self.active = 0
 
     def environment(self, config_dir: Path) -> dict[str, str]:
         # DIFY_TOKEN and DIFY_WORKSPACE_ID are deliberately never set: they disable logout and use workspace.
@@ -98,9 +104,21 @@ class Runner:
         return env
 
     async def run(self, args: list[str], *, config_dir: Path, cwd: Path | None = None,
-                  stdin: bytes | None = None, timeout: float = 90) -> Run:
+                  stdin: bytes | None = None, timeout: float = 90, limited: bool = True) -> Run:
+        """Run once. limited=False is only for the login page, which is rate limited per client IP."""
         if any(not isinstance(a, str) or "\0" in a for a in args):
             raise ValueError("Invalid difyctl argument")
+        if not limited:
+            return await self._run(args, config_dir, cwd, stdin, timeout)
+        if self.active >= self.max_concurrent:
+            raise RunnerBusy()
+        self.active += 1
+        try:
+            return await self._run(args, config_dir, cwd, stdin, timeout)
+        finally:
+            self.active -= 1
+
+    async def _run(self, args, config_dir, cwd, stdin, timeout) -> Run:
         started = time.monotonic()
         process = await asyncio.create_subprocess_exec(
             self.binary, *args, cwd=str(cwd or self.home), env=self.environment(config_dir),
