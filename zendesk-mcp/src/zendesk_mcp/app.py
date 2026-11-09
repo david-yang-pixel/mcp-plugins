@@ -172,7 +172,7 @@ def _zendesk_auth_health(settings: Settings) -> dict[str, Any]:
     status = _oauth_provider(settings).status()
     return {
         "zendesk_auth_mode": "oauth",
-        "zendesk_configured": bool(status.get("credentials")),
+        "zendesk_configured": bool(status.get("authorized")),
         "zendesk_oauth": status,
     }
 

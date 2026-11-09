@@ -25,7 +25,8 @@ class Settings:
     zendesk_api_token: str
     zendesk_auth_mode: str = "api_token"
     zendesk_oauth_file: str = ""
-    zendesk_oauth_seed_file: str = ""
+    zendesk_oauth_client_id: str = "dify_zendesk_cli"
+    zendesk_oauth_scope: str = ""
     zendesk_oauth_expected_user_id: str = ""
     zendesk_oauth_keepalive_hours: float = 24.0
 
@@ -71,7 +72,8 @@ def get_settings() -> Settings:
         zendesk_api_token=os.getenv("ZENDESK_API_TOKEN", ""),
         zendesk_auth_mode=os.getenv("ZENDESK_AUTH_MODE", "api_token").strip().lower() or "api_token",
         zendesk_oauth_file=os.getenv("ZENDESK_OAUTH_FILE", ""),
-        zendesk_oauth_seed_file=os.getenv("ZENDESK_OAUTH_SEED_FILE", ""),
+        zendesk_oauth_client_id=os.getenv("ZENDESK_OAUTH_CLIENT_ID", "dify_zendesk_cli").strip() or "dify_zendesk_cli",
+        zendesk_oauth_scope=os.getenv("ZENDESK_OAUTH_SCOPE", "").strip(),
         zendesk_oauth_expected_user_id=os.getenv("ZENDESK_OAUTH_EXPECTED_USER_ID", ""),
         zendesk_oauth_keepalive_hours=max(0.0, _float_env("ZENDESK_OAUTH_KEEPALIVE_HOURS", 24.0)),
     )

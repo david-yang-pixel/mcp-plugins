@@ -11,7 +11,8 @@ from typing import Any, Callable, Optional
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
-from .client import ZendeskApiError, ZendeskClient
+from .client import ZendeskApiError, ZendeskClient, _oauth_provider
+from .oauth import OAuthError
 from .mcp_schema import PRIORITY_VALUES, STATUS_VALUES, TYPE_VALUES
 from .settings import Settings, get_settings
 
@@ -70,6 +71,9 @@ def handle_tool_call(name: str, arguments: dict[str, Any], *, settings: Optional
         "add_internal_note": _add_internal_note,
         "update_ticket_status": _update_ticket_status,
         "update_ticket_metadata": _update_ticket_metadata,
+        "zendesk_auth_status": _zendesk_auth_status,
+        "zendesk_auth_start": _zendesk_auth_start,
+        "zendesk_auth_complete": _zendesk_auth_complete,
     }
     handler = handlers.get(name)
     if not handler:
@@ -89,8 +93,59 @@ def handle_tool_call(name: str, arguments: dict[str, Any], *, settings: Optional
             status_code=e.status_code,
             detail=e.detail,
         )
+    except OAuthError as e:
+        return _failure("ZENDESK_OAUTH_ERROR", str(e))
     except ValueError as e:
         return _failure("BAD_ARGUMENTS", str(e))
+
+
+def _oauth_or_failure(settings: Settings):
+    if not settings.uses_oauth:
+        return None, _failure(
+            "OAUTH_DISABLED",
+            f"ZENDESK_AUTH_MODE is {settings.zendesk_auth_mode}; OAuth login is not used",
+        )
+    if not settings.zendesk_subdomain or not settings.zendesk_oauth_file:
+        return None, _failure("OAUTH_NOT_CONFIGURED", "ZENDESK_SUBDOMAIN and ZENDESK_OAUTH_FILE are required")
+    return _oauth_provider(settings), None
+
+
+def _zendesk_auth_status(args: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    if not settings.uses_oauth:
+        return _success(auth_mode=settings.zendesk_auth_mode)
+    provider, failure = _oauth_or_failure(settings)
+    if failure:
+        return failure
+    return _success(auth_mode="oauth", **provider.status())
+
+
+def _zendesk_auth_start(args: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    provider, failure = _oauth_or_failure(settings)
+    if failure:
+        return failure
+    started = provider.start_authorization()
+    return _success(
+        **started,
+        instructions=(
+            "Open authorization_url in a browser, sign in with the Zendesk account this MCP should act as, "
+            "and allow access. The browser then goes to http://127.0.0.1:8765/callback?code=...; that page "
+            "may fail to load, which is expected. Copy the full address from the address bar and call "
+            "zendesk_auth_complete with it as callback_url within 10 minutes."
+        ),
+    )
+
+
+def _zendesk_auth_complete(args: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    provider, failure = _oauth_or_failure(settings)
+    if failure:
+        return failure
+    authorized = provider.complete_authorization(args.get("callback_url", ""))
+    # Records who the MCP now acts as; no code or token is written.
+    audit_id = _write_audit(
+        settings,
+        {"action": "zendesk_oauth_authorized", "zendesk_user_id": authorized["user_id"]},
+    )
+    return _success(**authorized, audit_id=audit_id)
 
 
 def _get_ticket(args: dict[str, Any], settings: Settings) -> dict[str, Any]:

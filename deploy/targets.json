@@ -180,12 +180,9 @@
       "ZENDESK_MCP_WORKERS",
       "ZENDESK_OAUTH_FILE",
       "ZENDESK_OAUTH_KEEPALIVE_HOURS",
-      "ZENDESK_OAUTH_SEED_FILE",
       "ZENDESK_SUBDOMAIN"
     ],
-    "secret_file_paths": {
-      "ZENDESK_OAUTH_SEED": "/run/mcp-secrets/zendesk_oauth_seed.json"
-    }
+    "secret_file_paths": {}
   },
   "zendesk-browser-relay": {
     "port": 8097,

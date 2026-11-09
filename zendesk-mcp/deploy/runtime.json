@@ -14,7 +14,6 @@
     "ZENDESK_MCP_WORKERS": "1",
     "ZENDESK_OAUTH_FILE": "/var/lib/mcp/oauth/credentials.json",
     "ZENDESK_OAUTH_KEEPALIVE_HOURS": "24",
-    "ZENDESK_OAUTH_SEED_FILE": "/run/mcp-secrets/zendesk_oauth_seed.json",
     "ZENDESK_SUBDOMAIN": "langgenius"
   },
   "secrets": {
@@ -31,11 +30,5 @@
       "required": true
     }
   },
-  "secret_files": {
-    "ZENDESK_OAUTH_SEED": {
-      "name": "MCP_ZENDESK_MCP__ZENDESK_OAUTH_SEED",
-      "required": true,
-      "destination": "/run/mcp-secrets/zendesk_oauth_seed.json"
-    }
-  }
+  "secret_files": {}
 }

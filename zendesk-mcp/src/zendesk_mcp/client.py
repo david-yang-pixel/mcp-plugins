@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 import requests
 from requests.exceptions import ConnectionError, Timeout
 
-from .oauth import OAuthError, ZendeskBearerAuth, bearer_token, get_provider
+from .oauth import DEFAULT_SCOPE, OAuthError, ZendeskBearerAuth, bearer_token, get_provider
 from .settings import Settings, get_settings
 
 
@@ -369,7 +369,8 @@ def _oauth_provider(settings: Settings):
     return get_provider(
         subdomain=settings.zendesk_subdomain,
         path=settings.zendesk_oauth_file,
-        seed_path=settings.zendesk_oauth_seed_file,
+        client_id=settings.zendesk_oauth_client_id,
+        scope=settings.zendesk_oauth_scope or DEFAULT_SCOPE,
         expected_user_id=settings.zendesk_oauth_expected_user_id,
         timeout=(settings.connect_timeout_seconds, settings.read_timeout_seconds),
     )
@@ -385,7 +386,8 @@ def _thread_session(settings: Settings) -> requests.Session:
             settings.zendesk_base_url,
             "oauth",
             settings.zendesk_oauth_file,
-            settings.zendesk_oauth_seed_file,
+            settings.zendesk_oauth_client_id,
+            settings.zendesk_oauth_scope,
             settings.zendesk_oauth_expected_user_id,
         )
     else:
