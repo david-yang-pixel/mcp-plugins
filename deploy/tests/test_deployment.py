@@ -369,6 +369,74 @@ class BaseRelayMigrationTests(unittest.TestCase):
                 with self.subTest(target=target["secret_file_paths"]), self.assertRaisesRegex(server.DeployError, "explicit migration"):
                     server.preflight(self.service, target, {self.service: self.old_target}, self.current)
 
+    def managed_data(self, name="oauth", destination="/var/lib/mcp/oauth"):
+        return {"source": "@data/" + name, "destination": destination, "readonly": False}
+
+    def test_legacy_service_may_gain_a_managed_data_directory(self):
+        gained = server.normalize_target({**self.old_target, "mounts": [self.managed_data()]})
+        self.assertFalse(server.recreate_migration_blocked(server.normalize_target(self.old_target), gained))
+        with patch.object(server, "ROOT", self.root):
+            recorded = server.preflight(self.service, gained, {self.service: self.old_target}, self.current)
+            # The running container is still checked against its own contract.
+            server.validate_current(self.current, recorded, self.service)
+            self.assertEqual(recorded["mounts"], [])
+            run = server.run_arguments(self.service, "image", REVISION, gained, self.root / "releases" / self.service / "base")
+            data = self.root / "data" / self.service / "oauth"
+            self.assertIn(f"type=bind,source={data},target=/var/lib/mcp/oauth", run)
+            self.assertTrue(data.is_dir())
+            # After the replacement, the new mount is part of the enforced contract.
+            replaced = copy.deepcopy(self.current)
+            replaced["Mounts"].append({"Destination": "/var/lib/mcp/oauth", "Source": str(data), "Type": "bind"})
+            server.validate_current(replaced, gained, self.service)
+            moved = copy.deepcopy(replaced)
+            moved["Mounts"][-1]["Source"] = "/opt/other"
+            with self.assertRaisesRegex(server.DeployError, "mount source drifted"):
+                server.validate_current(moved, gained, self.service)
+
+    def test_legacy_data_directory_creation_refuses_symlinks(self):
+        gained = server.normalize_target({**self.old_target, "mounts": [self.managed_data()]})
+        data = self.root / "data" / self.service / "oauth"
+        data.parent.mkdir(parents=True)
+        data.symlink_to(self.root)
+        with patch.object(server, "ROOT", self.root), self.assertRaisesRegex(server.DeployError, "symlink"):
+            server.prepare_data_dirs(self.service, gained, None)
+
+    def test_existing_mounts_or_unmanaged_additions_still_require_migration(self):
+        existing = {"source": "/opt/dify-db/state", "destination": "/var/lib/relay/state", "readonly": False}
+        base = server.normalize_target({**self.old_target, "mounts": [existing]})
+        cases = {
+            "host path": [existing, {"source": "/opt/data", "destination": "/var/lib/mcp/data", "readonly": False}],
+            "outside data root": [existing, self.managed_data(destination="/srv/oauth")],
+            "replaced": [self.managed_data()],
+            "removed": [],
+            "reordered": [self.managed_data(), existing],
+            "made readonly": [{**existing, "readonly": True}, self.managed_data()],
+            "duplicate source": [existing, self.managed_data(), self.managed_data(destination="/var/lib/mcp/other")],
+        }
+        for name, mounts in cases.items():
+            with self.subTest(name):
+                self.assertTrue(server.recreate_migration_blocked(base, server.normalize_target({**base, "mounts": mounts})))
+        self.assertFalse(server.recreate_migration_blocked(base, server.normalize_target({**base, "mounts": [existing, self.managed_data()]})))
+        reused = server.normalize_target({**base, "mounts": [self.managed_data()]})
+        self.assertTrue(server.recreate_migration_blocked(reused, server.normalize_target(
+            {**base, "mounts": [self.managed_data(), self.managed_data(destination="/var/lib/mcp/copy")]})))
+
+    def test_installer_accepts_a_gained_managed_data_directory(self):
+        state = self.root / "state" / (self.service + ".json")
+        record = json.loads(state.read_text())
+        record.pop("target")
+        state.write_text(json.dumps(record))
+        gained = {**self.old_target, "mounts": [self.managed_data()]}
+        with patch.object(server, "ROOT", self.root), patch.object(server, "inspect_optional", return_value=self.current):
+            server.record_prior_legacy_contracts({self.service: self.old_target}, {self.service: gained})
+        self.assertEqual(json.loads(state.read_text())["target"]["mounts"], [])
+
+    def test_legacy_contract_must_match_the_installed_allowlist(self):
+        gained = {**self.old_target, "mounts": [self.managed_data()]}
+        with self.assertRaisesRegex(server.DeployError, "administrator update"):
+            server.resolve_target(self.service, gained, {self.service: self.old_target})
+        self.assertEqual(server.resolve_target(self.service, gained, {self.service: gained})["mounts"], [self.managed_data()])
+
     def test_shared_memory_drift_is_rejected_against_the_recorded_contract(self):
         recorded = {**self.old_target, "shm_size": "64m"}
         drifted = copy.deepcopy(self.current)

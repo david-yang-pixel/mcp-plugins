@@ -14,6 +14,27 @@ uv run --locked zendesk-mcp
 
 使用 Python 3.12。
 
+## Zendesk 认证（OAuth）
+
+Zendesk 将在 2027-04-30 停用 Support API token。生产环境使用 `ZENDESK_AUTH_MODE=oauth`，授权流程内置在 MCP 中，只需在首次部署后登录一次：
+
+1. 调用工具 `zendesk_auth_start`，得到 Zendesk 授权链接（10 分钟内有效）。
+2. 在浏览器打开链接，用本 MCP 要代表的 Zendesk 账号登录、完成双重验证并允许访问。
+3. 浏览器会跳到 `http://127.0.0.1:8765/callback?code=...&state=...`，页面打不开属于正常现象。复制地址栏中的完整地址。
+4. 调用 `zendesk_auth_complete`，参数 `callback_url` 填入该地址。成功后返回授权的用户 ID 和姓名。
+5. 用 `zendesk_auth_status` 或 `/health` 确认 `authorized` 为 `true`。
+
+实现说明：
+
+- 使用团队公开 PKCE 客户端 `dify_zendesk_cli`（回调地址 `http://127.0.0.1:8765/callback`，与 `zd auth login` 相同），不需要 client secret、CLI 或 GitHub Secret。PKCE 校验码只保存在服务器，复制出来的授权码一次性、几分钟内过期，单独泄露也无法换取令牌。
+- 申请的 scope 仅限工具所需：`read tickets:read tickets:write users:read hc:read ticket_views:read groups:read ticket_attachments:read`（可用 `ZENDESK_OAUTH_SCOPE` 覆盖）。
+- 令牌保存在持久化目录 `/var/lib/mcp/oauth/credentials.json`（服务器 `/opt/mcp-plugins/data/zendesk-mcp/oauth/`，权限 0600）。每次刷新都轮换 refresh token；重新部署不影响已保存的授权。
+- 后台每小时检查一次，超过 `ZENDESK_OAUTH_KEEPALIVE_HOURS`（默认 24）未刷新即主动刷新，避免空闲 30 天后 refresh token 过期。授权失效时，Zendesk 工具会返回"请调用 `zendesk_auth_start`"的错误，重新登录即可。
+- 首次授权的 Zendesk 用户会被锁定，之后重新授权必须是同一用户；确需更换时设置 `ZENDESK_OAUTH_EXPECTED_USER_ID` 为新用户 ID 并部署。每次成功授权都写入审计日志（只记录用户 ID）。
+- 访问令牌只发送到 `https://<子域名>.zendesk.com`，附件 CDN 等其他主机不会收到；遇到 401 会强制刷新一次再重试。工具结果、日志和 `/health` 不包含任何令牌、授权码或校验码。
+
+所有工单修改都以授权人的 Zendesk 身份记录。需要临时回退到 API token 时，把 `deploy/runtime.json` 中 `ZENDESK_AUTH_MODE` 改为 `api_token` 并部署；注意 Zendesk 会自动停用连续 30 天未使用的 API token。
+
 ## 构建
 
 ```bash

@@ -1,5 +1,6 @@
 {
   "environment": {
+    "ZENDESK_AUTH_MODE": "oauth",
     "ZENDESK_MCP_ALLOWED_CUSTOM_FIELD_IDS": "",
     "ZENDESK_MCP_AUDIT_LOG": "/opt/zendesk-mcp/logs/audit.jsonl",
     "ZENDESK_MCP_CACHE_MAX_ENTRIES": "256",
@@ -11,6 +12,8 @@
     "ZENDESK_MCP_READ_TIMEOUT_SECONDS": "20",
     "ZENDESK_MCP_REQUEST_TIMEOUT_SECONDS": "30",
     "ZENDESK_MCP_WORKERS": "1",
+    "ZENDESK_OAUTH_FILE": "/var/lib/mcp/oauth/credentials.json",
+    "ZENDESK_OAUTH_KEEPALIVE_HOURS": "24",
     "ZENDESK_SUBDOMAIN": "langgenius"
   },
   "secrets": {

@@ -39,6 +39,8 @@ PUBLIC_PATH = re.compile(r"/[a-z0-9][a-z0-9_-]*(?:/[a-z0-9][a-z0-9_-]*)*\Z")
 HOSTNAME = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z")
 BODY_SIZE = re.compile(r"[1-9][0-9]{0,3}[km]?\Z")
 MAX_PUBLIC_PATHS = 16
+MANAGED_DATA = re.compile(r"@data/[a-z][a-z0-9-]{0,40}\Z")
+MANAGED_DATA_ROOT = '/var/lib/mcp/'
 
 
 class DeployError(Exception):
@@ -132,9 +134,8 @@ def resolve_target(service, declared, installed):
     else:
         if target["network"] != "bridge":
             raise DeployError("New services must use isolated bridge networking")
-        for m in target["mounts"]:
-            if not re.fullmatch(r"@data/[a-z][a-z0-9-]{0,40}", m["source"]) or not m["destination"].startswith('/var/lib/mcp/'):
-                raise DeployError("New services may only mount their own managed data directories")
+        if not all(managed_data_mount(m) for m in target["mounts"]):
+            raise DeployError("New services may only mount their own managed data directories")
         if any(not p.startswith('/run/mcp-secrets/') for p in target["secret_file_paths"].values()):
             raise DeployError("New secret files must be under /run/mcp-secrets/")
     return target
@@ -214,14 +215,36 @@ def shm_bytes(value):
     return int(text) * unit
 
 
+def managed_data_mount(mount):
+    """A deployer-created directory of this service, mounted under /var/lib/mcp/."""
+    return bool(MANAGED_DATA.fullmatch(mount["source"])) and mount["destination"].startswith(MANAGED_DATA_ROOT)
+
+
+def mounts_only_gain_managed_data(old_mounts, new_mounts):
+    """Existing mounts stay byte-identical and in order; appended ones are managed data.
+
+    Adding an isolated, empty data directory cannot move or expose existing data,
+    so it is applied by recreating the container like other process settings.
+    """
+    added = new_mounts[len(old_mounts):]
+    sources = [m["source"] for m in added]
+    return (new_mounts[:len(old_mounts)] == old_mounts
+            and all(managed_data_mount(m) for m in added)
+            and len(sources) == len(set(sources))
+            and not set(sources) & {m["source"] for m in old_mounts})
+
+
 def recreate_migration_blocked(old_target, target):
-    """Block replacements that would move ports, networks, or data mounts.
+    """Block replacements that would move ports, networks, or existing data mounts.
 
     init, command, and shm_size are process settings applied by recreating the
-    container. Secret files may only gain entries under /run/mcp-secrets/;
-    existing secret destinations stay unchanged.
+    container. Mounts may only gain new managed @data directories. Secret files
+    may only gain entries under /run/mcp-secrets/; existing secret destinations
+    stay unchanged.
     """
-    if any(old_target[key] != target[key] for key in ("port", "container_port", "network", "mounts")):
+    if any(old_target[key] != target[key] for key in ("port", "container_port", "network")):
+        return True
+    if not mounts_only_gain_managed_data(old_target["mounts"], target["mounts"]):
         return True
     old_files, new_files = old_target["secret_file_paths"], target["secret_file_paths"]
     if any(new_files.get(key) != destination for key, destination in old_files.items()):
@@ -884,12 +907,13 @@ def preflight(service, target, installed, current):
         old_target = previous.get('target', installed.get(service))
         if old_target is None:
             raise DeployError("Missing previous service contract")
-        # Port, network, and data-mount changes need an explicit migration.
-        # init, command, shm, and additional secret files are recreated in place.
+        # Port, network, and existing data-mount changes need an explicit migration.
+        # init, command, shm, additional secret files and new managed data
+        # directories are recreated in place.
         old_target = normalize_target({'network': 'host' if service in installed else 'bridge', **old_target})
         if recreate_migration_blocked(old_target, target):
             raise DeployError("Existing infrastructure changed; an explicit migration is required")
-        changes = [key for key in ('init', 'command', 'shm_size', 'hostname', 'secret_file_paths') if old_target[key] != target[key]]
+        changes = [key for key in ('init', 'command', 'shm_size', 'hostname', 'secret_file_paths', 'mounts') if old_target[key] != target[key]]
         if changes:
             print(json.dumps({"service": service, "stage": "recreate", "changes": changes}), flush=True)
         validate_current(current, old_target, service)
@@ -955,6 +979,9 @@ def deploy(service, revision, payload, target, installed=None):
     expected_image = pull_image(image, revision, payload)
     if service not in (installed or {}):
         prepare_data_dirs(service, target, image_owner(json.loads(command(["docker", "image", "inspect", expected_image]))[0]))
+    else:
+        # Original services run as root on the host network; only @data mounts are touched.
+        prepare_data_dirs(service, target, None)
     base = ROOT / "releases" / service
     base.mkdir(parents=True, exist_ok=True, mode=0o700)
     release = Path(tempfile.mkdtemp(prefix=revision[:12] + "-", dir=base))

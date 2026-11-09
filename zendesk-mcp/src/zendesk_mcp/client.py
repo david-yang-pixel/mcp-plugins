@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 import requests
 from requests.exceptions import ConnectionError, Timeout
 
+from .oauth import DEFAULT_SCOPE, OAuthError, ZendeskBearerAuth, bearer_token, get_provider
 from .settings import Settings, get_settings
 
 
@@ -35,33 +36,18 @@ class ZendeskClient:
         params: Optional[dict[str, Any]] = None,
         json_data: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        if not self.settings.zendesk_subdomain:
-            raise ZendeskApiError(503, "ZENDESK_SUBDOMAIN is not configured")
-        if not self.settings.zendesk_email:
-            raise ZendeskApiError(503, "ZENDESK_EMAIL is not configured")
-        if not self.settings.zendesk_api_token:
-            raise ZendeskApiError(503, "ZENDESK_API_TOKEN is not configured")
+        self._ensure_configured()
 
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
-        for attempt in range(self.settings.max_retries + 1):
+        response = self._send(method, url, endpoint, params=params, json_data=json_data)
+        if response.status_code == 401 and self.settings.uses_oauth:
+            # The access token may have been revoked before its expiry: refresh once.
+            rejected = bearer_token(getattr(response.request, "headers", None))
             try:
-                response = self.session.request(
-                    method,
-                    url,
-                    params=params,
-                    json=json_data,
-                    timeout=(
-                        self.settings.connect_timeout_seconds,
-                        self.settings.read_timeout_seconds,
-                    ),
-                )
-                break
-            except Timeout:
-                if attempt >= self.settings.max_retries:
-                    raise ZendeskApiError(0, "Zendesk request timed out", endpoint)
-            except ConnectionError:
-                if attempt >= self.settings.max_retries:
-                    raise ZendeskApiError(0, "Zendesk connection failed", endpoint)
+                _oauth_provider(self.settings).access_token(rejected=rejected)
+            except OAuthError as exc:
+                raise _oauth_api_error(exc) from None
+            response = self._send(method, url, endpoint, params=params, json_data=json_data)
 
         if response.status_code == 401:
             raise ZendeskApiError(401, "Zendesk authentication failed")
@@ -80,9 +66,46 @@ class ZendeskClient:
             return {}
         return response.json()
 
+    def _send(
+        self,
+        method: str,
+        url: str,
+        endpoint: str,
+        *,
+        params: Optional[dict[str, Any]] = None,
+        json_data: Optional[dict[str, Any]] = None,
+    ) -> requests.Response:
+        for attempt in range(self.settings.max_retries + 1):
+            try:
+                return self.session.request(
+                    method,
+                    url,
+                    params=params,
+                    json=json_data,
+                    timeout=(
+                        self.settings.connect_timeout_seconds,
+                        self.settings.read_timeout_seconds,
+                    ),
+                )
+            except OAuthError as exc:
+                raise _oauth_api_error(exc) from None
+            except Timeout:
+                if attempt >= self.settings.max_retries:
+                    raise ZendeskApiError(0, "Zendesk request timed out", endpoint)
+            except ConnectionError:
+                if attempt >= self.settings.max_retries:
+                    raise ZendeskApiError(0, "Zendesk connection failed", endpoint)
+        raise ZendeskApiError(0, "Zendesk request failed", endpoint)
+
     def _ensure_configured(self) -> None:
         if not self.settings.zendesk_subdomain:
             raise ZendeskApiError(503, "ZENDESK_SUBDOMAIN is not configured")
+        if self.settings.uses_oauth:
+            if not self.settings.zendesk_oauth_file:
+                raise ZendeskApiError(503, "ZENDESK_OAUTH_FILE is not configured")
+            return
+        if self.settings.zendesk_auth_mode != "api_token":
+            raise ZendeskApiError(503, "ZENDESK_AUTH_MODE must be api_token or oauth")
         if not self.settings.zendesk_email:
             raise ZendeskApiError(503, "ZENDESK_EMAIL is not configured")
         if not self.settings.zendesk_api_token:
@@ -237,6 +260,8 @@ class ZendeskClient:
                         self.settings.read_timeout_seconds,
                     ),
                 )
+            except OAuthError as exc:
+                raise _oauth_api_error(exc) from None
             except Timeout:
                 if attempt >= self.settings.max_retries:
                     raise ZendeskApiError(0, "Zendesk attachment download timed out", content_url)
@@ -258,6 +283,8 @@ class ZendeskClient:
                     ),
                 )
                 break
+            except OAuthError as exc:
+                raise _oauth_api_error(exc) from None
             except Timeout:
                 if attempt >= self.settings.max_retries:
                     raise ZendeskApiError(0, "Zendesk attachment download timed out", content_url)
@@ -338,21 +365,49 @@ def _sc_attachment_id(content_url: str) -> Optional[str]:
     return None
 
 
-def _thread_session(settings: Settings) -> requests.Session:
-    key = (
-        settings.zendesk_base_url,
-        settings.zendesk_email,
-        settings.zendesk_api_token,
+def _oauth_provider(settings: Settings):
+    return get_provider(
+        subdomain=settings.zendesk_subdomain,
+        path=settings.zendesk_oauth_file,
+        client_id=settings.zendesk_oauth_client_id,
+        scope=settings.zendesk_oauth_scope or DEFAULT_SCOPE,
+        expected_user_id=settings.zendesk_oauth_expected_user_id,
+        timeout=(settings.connect_timeout_seconds, settings.read_timeout_seconds),
     )
+
+
+def _oauth_api_error(exc: OAuthError) -> ZendeskApiError:
+    return ZendeskApiError(401 if exc.reauthorize else 503, str(exc))
+
+
+def _thread_session(settings: Settings) -> requests.Session:
+    if settings.uses_oauth:
+        key: tuple[str, ...] = (
+            settings.zendesk_base_url,
+            "oauth",
+            settings.zendesk_oauth_file,
+            settings.zendesk_oauth_client_id,
+            settings.zendesk_oauth_scope,
+            settings.zendesk_oauth_expected_user_id,
+        )
+    else:
+        key = (
+            settings.zendesk_base_url,
+            settings.zendesk_email,
+            settings.zendesk_api_token,
+        )
     cached = getattr(_THREAD_LOCAL, "zendesk_session", None)
     if cached and cached[0] == key:
         return cached[1]
 
     session = requests.Session()
-    session.auth = (
-        f"{settings.zendesk_email}/token",
-        settings.zendesk_api_token,
-    )
+    if settings.uses_oauth:
+        session.auth = ZendeskBearerAuth(_oauth_provider(settings))
+    else:
+        session.auth = (
+            f"{settings.zendesk_email}/token",
+            settings.zendesk_api_token,
+        )
     session.headers.update(
         {
             "Accept": "application/json",

@@ -280,4 +280,37 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["ticket_id", "explicit_user_metadata_request"],
         },
     },
+    {
+        "name": "zendesk_auth_status",
+        "description": "Show whether this MCP is authorized to Zendesk with OAuth and as which Zendesk user ID. No secrets.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "zendesk_auth_start",
+        "description": (
+            "Begin the one-time Zendesk OAuth login. Returns an authorization URL for the user to open in a browser. "
+            "After allowing access the browser goes to http://127.0.0.1:8765/callback?code=... (the page may not load); "
+            "the user copies that full address for zendesk_auth_complete. Only use when the user asks to log in or "
+            "when Zendesk tools report that OAuth is not authorized."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "zendesk_auth_complete",
+        "description": (
+            "Finish the Zendesk OAuth login with the full redirected address copied from the browser after "
+            "zendesk_auth_start. Stores rotating tokens on the server; the first authorized user is pinned."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "callback_url": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Full address starting with http://127.0.0.1:8765/callback?code=",
+                },
+            },
+            "required": ["callback_url"],
+        },
+    },
 ]

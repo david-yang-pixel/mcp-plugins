@@ -28,7 +28,7 @@ def free_port():
 
 
 def upgrade_from_base_container(prefix, image, key):
-    """Replace a pre-change container: init off, default shm, one secret, old command."""
+    """Replace a pre-change container: init off, default shm, one secret, old command, no data mount."""
     service = prefix + '-base'
     host_port = free_port()
     env_keys = ['FAIL_HEALTH', 'FAIL_PUBLIC', 'PORT', 'TEST_API_KEY', 'VERSION']
@@ -50,6 +50,8 @@ def upgrade_from_base_container(prefix, image, key):
         'init': True,
         'shm_size': '256m',
         'command': ['python', '-B', 'app.py'],
+        # Gaining a managed data directory is recreated in place, like init/shm.
+        'mounts': [{'source': '@data/oauth', 'destination': '/var/lib/mcp/oauth', 'readonly': False}],
         'secret_file_paths': {
             **old_target['secret_file_paths'],
             'ZENDESK_MCP_AUTHORIZATION': '/run/mcp-secrets/zendesk_mcp_authorization',
@@ -112,6 +114,9 @@ def upgrade_from_base_container(prefix, image, key):
     destinations = {item['Destination'] for item in upgraded['Mounts']}
     assert '/var/lib/zendesk-browser-relay/state/feishu_webhook_url' in destinations
     assert '/run/mcp-secrets/zendesk_mcp_authorization' in destinations
+    data = server.ROOT / 'data' / service / 'oauth'
+    assert {(m['Destination'], m['Source']) for m in upgraded['Mounts']} >= {('/var/lib/mcp/oauth', str(data))}
+    assert data.is_dir() and (data.stat().st_mode & 0o077) == 0
     server.validate_current(upgraded, new_target, service)
     drifted = json.loads(json.dumps(upgraded))
     drifted['HostConfig']['ShmSize'] = 64 * 1024 * 1024

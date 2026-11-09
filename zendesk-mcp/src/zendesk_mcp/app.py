@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
+from contextlib import asynccontextmanager
 from typing import Any, Optional
 from urllib.parse import quote
 
@@ -12,7 +14,9 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from .client import _oauth_provider
 from .mcp_schema import TOOL_SCHEMAS
+from .oauth import OAuthError
 from .settings import Settings, get_settings
 from .tools import handle_tool_call
 
@@ -110,19 +114,76 @@ def _jsonrpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
     }
 
 
-def create_app() -> FastAPI:
-    app = FastAPI(title="Zendesk MCP", version="0.1.0")
+# Keepalive checks run this often; tokens rotate only when older than the keepalive age.
+KEEPALIVE_INTERVAL_SECONDS = 3600.0
+KEEPALIVE_FIRST_DELAY_SECONDS = 10.0
 
-    @app.get("/health")
-    async def health(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+
+def _oauth_keepalive_loop(settings: Settings, stop: threading.Event) -> None:
+    """Rotate idle OAuth tokens so the refresh token never expires unused."""
+    max_age = settings.zendesk_oauth_keepalive_hours * 3600.0
+    delay = KEEPALIVE_FIRST_DELAY_SECONDS
+    while not stop.wait(delay):
+        delay = KEEPALIVE_INTERVAL_SECONDS
+        try:
+            if _oauth_provider(settings).keepalive(max_age):
+                logger.info("zendesk_oauth_keepalive refreshed=true")
+        except OAuthError as exc:
+            logger.warning("zendesk_oauth_keepalive failed: %s", exc)
+        except Exception:
+            logger.warning("zendesk_oauth_keepalive failed unexpectedly")
+
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    settings = get_settings()
+    stop = threading.Event()
+    if (
+        settings.uses_oauth
+        and settings.zendesk_subdomain
+        and settings.zendesk_oauth_file
+        and settings.zendesk_oauth_keepalive_hours > 0
+    ):
+        threading.Thread(
+            target=_oauth_keepalive_loop,
+            args=(settings, stop),
+            name="zendesk-oauth-keepalive",
+            daemon=True,
+        ).start()
+    try:
+        yield
+    finally:
+        stop.set()
+
+
+def _zendesk_auth_health(settings: Settings) -> dict[str, Any]:
+    if not settings.uses_oauth:
         return {
-            "ok": True,
+            "zendesk_auth_mode": settings.zendesk_auth_mode,
             "zendesk_configured": bool(
-                settings.zendesk_subdomain
+                settings.zendesk_auth_mode == "api_token"
+                and settings.zendesk_subdomain
                 and settings.zendesk_email
                 and settings.zendesk_api_token
             ),
         }
+    if not (settings.zendesk_subdomain and settings.zendesk_oauth_file):
+        return {"zendesk_auth_mode": "oauth", "zendesk_configured": False}
+    status = _oauth_provider(settings).status()
+    return {
+        "zendesk_auth_mode": "oauth",
+        "zendesk_configured": bool(status.get("authorized")),
+        "zendesk_oauth": status,
+    }
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="Zendesk MCP", version="0.1.0", lifespan=_lifespan)
+
+    @app.get("/health")
+    async def health(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+        details = await run_in_threadpool(_zendesk_auth_health, settings)
+        return {"ok": True, **details}
 
     @app.get("/sse")
     @app.get("/mcp")
