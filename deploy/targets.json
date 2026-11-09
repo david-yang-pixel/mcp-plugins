@@ -154,10 +154,17 @@
     "auth_key": "ZENDESK_MCP_API_KEY",
     "health_path": "/health",
     "init": false,
-    "mounts": [],
+    "mounts": [
+      {
+        "source": "@data/oauth",
+        "destination": "/var/lib/mcp/oauth",
+        "readonly": false
+      }
+    ],
     "command": [],
     "env_keys": [
       "ZENDESK_API_TOKEN",
+      "ZENDESK_AUTH_MODE",
       "ZENDESK_EMAIL",
       "ZENDESK_MCP_ALLOWED_CUSTOM_FIELD_IDS",
       "ZENDESK_MCP_API_KEY",
@@ -171,9 +178,14 @@
       "ZENDESK_MCP_READ_TIMEOUT_SECONDS",
       "ZENDESK_MCP_REQUEST_TIMEOUT_SECONDS",
       "ZENDESK_MCP_WORKERS",
+      "ZENDESK_OAUTH_FILE",
+      "ZENDESK_OAUTH_KEEPALIVE_HOURS",
+      "ZENDESK_OAUTH_SEED_FILE",
       "ZENDESK_SUBDOMAIN"
     ],
-    "secret_file_paths": {}
+    "secret_file_paths": {
+      "ZENDESK_OAUTH_SEED": "/run/mcp-secrets/zendesk_oauth_seed.json"
+    }
   },
   "zendesk-browser-relay": {
     "port": 8097,

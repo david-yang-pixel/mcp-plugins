@@ -109,7 +109,7 @@ Secrets 通过 GitHub 的动态索引逐项引用，每个部署任务只接收�
 ]
 ```
 
-服务器自动创建 `/opt/mcp-plugins/data/example-mcp/cache`，只供该服务挂载。目录不存在时按镜像的数字用户（如 `USER 10001`）设置属主，root 镜像保持 root；已存在的目录不改属主和内容。新服务不接受任意主机目录、Docker socket 或 host 网络。文件密钥通过 `secret_files` 声明 `name`、`required: true` 和 `destination`，路径必须在 `/run/mcp-secrets/` 内。已有服务端口和挂载的变更需要单独迁移，首次接入后普通代码及环境变量变动仍自动按服务部署。
+服务器自动创建 `/opt/mcp-plugins/data/example-mcp/cache`，只供该服务挂载。目录不存在时按镜像的数字用户（如 `USER 10001`）设置属主，root 镜像保持 root；已存在的目录不改属主和内容。新服务不接受任意主机目录、Docker socket 或 host 网络。文件密钥通过 `secret_files` 声明 `name`、`required: true` 和 `destination`，路径必须在 `/run/mcp-secrets/` 内。已有服务端口和挂载的变更需要单独迁移，首次接入后普通代码及环境变量变动仍自动按服务部署。唯一例外是在原有挂载保持不变（顺序与内容一致）的前提下，追加本服务专属的 `@data/<名称>` → `/var/lib/mcp/...` 数据目录：部署器按 init/命令变更的方式就地重建容器，目录不存在时以 `0700` 创建（原有 8 个服务为 root 属主），拒绝符号链接；替换、删除、重排原有挂载或追加主机路径仍要求迁移。原有 8 个服务追加数据目录时，仍需先更新 `deploy/targets.json` 并通过 `install_server.py --update-helper-only` 同步服务器白名单。
 
 ### 可选：OAuth 公开路径、固定主机名和请求体上限
 

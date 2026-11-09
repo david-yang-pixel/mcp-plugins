@@ -14,6 +14,35 @@ uv run --locked zendesk-mcp
 
 使用 Python 3.12。
 
+## Zendesk 认证（OAuth）
+
+Zendesk 将在 2027-04-30 停用 Support API token。生产环境使用 `ZENDESK_AUTH_MODE=oauth`，凭据格式与团队 `zd auth login`（zendesk-cli 团队版，PKCE 授权码 + 轮换 refresh token）生成的 JSON 文件一致：
+
+- `ZENDESK_OAUTH_SEED_FILE`：只读种子，部署时由 GitHub Secret `MCP_ZENDESK_MCP__ZENDESK_OAUTH_SEED` 以文件挂载到 `/run/mcp-secrets/zendesk_oauth_seed.json`。
+- `ZENDESK_OAUTH_FILE`：可写的私有凭据文件，位于持久化目录 `/var/lib/mcp/oauth/credentials.json`（服务器 `/opt/mcp-plugins/data/zendesk-mcp/oauth/`）。每次刷新都会轮换 refresh token 并写回此文件。
+- 首次使用时把种子复制到凭据文件；之后重新部署若种子内容未变，不会覆盖已轮换的 token；种子内容变化（重新授权）时替换凭据文件。
+- 后台每小时检查一次，凭据超过 `ZENDESK_OAUTH_KEEPALIVE_HOURS`（默认 24）未刷新即主动刷新，避免空闲 30 天后 refresh token 过期。
+- 访问令牌只发送到 `https://<子域名>.zendesk.com`，附件 CDN 等其他主机不会收到。遇到 401 会强制刷新一次再重试。
+- `/health` 返回 `zendesk_auth_mode` 和 `zendesk_oauth`（是否有凭据、授权用户 ID、令牌是否有效、上次刷新距今秒数、最近错误），不含任何令牌值。
+- 可选 `ZENDESK_OAUTH_EXPECTED_USER_ID`：设置后拒绝导入其他 Zendesk 用户的种子。
+
+所有工单修改都以授权人的 Zendesk 身份记录。
+
+### 生成或更换种子
+
+1. 在自己电脑上用团队 CLI 授权到一个**专用**文件（不要复用日常 CLI 的文件，两边互相轮换会使对方失效）：
+
+   ```bash
+   zd auth login --subdomain langgenius --client-id dify_zendesk_cli \
+     --expected-user-id <自己的数字用户 ID> --file "$HOME/.zendesk-cli/oauth-zendesk-mcp.json"
+   ```
+
+2. 立刻把该文件完整内容保存为 GitHub Secret `MCP_ZENDESK_MCP__ZENDESK_OAUTH_SEED`。之后**不要**再用这个文件运行 `zd`（会轮换掉种子里的 refresh token），确认部署成功后删除本地文件。
+3. 手动运行工作流并指定服务 `zendesk-mcp`。种子需在授权后 30 天内首次使用。
+4. 部署后检查 `/health` 中 `zendesk_oauth.credentials` 为 `true`、`last_refresh_age_seconds` 有值且没有 `last_error`，再调用一个只读工具确认。
+
+需要临时回退到 API token 时，把 `deploy/runtime.json` 中 `ZENDESK_AUTH_MODE` 改为 `api_token` 并部署；注意 Zendesk 会自动停用连续 30 天未使用的 API token。
+
 ## 构建
 
 ```bash
