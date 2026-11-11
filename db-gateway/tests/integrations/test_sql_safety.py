@@ -135,3 +135,38 @@ def test_advisory_lock_name_in_a_string_literal_is_allowed():
 def test_unicode_quoted_advisory_lock_is_rejected():
     with pytest.raises(PsqlSafetyError, match="advisory lock"):
         validate_read_only_sql('SELECT U&"pg_advisory_lock"(1)')
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        ("SELECT * FROM workflow_runs WHERE id = 1", [(None, "workflow_runs")]),
+        (
+            'SELECT a.id FROM public.apps a JOIN "Tenants" t ON t.id = a.tenant_id LEFT JOIN accounts ON true',
+            [("public", "apps"), (None, "Tenants"), (None, "accounts")],
+        ),
+        (
+            "WITH x AS (SELECT * FROM messages), y(c) AS MATERIALIZED (SELECT 1 FROM conversations) "
+            "SELECT * FROM x, y, apps z, tenants",
+            [(None, "messages"), (None, "conversations"), (None, "apps"), (None, "tenants")],
+        ),
+        (
+            "SELECT extract(year FROM created_at), coalesce((SELECT 1 FROM t2), 0) FROM T1",
+            [(None, "t2"), (None, "t1")],
+        ),
+        (
+            "SELECT * FROM generate_series(1, 3) g, (SELECT 1 FROM sub) s "
+            "CROSS JOIN LATERAL (SELECT 1 FROM lat) l",
+            [(None, "sub"), (None, "lat")],
+        ),
+        ("SELECT id FROM t WHERE id IN (SELECT tid FROM u) ORDER BY id", [(None, "t"), (None, "u")]),
+        ("(SELECT 1 FROM a) UNION ALL (SELECT 2 FROM b)", [(None, "a"), (None, "b")]),
+        ("SELECT trim(both ' ' FROM name) FROM ONLY accounts AS acc", [(None, "accounts")]),
+        ("SELECT 'FROM fake' FROM real_table -- FROM comment", [(None, "real_table")]),
+        ("SELECT 1", []),
+    ],
+)
+def test_referenced_tables(sql, expected):
+    from db_gateway.sql_text import referenced_tables, tokenize
+
+    assert referenced_tables(tokenize(sql)) == expected

@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 from catalog import SERVICES, spec, target as service_target
-from server import verify_service
+from server import health_command, verify_service
 
 
 def main():
@@ -37,7 +37,9 @@ def main():
         for _ in range(45):
             try:
                 count = verify_service(target, env)
-                print(service + ": health, authenticated tools/list (" + str(count) + "), and invalid-key rejection passed")
+                # The deployer attaches this probe as the container health check, so the image must be able to run it.
+                subprocess.run(["docker", "exec", name, "/bin/sh", "-c", health_command(target)], check=True, capture_output=True, timeout=30)
+                print(service + ": health, container health probe, authenticated tools/list (" + str(count) + "), and invalid-key rejection passed")
                 return
             except Exception:
                 time.sleep(1)

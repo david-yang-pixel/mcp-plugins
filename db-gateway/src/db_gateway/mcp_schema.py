@@ -23,7 +23,11 @@ TOOL_SCHEMA: dict[str, Any] = {
         "page), warnings and timing_ms. Add ORDER BY (ideally on a unique key) when paging, "
         "otherwise page order is not stable. format=csv (default) returns `csv` text where "
         "NULL and empty string both appear as an empty field; format=json returns `columns`, "
-        "`column_types` and `rows` as an array of arrays of strings, with SQL NULL as null."
+        "`column_types` and `rows` as an array of arrays of strings, with SQL NULL as null. "
+        "explain=true returns the query plan (EXPLAIN without ANALYZE: the query is planned, "
+        "not executed) as rows of the `QUERY PLAN` column; use it to check index usage before "
+        "running a slow query. A query that times out returns the indexes of the tables it "
+        "reads. Use db_gateway_schema to look up real column names and types."
     ),
     "inputSchema": {
         "type": "object",
@@ -38,14 +42,6 @@ TOOL_SCHEMA: dict[str, Any] = {
                 "description": (
                     "Single read-only SELECT/WITH query (optionally wrapped in parentheses). "
                     "Do not add LIMIT/OFFSET for paging; use the offset/limit arguments."
-                ),
-            },
-            "ticket_id": {
-                "type": "string",
-                "description": (
-                    "Zendesk ticket ID for audit logs. Strongly recommended: a missing value "
-                    "is recorded in the audit log and returns a warning; it is rejected when "
-                    "the gateway enables require_ticket_id."
                 ),
             },
             "offset": {
@@ -68,7 +64,57 @@ TOOL_SCHEMA: dict[str, Any] = {
                     "`rows` as array of arrays (string values, SQL NULL as null)."
                 ),
             },
+            "explain": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Return the query plan instead of rows. The gateway prepends EXPLAIN "
+                    "itself (no ANALYZE, the query is never executed); do not write EXPLAIN "
+                    "in `sql`."
+                ),
+            },
         },
         "required": ["database", "sql"],
     },
 }
+
+
+SCHEMA_TOOL_SCHEMA: dict[str, Any] = {
+    "name": "db_gateway_schema",
+    "annotations": {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+    "description": (
+        "Look up the real columns (name, type, nullable, default) and indexes of one or more "
+        "tables through the DB Gateway, from information_schema.columns and pg_indexes. "
+        "Databases: prod, billing, plugin. Use it before writing SQL to avoid 'column does "
+        "not exist' errors and type mismatches (e.g. uuid = text), and to pick filters that "
+        "hit an index. Read-only."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "database": {
+                "type": "string",
+                "enum": ["prod", "billing", "plugin"],
+                "description": "prod=langgenius, billing=billing, plugin=dify_plugin_daemon",
+            },
+            "tables": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 20,
+                "description": (
+                    "Table names, e.g. [\"workflow_runs\"]; `schema.table` is accepted. "
+                    "Unqualified names match every non-system schema."
+                ),
+            },
+        },
+        "required": ["database", "tables"],
+    },
+}
+
+TOOLS: list[dict[str, Any]] = [TOOL_SCHEMA, SCHEMA_TOOL_SCHEMA]

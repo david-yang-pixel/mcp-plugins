@@ -6,8 +6,8 @@ from typing import Any
 
 from aiohttp import web
 
-from db_gateway.core import execute_gateway_query
-from db_gateway.mcp_schema import TOOL_SCHEMA
+from db_gateway.core import execute_gateway_query, execute_schema_lookup
+from db_gateway.mcp_schema import TOOLS
 
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
@@ -46,25 +46,34 @@ async def handle_mcp_message(message: dict[str, Any], *, cfg: Any) -> dict[str, 
         })
 
     if method == "tools/list":
-        return _jsonrpc_result(req_id, {"tools": [TOOL_SCHEMA]})
+        return _jsonrpc_result(req_id, {"tools": TOOLS})
 
     if method == "tools/call":
         params = message.get("params") or {}
         name = params.get("name")
-        if name != "db_gateway_query":
-            return _jsonrpc_error(req_id, -32601, f"unknown tool: {name}")
-
         args = params.get("arguments") or {}
-        data = await execute_gateway_query(
-            cfg=cfg,
-            database=str(args.get("database") or ""),
-            sql=str(args.get("sql") or ""),
-            ticket_id=str(args.get("ticket_id") or ""),
-            offset=args.get("offset"),
-            limit=args.get("limit"),
-            output_format=args.get("format") or "csv",
-        )
-        payload = data.to_json()
+        if not isinstance(args, dict):
+            return _jsonrpc_error(req_id, -32602, "arguments must be an object")
+        if name == "db_gateway_query":
+            # Unknown arguments (e.g. the retired ticket_id) are ignored.
+            data = await execute_gateway_query(
+                cfg=cfg,
+                database=str(args.get("database") or ""),
+                sql=str(args.get("sql") or ""),
+                offset=args.get("offset"),
+                limit=args.get("limit"),
+                output_format=args.get("format") or "csv",
+                explain=args.get("explain"),
+            )
+            payload = data.to_json()
+        elif name == "db_gateway_schema":
+            payload = await execute_schema_lookup(
+                cfg=cfg,
+                database=str(args.get("database") or ""),
+                tables=args.get("tables"),
+            )
+        else:
+            return _jsonrpc_error(req_id, -32601, f"unknown tool: {name}")
         return _jsonrpc_result(req_id, {
             "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
             "isError": not payload.get("success", False),

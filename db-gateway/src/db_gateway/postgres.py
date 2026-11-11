@@ -145,6 +145,11 @@ from typing import Any, Optional
 
 _CURSOR_NAME = "_db_gateway_cursor"
 _WRAP_ALIAS = "_db_gateway_q"
+# Text before the user's SQL body in ``wrap_query`` (used to map error positions).
+WRAP_PREFIX = "SELECT * FROM (\n"
+# The gateway (never the caller) prepends this for explain=true. No ANALYZE:
+# the statement is planned only, never executed.
+EXPLAIN_PREFIX = "EXPLAIN "
 _TIMING_LINE = re.compile(r"^Time: ([0-9]+(?:[.,][0-9]+)?) ms")
 _TELEPORT_SIGNATURES = (
     "Connection refused",
@@ -183,7 +188,67 @@ def wrap_query(body: str) -> str:
     Newlines around the body keep a trailing ``-- comment`` from swallowing
     the closing parenthesis.
     """
-    return f"SELECT * FROM (\n{body}\n) AS {_WRAP_ALIAS}"
+    return f"{WRAP_PREFIX}{body}\n) AS {_WRAP_ALIAS}"
+
+
+def explain_result(
+    columns: list[str],
+    plan_rows: list[list[str | None]],
+    *,
+    offset: int,
+    page_limit: int,
+    elapsed_ms: int,
+    timing: dict[str, float],
+) -> PsqlResult:
+    """Page EXPLAIN output (already complete in memory) into the usual result."""
+    total = len(plan_rows)
+    skipped = min(max(0, offset), total)
+    rows = plan_rows[skipped:skipped + page_limit]
+    has_more = skipped + len(rows) < total
+    return PsqlResult(
+        csv=rows_to_csv(columns, rows) if columns else "",
+        row_count=len(rows),
+        elapsed_ms=elapsed_ms,
+        truncated=has_more,
+        columns=list(columns),
+        rows=rows,
+        column_types=["text"] * len(columns),
+        has_more=has_more,
+        total_rows=total,
+        offset_skipped=skipped,
+        timing_ms=timing,
+    )
+
+
+def build_explain_psql_command(
+    *,
+    host: str,
+    port: int,
+    user: str,
+    database: str,
+    body: str,
+    marker: str,
+    null_marker: str,
+    statement_timeout_ms: int,
+) -> list[str]:
+    """One psql invocation running ``EXPLAIN <body>`` in a READ ONLY transaction."""
+    return [
+        "psql", "-X", "-q", "-w", "--csv",
+        "-v", "ON_ERROR_STOP=1",
+        "-P", "footer=off",
+        "-P", f"null={null_marker}",
+        "-h", host,
+        "-p", str(port),
+        "-U", user,
+        "-d", database,
+        "-c", "\\timing on",
+        "-c", (
+            "BEGIN TRANSACTION READ ONLY; "
+            f"SET LOCAL statement_timeout = {int(statement_timeout_ms)}; "
+            f"{EXPLAIN_PREFIX}{body}\n"
+        ),
+        "-c", f"\\echo {marker} fetch :ROW_COUNT",
+    ]
 
 
 def build_psql_command(
@@ -346,8 +411,12 @@ async def run_psql(
     limit: int | None = None,
     count_timeout: float = 0,
     describe: bool = False,
+    explain: bool = False,
 ) -> PsqlResult:
     """Execute one read-only query page via a single psql process.
+
+    ``explain=True`` runs ``EXPLAIN <validated SQL>`` instead (no ANALYZE: the
+    statement is planned, never executed) and returns the plan lines as rows.
 
     The query runs inside ``BEGIN TRANSACTION READ ONLY`` through a cursor:
     ``MOVE offset`` -> ``FETCH limit+1`` (has_more probe) -> optional
@@ -370,20 +439,33 @@ async def run_psql(
     marker = _new_marker()
     null_marker = f"{marker}NULL"
 
-    cmd = build_psql_command(
-        host=host,
-        port=port,
-        user=user,
-        database=database,
-        wrapped_sql=wrapped,
-        marker=marker,
-        null_marker=null_marker,
-        offset=offset,
-        fetch_count=page_limit + 1,
-        statement_timeout_ms=int(float(timeout) * 1000),
-        count_timeout_ms=int(count_timeout * 1000),
-        describe=describe,
-    )
+    if explain:
+        count_timeout = 0.0
+        cmd = build_explain_psql_command(
+            host=host,
+            port=port,
+            user=user,
+            database=database,
+            body=body,
+            marker=marker,
+            null_marker=null_marker,
+            statement_timeout_ms=int(float(timeout) * 1000),
+        )
+    else:
+        cmd = build_psql_command(
+            host=host,
+            port=port,
+            user=user,
+            database=database,
+            wrapped_sql=wrapped,
+            marker=marker,
+            null_marker=null_marker,
+            offset=offset,
+            fetch_count=page_limit + 1,
+            statement_timeout_ms=int(float(timeout) * 1000),
+            count_timeout_ms=int(count_timeout * 1000),
+            describe=describe,
+        )
     env = _psql_env(password)
 
     started = time.perf_counter()
@@ -427,6 +509,18 @@ async def run_psql(
     }
     server_ms = 0.0
     timing_complete = True
+
+    if explain:
+        plan_lines, plan_ms = _pop_timing(segments["fetch"][0])
+        plan_columns, plan_rows = _parse_csv(plan_lines, null_marker)
+        if plan_ms is not None:
+            timing["query_ms"] = plan_ms
+        result = explain_result(
+            plan_columns or ["QUERY PLAN"], plan_rows, offset=offset,
+            page_limit=page_limit, elapsed_ms=elapsed_ms, timing=timing,
+        )
+        timing["parse_ms"] = _ms(time.perf_counter() - parse_started)
+        return result
 
     column_types: list[str] | None = None
     if describe and "describe" in segments:
@@ -510,7 +604,6 @@ def audit_log(
     database: str,
     sql: str,
     status: str,
-    ticket_id: str,
     row_count: int = 0,
     elapsed_ms: int = 0,
     error: Optional[str] = None,
@@ -518,7 +611,7 @@ def audit_log(
 ) -> None:
     """Append one JSONL audit entry for a SQL execution.
 
-    ``extra`` fields (e.g. ticket_id_missing, offset, limit, timing_ms) are
+    ``extra`` fields (e.g. offset, limit, format, explain, timing_ms) are
     added when not None.
     """
     log_path = Path(log_path)
@@ -528,8 +621,6 @@ def audit_log(
         "database": database,
         "sql": sql,
         "status": status,
-        "ticket_id": ticket_id,
-        "ticket_id_missing": not (ticket_id or "").strip(),
         "row_count": row_count,
         "elapsed_ms": elapsed_ms,
     }

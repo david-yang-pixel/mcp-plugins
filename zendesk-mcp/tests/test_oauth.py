@@ -528,6 +528,25 @@ def test_health_reports_oauth_state(tmp_path):
     }
 
 
+def test_health_reports_oauth_configured_without_api_token_or_email(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from zendesk_mcp.app import create_app
+    from zendesk_mcp.settings import get_settings
+
+    settings = _oauth_settings(tmp_path)
+    assert settings.zendesk_api_token == "" and settings.zendesk_email == ""
+    _store(client_module._oauth_provider(settings))
+    app = create_app()
+    app.dependency_overrides[get_settings] = lambda: settings
+    body = TestClient(app).get("/health").json()
+    assert body["ok"] is True
+    assert body["zendesk_auth_mode"] == "oauth"
+    assert body["zendesk_configured"] is True
+    assert body["zendesk_oauth"]["authorized"] is True
+    ZendeskClient(settings)._ensure_configured()
+
+
 @pytest.fixture(autouse=True)
 def _isolated_providers(monkeypatch):
     monkeypatch.setattr(oauth, "_PROVIDERS", {})

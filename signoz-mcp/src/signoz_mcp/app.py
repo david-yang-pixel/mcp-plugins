@@ -11,6 +11,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
+from .audit import configure_audit_logging, emit_tool_audit
 from .executor import execute_plan
 from .settings import Settings, get_settings
 from .structured_tools import STRUCTURED_TOOLS, build_structured_plan
@@ -60,6 +61,9 @@ def _tool_result(
             "isError": not ok,
         },
     }
+
+
+KNOWN_TOOLS: frozenset[str] = frozenset({"sz_run", *(tool["name"] for tool in STRUCTURED_TOOLS)})
 
 
 # Every tool only queries SigNoz. Clients such as OpenConnector derive read/write
@@ -216,6 +220,13 @@ async def _run_sz_controlled(args: Any, settings: Settings) -> dict[str, Any]:
     return copy.deepcopy(payload)
 
 
+def _response_text(response: dict[str, Any] | None) -> str | None:
+    try:
+        return response["result"]["content"][0]["text"]  # type: ignore[index]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
 def _jsonrpc_error(request_id: Any, code: int, message: str) -> dict[str, Any]:
     return {
         "jsonrpc": "2.0",
@@ -299,23 +310,42 @@ def create_app() -> FastAPI:
         params = body.get("params") or {}
         tool_name = params.get("name")
         arguments = params.get("arguments") or {}
+        started = time.monotonic()
+        payload: dict[str, Any] | None = None
+        response: dict[str, Any] | None = None
+        failure: BaseException | None = None
         try:
-            if tool_name == "sz_run":
-                args = arguments.get("args")
-                payload = help_payload(args)
-                if payload is None:
-                    payload = await _run_sz_controlled(args, settings)
-            else:
-                plan = build_structured_plan(str(tool_name or ""), arguments, settings=settings)
-                payload = await execute_plan(
-                    plan,
-                    settings,
-                    run_single=_run_sz_controlled,
-                    run_chunk=_run_sz_limited,
-                )
-        except ValueError as e:
-            payload = {"success": False, "code": "BAD_ARGUMENTS", "error": str(e)}
-        return _tool_result(request_id, payload)
+            try:
+                if tool_name == "sz_run":
+                    args = arguments.get("args")
+                    payload = help_payload(args)
+                    if payload is None:
+                        payload = await _run_sz_controlled(args, settings)
+                else:
+                    plan = build_structured_plan(str(tool_name or ""), arguments, settings=settings)
+                    payload = await execute_plan(
+                        plan,
+                        settings,
+                        run_single=_run_sz_controlled,
+                        run_chunk=_run_sz_limited,
+                    )
+            except ValueError as e:
+                payload = {"success": False, "code": "BAD_ARGUMENTS", "error": str(e)}
+            response = _tool_result(request_id, payload)
+            return response
+        except BaseException as exc:
+            failure = exc
+            raise
+        finally:
+            emit_tool_audit(
+                tool=tool_name if isinstance(tool_name, str) else "",
+                known_tools=KNOWN_TOOLS,
+                arguments=arguments,
+                started=started,
+                payload=payload,
+                response_text=_response_text(response),
+                exception=failure,
+            )
 
     return app
 
@@ -325,6 +355,7 @@ app = create_app()
 
 def main() -> None:
     settings = get_settings()
+    configure_audit_logging()
     uvicorn.run(
         "signoz_mcp.app:app",
         host=settings.host,

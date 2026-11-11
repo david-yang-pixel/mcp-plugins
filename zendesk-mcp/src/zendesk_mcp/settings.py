@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 
+from .mcp_schema import resolve_disabled_tools
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -29,10 +31,15 @@ class Settings:
     zendesk_oauth_scope: str = ""
     zendesk_oauth_expected_user_id: str = ""
     zendesk_oauth_keepalive_hours: float = 24.0
+    disabled_tools: str = ""
 
     @property
     def uses_oauth(self) -> bool:
         return self.zendesk_auth_mode == "oauth"
+
+    @property
+    def disabled_tool_set(self) -> frozenset[str]:
+        return resolve_disabled_tools(self.disabled_tools)
 
     @property
     def zendesk_base_url(self) -> str:
@@ -76,6 +83,7 @@ def get_settings() -> Settings:
         zendesk_oauth_scope=os.getenv("ZENDESK_OAUTH_SCOPE", "").strip(),
         zendesk_oauth_expected_user_id=os.getenv("ZENDESK_OAUTH_EXPECTED_USER_ID", ""),
         zendesk_oauth_keepalive_hours=max(0.0, _float_env("ZENDESK_OAUTH_KEEPALIVE_HOURS", 24.0)),
+        disabled_tools=os.getenv("ZENDESK_MCP_DISABLED_TOOLS", ""),
     )
 
 

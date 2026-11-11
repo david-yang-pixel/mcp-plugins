@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import sys
+import time
 from contextlib import asynccontextmanager, suppress
 from typing import Any, AsyncIterator, Optional
 
@@ -35,6 +38,20 @@ from .runtime import (
 )
 from .settings import Settings, get_settings
 
+
+_AUDIT = logging.getLogger("source_mcp.audit")
+# Argument values that are safe to log: names of repos, deployments and refs plus
+# small scalar options. Everything else (search patterns, file paths and globs,
+# tag patterns, anything unknown) is logged by key name only.
+_AUDIT_VALUE_KEYS = frozenset(
+    {
+        "repo", "repos", "deployment", "environment", "ref", "ref1", "ref2", "refs",
+        "mode", "detail", "recursive", "case_sensitive", "unshallow",
+        "limit", "offset", "n", "hours", "deepen", "context", "start_line", "end_line",
+    }
+)
+_AUDIT_MAX_KEYS = 32
+_AUDIT_MAX_TEXT = 200
 
 PROTOCOL_VERSION = "2025-03-26"
 RUNTIME_REF = "runtime"
@@ -76,6 +93,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
+    configure_audit_logging()
     app = FastAPI(title="source-mcp", version="0.1.0", lifespan=_lifespan)
 
     @app.get("/health")
@@ -136,12 +154,17 @@ def create_app() -> FastAPI:
             )
         if method == "tools/call":
             params = payload.get("params") or {}
-            result = await _handle_tool_call(
-                name=str(params.get("name") or ""),
-                arguments=params.get("arguments") or {},
-                settings=settings,
-            )
-            return JSONResponse(_tool_result(request_id, result))
+            name = str(params.get("name") or "")
+            arguments = params.get("arguments") or {}
+            started = time.monotonic()
+            result: Optional[dict[str, Any]] = None
+            response: Optional[dict[str, Any]] = None
+            try:
+                result = await _handle_tool_call(name=name, arguments=arguments, settings=settings)
+                response = _tool_result(request_id, result)
+                return JSONResponse(response)
+            finally:
+                _audit_tool_call(name, arguments, result, response, started)
 
         return JSONResponse(
             {
@@ -391,14 +414,25 @@ def _tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "repo_status",
             "description": (
-                "Show local clone/fetch status for configured source repositories: shallow, "
-                "full_history (configured), last_fetch_at, stale and the last background "
-                "refresh result. A repo that fails is reported with error instead of failing "
-                "the whole call."
+                "Show local clone/fetch status for configured source repositories (or one "
+                "repo). By default each repo is summarised as repo, commit and "
+                "default_branch_committed_at (latest fetched default-branch commit), stale, "
+                "shallow and last_error (last background refresh error, or the status error "
+                "of a repo that could not be inspected). detail=true returns every field: "
+                "path, cloned, full_history, head_ref/head_commit, fetch refspecs, "
+                "last_fetch_at, stale_after_seconds, tag_count and the full background "
+                "refresh result. A repo that fails is reported instead of failing the whole call."
             ),
             "inputSchema": {
                 "type": "object",
-                "properties": {"repo": {"type": "string"}},
+                "properties": {
+                    "repo": {"type": "string", "description": "Only this repo; omitted lists all."},
+                    "detail": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Return the full status of each repo instead of the summary.",
+                    },
+                },
             },
         },
         {
@@ -565,9 +599,12 @@ async def _handle_tool_call(
             return _success(_annotate_runtime(settings, repo, data, plan, runtime_sides))
         if name == "repo_status":
             repo = _optional_str(arguments, "repo")
+            detail = _optional_bool(arguments, "detail", False)
             if repo:
-                return _success(await status_for_repo(repo, settings))
-            return _success(await status_for_repos(settings))
+                single = await status_for_repo(repo, settings)
+                return _success(single if detail else _repo_status_summary(single))
+            entries = await status_for_repos(settings)
+            return _success(entries if detail else [_repo_status_summary(e) for e in entries])
         if name == "refresh_repos":
             return _success(
                 await refresh_repos(
@@ -594,6 +631,22 @@ async def _handle_tool_call(
         return _failure(e.code, e.message)
     except Exception as e:  # noqa: BLE001 - expose controlled MCP error payload.
         return _failure("INTERNAL_ERROR", str(e))
+
+
+def _repo_status_summary(entry: dict[str, Any]) -> dict[str, Any]:
+    """The default compact repo_status entry; detail=true returns ``entry`` unchanged."""
+    last_error = (entry.get("background_refresh") or {}).get("last_error")
+    if entry.get("ok") is False:
+        # The repo could not be inspected at all (status_for_repos isolates it).
+        last_error = f"{entry.get('code')}: {entry.get('error')}"
+    return {
+        "repo": entry.get("repo"),
+        "commit": entry.get("commit"),
+        "default_branch_committed_at": entry.get("default_branch_committed_at"),
+        "stale": entry.get("stale"),
+        "shallow": entry.get("shallow"),
+        "last_error": last_error,
+    }
 
 
 def _required_str(arguments: dict[str, Any], name: str, *, strip: bool = True) -> str:
@@ -754,7 +807,85 @@ def _tool_result(request_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _audit_args(arguments: Any) -> dict[str, Any]:
+    if not isinstance(arguments, dict):
+        return {"keys": [], "values": {}, "invalid": type(arguments).__name__}
+    keys = sorted(str(key)[:64] for key in arguments)[:_AUDIT_MAX_KEYS]
+    values: dict[str, Any] = {}
+    for key, value in arguments.items():
+        if key not in _AUDIT_VALUE_KEYS:
+            continue
+        if isinstance(value, (bool, int, float)) or value is None:
+            values[key] = value
+        elif isinstance(value, str):
+            values[key] = value[:_AUDIT_MAX_TEXT]
+        elif isinstance(value, list):
+            values[key] = [str(item)[:_AUDIT_MAX_TEXT] for item in value[:_AUDIT_MAX_KEYS]]
+    return {"keys": keys, "values": values}
+
+
+def _audit_tool_call(
+    name: str,
+    arguments: Any,
+    result: Optional[dict[str, Any]],
+    response: Optional[dict[str, Any]],
+    started: float,
+) -> None:
+    """Emit one JSON line per tool call. Never raises: logging must not break a call."""
+    try:
+        success = bool(result and result.get("success"))
+        if result is None:
+            error: Optional[str] = "INTERNAL_ERROR"
+        else:
+            error = None if success else str(result.get("code") or "UNKNOWN")
+        response_chars = 0
+        if response is not None:
+            response_chars = sum(
+                len(item.get("text") or "") for item in response["result"]["content"]
+            )
+        _AUDIT.info(
+            json.dumps(
+                {
+                    "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "tool": name[:100],
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                    "outcome": "success" if success else "failed",
+                    "error": error,
+                    "response_chars": response_chars,
+                    "args": _audit_args(arguments),
+                },
+                ensure_ascii=False,
+            )
+        )
+    except Exception:  # noqa: BLE001 - the audit line is best effort.
+        pass
+
+
+class _StdoutHandler(logging.StreamHandler):  # type: ignore[type-arg]
+    """Writes to whatever sys.stdout is at emit time (survives stream swaps)."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.stream = sys.stdout
+        super().emit(record)
+
+
+def configure_audit_logging() -> None:
+    """Send source_mcp.audit INFO lines to stdout as bare JSON (idempotent).
+
+    The root logger stays unconfigured so INFO chatter from libraries is not
+    emitted; uvicorn configures only its own loggers.
+    """
+    if any(isinstance(h, _StdoutHandler) for h in _AUDIT.handlers):
+        return
+    handler = _StdoutHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    _AUDIT.addHandler(handler)
+    _AUDIT.setLevel(logging.INFO)
+    _AUDIT.propagate = False
+
+
 def main() -> None:
+    configure_audit_logging()
     settings = get_settings()
     uvicorn.run(
         "source_mcp.app:create_app",

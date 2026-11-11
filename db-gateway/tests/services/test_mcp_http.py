@@ -114,7 +114,9 @@ async def test_mcp_tools_call_queries_gateway(mcp_client):
     assert content["csv"] == "ok\n1\n"
     query.assert_awaited_once()
     assert query.await_args.kwargs["database"] == "prod"
-    assert query.await_args.kwargs["ticket_id"] == "2830"
+    # Legacy callers may still send ticket_id: it is ignored, not an error.
+    assert "ticket_id" not in query.await_args.kwargs
+    assert data["result"]["isError"] is False
 
 
 @pytest.mark.asyncio
@@ -156,7 +158,8 @@ async def test_mcp_tools_list_exposes_paging_and_format(mcp_client):
     assert props["offset"]["type"] == "integer" and props["offset"]["minimum"] == 0
     assert props["limit"]["type"] == "integer" and props["limit"]["minimum"] == 1
     assert props["format"]["enum"] == ["csv", "json"]
-    assert "ticket_id" in props
+    assert props["explain"]["type"] == "boolean"
+    assert "ticket_id" not in props
 
 
 @pytest.mark.asyncio
@@ -188,7 +191,8 @@ async def test_mcp_tools_call_forwards_paging_and_format(mcp_client):
     assert kwargs["offset"] == 20
     assert kwargs["limit"] == 10
     assert kwargs["output_format"] == "json"
-    assert kwargs["ticket_id"] == ""
+    assert kwargs["explain"] is None
+    assert "ticket_id" not in kwargs
 
 
 @pytest.mark.asyncio
@@ -204,6 +208,7 @@ async def test_http_query_forwards_paging_and_format(mcp_client):
     assert resp.status == 200
     kwargs = query.await_args.kwargs
     assert (kwargs["offset"], kwargs["limit"], kwargs["output_format"]) == (5, 2, "csv")
+    assert "ticket_id" not in kwargs
 
 
 @pytest.mark.asyncio
@@ -224,3 +229,119 @@ async def test_mcp_tool_is_annotated_read_only(mcp_client):
     tools = (await resp.json())["result"]["tools"]
     assert tools[0]["annotations"]["readOnlyHint"] is True
     assert tools[0]["annotations"]["destructiveHint"] is False
+
+
+@pytest.mark.asyncio
+async def test_mcp_tools_list_includes_schema_tool_read_only(mcp_client):
+    resp = await _post_mcp(
+        mcp_client,
+        {"jsonrpc": "2.0", "id": 10, "method": "tools/list", "params": {}},
+    )
+
+    tools = {t["name"]: t for t in (await resp.json())["result"]["tools"]}
+    assert set(tools) == {"db_gateway_query", "db_gateway_schema"}
+    schema_tool = tools["db_gateway_schema"]
+    assert schema_tool["annotations"] == tools["db_gateway_query"]["annotations"]
+    assert schema_tool["annotations"]["readOnlyHint"] is True
+    props = schema_tool["inputSchema"]["properties"]
+    assert props["database"]["enum"] == ["prod", "billing", "plugin"]
+    assert props["tables"]["type"] == "array"
+    assert schema_tool["inputSchema"]["required"] == ["database", "tables"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_tools_call_explain_is_forwarded(mcp_client):
+    result = GatewayQueryResult(success=True, csv="QUERY PLAN\nSeq Scan\n", columns=["QUERY PLAN"])
+    with patch("db_gateway.mcp.execute_gateway_query", AsyncMock(return_value=result)) as query:
+        resp = await _post_mcp(
+            mcp_client,
+            {
+                "jsonrpc": "2.0",
+                "id": 11,
+                "method": "tools/call",
+                "params": {
+                    "name": "db_gateway_query",
+                    "arguments": {"database": "prod", "sql": "select 1", "explain": True},
+                },
+            },
+        )
+
+    assert resp.status == 200
+    assert query.await_args.kwargs["explain"] is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_tools_call_schema_tool(mcp_client):
+    payload = {"success": True, "database": "prod", "tables": [{"table": "workflow_runs"}]}
+    with patch("db_gateway.mcp.execute_schema_lookup", AsyncMock(return_value=payload)) as lookup:
+        resp = await _post_mcp(
+            mcp_client,
+            {
+                "jsonrpc": "2.0",
+                "id": 12,
+                "method": "tools/call",
+                "params": {
+                    "name": "db_gateway_schema",
+                    "arguments": {"database": "prod", "tables": ["workflow_runs"]},
+                },
+            },
+        )
+
+    data = await resp.json()
+    assert data["result"]["isError"] is False
+    assert json.loads(data["result"]["content"][0]["text"]) == payload
+    assert lookup.await_args.kwargs["database"] == "prod"
+    assert lookup.await_args.kwargs["tables"] == ["workflow_runs"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_tools_call_schema_error_sets_is_error(mcp_client):
+    payload = {"success": False, "code": "INVALID_ARGUMENT", "error": "bad"}
+    with patch("db_gateway.mcp.execute_schema_lookup", AsyncMock(return_value=payload)):
+        resp = await _post_mcp(
+            mcp_client,
+            {
+                "jsonrpc": "2.0",
+                "id": 13,
+                "method": "tools/call",
+                "params": {"name": "db_gateway_schema", "arguments": {"database": "prod"}},
+            },
+        )
+
+    assert (await resp.json())["result"]["isError"] is True
+
+
+@pytest.mark.asyncio
+async def test_http_schema_endpoint(mcp_client):
+    payload = {"success": True, "database": "billing", "tables": []}
+    with patch("db_gateway.app.execute_schema_lookup", AsyncMock(return_value=payload)) as lookup:
+        resp = await mcp_client.post(
+            "/schema",
+            json={"database": "billing", "tables": ["orders"]},
+            headers={"X-API-Key": "secret"},
+        )
+        unauthorized = await mcp_client.post(
+            "/schema", json={"database": "billing", "tables": ["orders"]},
+            headers={"X-API-Key": "bad"},
+        )
+
+    assert resp.status == 200
+    assert await resp.json() == payload
+    assert lookup.await_count == 1
+    assert lookup.await_args.kwargs["tables"] == ["orders"]
+    assert unauthorized.status == 401
+
+
+@pytest.mark.asyncio
+async def test_http_query_forwards_explain_and_ignores_ticket_id(mcp_client):
+    result = GatewayQueryResult(success=True, csv="QUERY PLAN\n")
+    with patch("db_gateway.app.execute_gateway_query", AsyncMock(return_value=result)) as query:
+        resp = await mcp_client.post(
+            "/query",
+            json={"database": "prod", "sql": "select 1", "ticket_id": "1", "explain": True},
+            headers={"X-API-Key": "secret"},
+        )
+
+    assert resp.status == 200
+    assert query.await_args.kwargs["explain"] is True
+    assert "ticket_id" not in query.await_args.kwargs

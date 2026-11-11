@@ -626,11 +626,116 @@ def test_repo_probe_failure_does_not_fail_search(github) -> None:
 
 
 def test_search_api_error_is_reported(github) -> None:
-    github({"/search/issues": lambda r: httpx.Response(422, json={"message": "Validation Failed"})})
+    # 422 on an accessible repo (e.g. bad query syntax) keeps the original error.
+    fake = github(
+        {
+            "/search/issues": lambda r: httpx.Response(422, json={"message": "Validation Failed"}),
+            "/repos/o/r": {"full_name": "o/r", "private": False, "has_issues": True},
+        }
+    )
     result = call("github_search_issues", {"repo": "o/r", "query": "x"})
     assert result["success"] is False
     assert result["code"] == "GITHUB_API_ERROR"
     assert "HTTP 422" in result["error"]
+    assert "repo_access" not in result
+    assert fake.paths() == ["/search/issues", "/repos/o/r"]
+
+
+_SEARCH_422 = {
+    "message": "Validation Failed",
+    "errors": [
+        {
+            "message": "The listed users and repositories cannot be searched either because "
+            "the resources do not exist or you do not have permission to view them.",
+            "resource": "Search",
+            "field": "q",
+            "code": "invalid",
+        }
+    ],
+}
+
+
+def test_issue_search_on_inaccessible_repo_reports_repo_not_accessible(github) -> None:
+    fake = github({"/search/issues": lambda r: httpx.Response(422, json=_SEARCH_422)})  # repo -> 404
+    result = call("github_search_issues", {"repo": "langgenius/dify-saas", "query": "billing"})
+    assert result["success"] is False
+    assert result["code"] == "REPO_NOT_ACCESSIBLE"
+    assert "langgenius/dify-saas" in result["error"]
+    access = result["repo_access"]
+    assert access["repo"] == "langgenius/dify-saas"
+    assert access["accessible"] is False and access["http_status"] == 404
+    assert fake.paths() == ["/search/issues", "/repos/langgenius/dify-saas"]
+
+
+def test_pr_search_on_forbidden_repo_reports_repo_not_accessible(github) -> None:
+    github(
+        {
+            "/search/issues": lambda r: httpx.Response(422, json=_SEARCH_422),
+            "/repos/o/r": lambda r: httpx.Response(403, json={"message": "Forbidden"}),
+        }
+    )
+    result = call("github_search_prs", {"repo": "o/r", "query": "x"})
+    assert result["code"] == "REPO_NOT_ACCESSIBLE"
+    assert result["repo_access"]["http_status"] == 403
+
+
+def test_code_search_on_inaccessible_repo_reports_repo_not_accessible(github) -> None:
+    fake = github({"/search/code": lambda r: httpx.Response(422, json=_SEARCH_422)})
+    result = call("github_code_search", {"query": "rbac", "scope": "langgenius/dify-saas"})
+    assert result["success"] is False
+    assert result["code"] == "REPO_NOT_ACCESSIBLE"
+    assert result["repo_access"]["accessible"] is False
+    assert fake.paths() == ["/search/code", "/repos/langgenius/dify-saas"]
+
+
+def test_code_search_422_without_repo_scope_keeps_original_error(github) -> None:
+    fake = github({"/search/code": lambda r: httpx.Response(422, json={"message": "Validation Failed"})})
+    result = call("github_code_search", {"query": "rbac", "scope": "langgenius"})
+    assert result["code"] == "GITHUB_API_ERROR" and "HTTP 422" in result["error"]
+    assert fake.paths() == ["/search/code"]
+
+
+def test_search_422_with_inconclusive_probe_keeps_original_error(github) -> None:
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("network down", request=request)
+
+    github({"/search/issues": lambda r: httpx.Response(422, json=_SEARCH_422), "/repos/o/r": boom})
+    result = call("github_search_issues", {"repo": "o/r", "query": "x"})
+    assert result["code"] == "GITHUB_API_ERROR" and "HTTP 422" in result["error"]
+
+
+@pytest.mark.parametrize(
+    ("status", "headers"),
+    [(500, {}), (503, {}), (429, {}), (403, {"x-ratelimit-remaining": "0"}), (403, {"retry-after": "60"})],
+)
+def test_search_422_with_temporary_probe_failure_keeps_original_error(github, status, headers) -> None:
+    github(
+        {
+            "/search/issues": lambda r: httpx.Response(422, json=_SEARCH_422),
+            "/repos/o/r": lambda r: httpx.Response(status, headers=headers, json={"message": "x"}),
+        }
+    )
+    result = call("github_search_issues", {"repo": "o/r", "query": "x"})
+    assert result["code"] == "GITHUB_API_ERROR" and "HTTP 422" in result["error"]
+    assert "repo_access" not in result
+
+
+def test_zero_results_with_temporary_probe_failure_is_inconclusive(github) -> None:
+    github(
+        {
+            "/search/code": lambda r: httpx.Response(200, json={"total_count": 0, "items": []}),
+            "/repos/o/r": lambda r: httpx.Response(503, json={"message": "x"}),
+        }
+    )
+    access = call("github_code_search", {"query": "q", "repo": "o/r"})["data"]["repo_access"]
+    assert access["accessible"] is None and access["http_status"] == 503
+
+
+def test_search_non_422_error_does_not_probe(github) -> None:
+    fake = github({"/search/issues": lambda r: httpx.Response(500, json={"message": "boom"})})
+    result = call("github_search_issues", {"repo": "o/r", "query": "x"})
+    assert result["code"] == "GITHUB_API_ERROR" and "HTTP 500" in result["error"]
+    assert fake.paths() == ["/search/issues"]
 
 
 def test_every_tool_schema_documents_its_arguments() -> None:

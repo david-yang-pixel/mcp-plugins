@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from .client import ZendeskApiError, ZendeskClient, _oauth_provider
 from .oauth import OAuthError
-from .mcp_schema import PRIORITY_VALUES, STATUS_VALUES, TYPE_VALUES
+from .mcp_schema import PRIORITY_VALUES, READ_ONLY_TOOL_NAMES, STATUS_VALUES, TYPE_VALUES
 from .settings import Settings, get_settings
 
 
@@ -30,22 +30,6 @@ FORBIDDEN_COMMENT_KEYS = {
     "attachments",
 }
 FORBIDDEN_INTERNAL_NOTE_KEYS = FORBIDDEN_COMMENT_KEYS - {"body"}
-
-READ_ONLY_TOOL_NAMES = {
-    "get_ticket",
-    "list_tickets",
-    "search_tickets",
-    "get_ticket_comments",
-    "get_ticket_conversation_log",
-    "list_attachments",
-    "download_attachment",
-    "get_user",
-    "list_views",
-    "get_view_tickets",
-    "list_groups",
-    "search_help_center",
-    "get_article",
-}
 
 _CACHE_LOCK = threading.Lock()
 _CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
@@ -75,7 +59,7 @@ def handle_tool_call(name: str, arguments: dict[str, Any], *, settings: Optional
         "zendesk_auth_start": _zendesk_auth_start,
         "zendesk_auth_complete": _zendesk_auth_complete,
     }
-    handler = handlers.get(name)
+    handler = None if name in settings.disabled_tool_set else handlers.get(name)
     if not handler:
         return _failure("UNKNOWN_TOOL", f"unknown tool: {name}")
     try:

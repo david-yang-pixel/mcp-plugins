@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Optional
 
 import uvicorn
@@ -9,7 +10,9 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from . import tools as github_tools
 from .mcp import (
+    audit_tool_call,
     check_auth,
+    configure_logging,
     initialize_result,
     jsonrpc_error,
     tool_result,
@@ -95,19 +98,38 @@ def create_service_app(service_name: str) -> FastAPI:
             return jsonrpc_error(request_id, -32601, f"unsupported method: {method}")
 
         params = body.get("params") or {}
-        name = params.get("name")
-        if not any(tool["name"] == name for tool in spec["tools"]):
-            return jsonrpc_error(request_id, -32601, f"unknown tool: {name}")
-        arguments = params.get("arguments") or {}
-        if not isinstance(arguments, dict):
-            return tool_result(
-                request_id,
-                {"success": False, "code": "BAD_ARGUMENTS", "error": "arguments must be an object"},
+        if not isinstance(params, dict):
+            params = {}
+        started = time.monotonic()
+        response: Any = None
+        try:
+            response = await _call_tool(spec, request_id, params, settings)
+            return response
+        finally:
+            audit_tool_call(
+                tool=params.get("name"),
+                arguments=params.get("arguments"),
+                started=started,
+                response=response,
             )
-        payload = await spec["handler"](str(name), arguments, settings)
-        return tool_result(request_id, payload)
 
     return app
+
+
+async def _call_tool(
+    spec: dict[str, Any], request_id: Any, params: dict[str, Any], settings: Settings
+) -> dict[str, Any]:
+    name = params.get("name")
+    if not any(tool["name"] == name for tool in spec["tools"]):
+        return jsonrpc_error(request_id, -32601, f"unknown tool: {name}")
+    arguments = params.get("arguments") or {}
+    if not isinstance(arguments, dict):
+        return tool_result(
+            request_id,
+            {"success": False, "code": "BAD_ARGUMENTS", "error": "arguments must be an object"},
+        )
+    payload = await spec["handler"](str(name), arguments, settings)
+    return tool_result(request_id, payload)
 
 
 def create_app() -> FastAPI:
@@ -143,6 +165,7 @@ def _run(app_path: str, *, host: str, port: int) -> None:
 
 
 def main_github() -> None:
+    configure_logging()
     settings = get_settings()
     _run("github_mcp.app:github_app", host=settings.github_host, port=settings.github_port)
 

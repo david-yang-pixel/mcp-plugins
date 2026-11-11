@@ -14,6 +14,7 @@ from typing import Any, Iterable
 from urllib.parse import urljoin, urlparse
 
 import httpx
+import yaml
 
 from .mcp import failure, optional_int, optional_str, required_str, success
 from .settings import Settings
@@ -50,6 +51,17 @@ MAX_VERSION_CORPORA = 8
 
 DOC_LANGUAGES = ("en", "zh", "ja")
 DOC_EDITIONS = ("all", "cloud", "self-hosted")
+
+# With edition=cloud, shared pages (API reference, plugin development, learn, ...)
+# stay in the results but Cloud-specific pages are preferred. A Cloud page scores
+# as if every query word it matches also hit one more field of this weight
+# (compare title 12, heading 8, URL path 6, body 2-5), scaled by the word's
+# rarity like any other field hit. Ranking still puts pages matching more query
+# words first, so the boost only reorders pages with the same number of matched
+# words. 0 disables it; edition=all and edition=self-hosted are unaffected.
+CLOUD_EDITION_BOOST = 5.0
+
+SUMMARY_CHARS = 420
 
 SITE_SITEMAP_INDEX_URL = "https://dify.ai/sitemap-index.xml"
 DOCS_HOSTS = {"enterprise-docs.dify.ai", "docs.dify.ai"}
@@ -107,8 +119,10 @@ TOOLS = [
                     "description": (
                         "all, cloud, or self-hosted. Based on the community docs URL "
                         "section (/cloud/ or /self-host/); shared pages such as API "
-                        "reference, plugin development, and learn are kept for both. "
-                        "Enterprise docs count as self-hosted"
+                        "reference, plugin development, and learn are kept for both, but "
+                        "with cloud, Cloud-specific pages rank above shared pages that "
+                        "match the same number of query words. Enterprise docs count as "
+                        "self-hosted"
                     ),
                 },
                 "limit": {
@@ -220,6 +234,9 @@ class Document:
     language: str = ""
     version: str = ""
     edition: str = ""
+    # Fixed search-result description, e.g. an API reference page's OpenAPI
+    # operation summary and description. Empty means a query-centred snippet.
+    summary: str = ""
 
 
 @dataclass(frozen=True)
@@ -388,10 +405,12 @@ async def _docs_search(arguments: dict[str, Any], settings: Settings) -> dict[st
 
     edition_pool = [document for document in documents if _matches_edition(document, edition)]
     pool = [document for document in edition_pool if document.language in languages]
-    results = _search_documents(pool, query=search_query, limit=limit)
+    results = _search_documents(pool, query=search_query, limit=limit, edition=edition)
     applied_language = language_arg if language_arg != "auto" else languages[0]
     if not results and language_arg == "auto" and len(pool) != len(edition_pool):
-        fallback = _search_documents(edition_pool, query=search_query, limit=limit)
+        fallback = _search_documents(
+            edition_pool, query=search_query, limit=limit, edition=edition
+        )
         if fallback:
             notices.append(
                 f"No {languages[0]} results for this query; showing results from all languages."
@@ -548,7 +567,7 @@ def _classify_document(url: str, content: str) -> tuple[str, str, str]:
 
 
 def _make_document(*, title: str, url: str, content: str, source: str) -> Document:
-    cleaned = _clean_content(content)
+    cleaned, summary = _index_content(_clean_content(content))
     language, version, edition = _classify_document(url, cleaned)
     return Document(
         title=title,
@@ -558,7 +577,172 @@ def _make_document(*, title: str, url: str, content: str, source: str) -> Docume
         language=language,
         version=version,
         edition=edition,
+        summary=summary,
     )
+
+
+# Mintlify adds a machine-translation notice to every zh/ja page; it says
+# nothing about the page and only pollutes snippets. official_docs_read keeps it.
+_TRANSLATION_NOTICE = re.compile(
+    r"(?m)^[ \t]*>[ \t]*(?:本文档由 AI 自动翻译|このドキュメントは AI によって自動翻訳されています)"
+    r"[^\n]*(?:\n|$)"
+)
+# Mintlify API reference pages (zh/ja .md pages, versioned Enterprise pages)
+# embed the whole OpenAPI document of one operation as a fenced YAML block:
+#   ## OpenAPI
+#   ````yaml /zh/api-reference/openapi_service.json post /datasets/{id}/...
+_OPENAPI_BLOCK = re.compile(
+    r"(?ms)(?:^#{1,6}[ \t]+OpenAPI[ \t]*\n\s*)?"
+    r"^(?P<fence>`{3,}|~{3,})[ \t]*ya?ml[ \t]+\S+\.(?:json|ya?ml)[ \t]+"
+    r"(?P<method>get|post|put|patch|delete|head|options|trace)[ \t]+(?P<path>/\S*)[ \t]*\n"
+    r"(?P<body>.*?)^(?P=fence)[ \t]*$\n?"
+)
+# The English llms-full.txt feeds only keep the spec reference line:
+#   /en/api-reference/openapi_service.json post /apps/annotations
+_OPENAPI_REFERENCE_LINE = re.compile(
+    r"(?m)^[ \t]*/\S+\.(?:json|ya?ml)[ \t]+"
+    r"(?P<method>get|post|put|patch|delete|head|options|trace)[ \t]+(?P<path>/\S*)[ \t]*$"
+)
+_HTTP_METHODS = ("get", "post", "put", "patch", "delete", "head", "options", "trace")
+
+
+def _index_content(content: str) -> tuple[str, str]:
+    """Return (searchable text, fixed summary) for a cleaned docs page.
+
+    OpenAPI YAML is replaced by a readable rendering of the operation (method,
+    path, summary, description, parameter and response descriptions). The
+    spec-wide boilerplate repeated on every API page (info, servers, tags,
+    components) is dropped so it no longer matches unrelated queries.
+    """
+    content = _TRANSLATION_NOTICE.sub("", content)
+    summaries: list[str] = []
+
+    def render_block(match: re.Match[str]) -> str:
+        method, path = match.group("method").upper(), match.group("path")
+        spec, operation = _openapi_operation(match.group("body"), match.group("method"), path)
+        summary = _operation_text(operation.get("summary"))
+        description = _operation_text(operation.get("description"))
+        lead = " — ".join(part for part in (summary, description) if part)
+        if lead:
+            summaries.append(lead)
+        lines = [f"{method} {path}", "", summary, "", description, ""]
+        lines.extend(
+            f"- {name}: {text}" if text else f"- {name}"
+            for name, text in _operation_fields(operation, spec)
+        )
+        return "\n".join(lines).strip() + "\n"
+
+    content = _OPENAPI_BLOCK.sub(render_block, content)
+    content = _OPENAPI_REFERENCE_LINE.sub(
+        lambda match: f"{match.group('method').upper()} {match.group('path')}", content
+    )
+    content = re.sub(r"\n{3,}", "\n\n", content).strip()
+    summary = _truncate(summaries[0], SUMMARY_CHARS) if summaries else ""
+    return content, summary
+
+
+def _openapi_operation(
+    body: str, method: str, path: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return (whole spec, the page's operation object); empty dicts if unparsable."""
+    try:
+        spec = yaml.load(body, Loader=_YAML_LOADER)
+    except yaml.YAMLError:
+        return {}, {}
+    if not isinstance(spec, dict):
+        return {}, {}
+    paths = spec.get("paths")
+    if not isinstance(paths, dict):
+        return spec, {}
+    item = paths.get(path)
+    if not isinstance(item, dict):
+        item = next((value for value in paths.values() if isinstance(value, dict)), {})
+    operation = item.get(method.casefold())
+    if not isinstance(operation, dict):
+        operation = next(
+            (item[key] for key in _HTTP_METHODS if isinstance(item.get(key), dict)), {}
+        )
+    return spec, operation
+
+
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+def _operation_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", value).strip() if isinstance(value, str) else ""
+
+
+def _operation_fields(operation: dict[str, Any], spec: dict[str, Any]) -> list[tuple[str, str]]:
+    """Parameter, request body field and response descriptions of one operation.
+
+    Local ``$ref`` pointers (``#/components/...``) are followed, so fields of
+    referenced schemas stay searchable even though ``components`` is dropped.
+    """
+    fields: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def resolve(node: Any, trail: tuple[str, ...] = ()) -> tuple[Any, tuple[str, ...]]:
+        while isinstance(node, dict) and isinstance(node.get("$ref"), str):
+            ref = node["$ref"]
+            if not ref.startswith("#/") or ref in trail or len(trail) > 20:
+                return {}, trail
+            trail = (*trail, ref)
+            target: Any = spec
+            for part in ref[2:].split("/"):
+                part = part.replace("~1", "/").replace("~0", "~")
+                target = target.get(part) if isinstance(target, dict) else None
+            node = target
+        return node, trail
+
+    def add(name: Any, description: Any) -> None:
+        item = (str(name), _operation_text(description))
+        if item[0] and item not in seen:
+            seen.add(item)
+            fields.append(item)
+
+    def walk_schema(schema: Any, depth: int = 0, trail: tuple[str, ...] = ()) -> None:
+        schema, trail = resolve(schema, trail)
+        if not isinstance(schema, dict) or depth > 6:
+            return
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            for name, child in properties.items():
+                child_schema, _ = resolve(child, trail)
+                description = (child.get("description") if isinstance(child, dict) else "") or (
+                    child_schema.get("description") if isinstance(child_schema, dict) else ""
+                )
+                add(name, description)
+                walk_schema(child, depth + 1, trail)
+        walk_schema(schema.get("items"), depth + 1, trail)
+        for key in ("allOf", "oneOf", "anyOf"):
+            children = schema.get(key)
+            for child in children if isinstance(children, list) else []:
+                walk_schema(child, depth + 1, trail)
+
+    parameters = operation.get("parameters")
+    for parameter in parameters if isinstance(parameters, list) else []:
+        parameter, _ = resolve(parameter)
+        if isinstance(parameter, dict):
+            add(parameter.get("name", ""), parameter.get("description"))
+    body, _ = resolve(operation.get("requestBody"))
+    if isinstance(body, dict) and isinstance(body.get("content"), dict):
+        for media in body["content"].values():
+            if isinstance(media, dict):
+                schema, _ = resolve(media.get("schema"))
+                if isinstance(schema, dict) and schema.get("description"):
+                    add("body", schema.get("description"))
+                walk_schema(media.get("schema"))
+    responses = operation.get("responses")
+    for status, response in (responses.items() if isinstance(responses, dict) else []):
+        response, _ = resolve(response)
+        if isinstance(response, dict):
+            add(status, response.get("description"))
+    return fields
+
+
+def _truncate(text: str, limit: int) -> str:
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 async def _load_enterprise_versions(
@@ -907,7 +1091,13 @@ def _document_fields(document: Document) -> dict[str, str]:
     }
 
 
-def _search_documents(documents: list[Document], *, query: str, limit: int) -> list[SearchResult]:
+def _search_documents(
+    documents: list[Document],
+    *,
+    query: str,
+    limit: int,
+    edition: str = "all",
+) -> list[SearchResult]:
     normalized = _normalize(query)
     terms = _query_terms(normalized)
     if not terms:
@@ -954,6 +1144,8 @@ def _search_documents(documents: list[Document], *, query: str, limit: int) -> l
             score += 30.0 * (phrase in fields["title"])
             score += 20.0 * (phrase in fields["heading"])
             score += 10.0 * (phrase in fields["body"])
+        if edition == "cloud" and document.edition == "cloud":
+            score += CLOUD_EDITION_BOOST * sum(idf[term] for term in term_matches)
         matched = tuple(term for term in terms if term in term_matches)
         scored.append((len(matched), score, document, matched))
 
@@ -968,9 +1160,8 @@ def _search_documents(documents: list[Document], *, query: str, limit: int) -> l
             SearchResult(
                 title=document.title,
                 url=document.url,
-                description=_make_snippet(
-                    document.content, phrase, snippet_terms, patterns=patterns
-                ),
+                description=document.summary
+                or _make_snippet(document.content, phrase, snippet_terms, patterns=patterns),
                 source=document.source,
                 language=document.language,
                 version=document.version or None,
@@ -1117,6 +1308,17 @@ _IMAGE_REFERENCE = re.compile(
     r"(?mi)^[ \t]*\[[^\]\n]+\]:[ \t]*\S+?\." + _IMAGE_EXTENSIONS + r"(?:\?\S*)?[ \t]*(?:\n|$)"
 )
 _HTML_IMG = re.compile(r"<img\b[^>]*>", re.I | re.S)
+# Site chrome that Mintlify appends to every page .md (currently only the
+# "built and hosted on Mintlify" line). Matched as whole lines only, so prose
+# that merely mentions Mintlify or "helpful" is kept.
+_MINTLIFY_BOILERPLATE = re.compile(
+    r"(?mi)^[ \t]*(?:"
+    r"This documentation is built and hosted on \[?Mintlify\]?(?:\([^)\n]*\))?[^\n]*"
+    r"|(?:Powered|Built) (?:by|with) \[?Mintlify\]?(?:\([^)\n]*\))?[ \t.]*"
+    r"|Was this page helpful\??(?:[ \t]*(?:Yes|No))*"
+    r"|(?:Suggest edits|Raise issue|Edit this page)(?:[ \t]*(?:Suggest edits|Raise issue))*"
+    r")[ \t]*$\n?"
+)
 _EMPTY_FRAME = re.compile(r"<Frame\b[^>]*>\s*</Frame>", re.I)
 _BARE_IMAGE_URL = re.compile(
     r"https?://[^\s<>()\[\]\"']+?\." + _IMAGE_EXTENSIONS
@@ -1126,10 +1328,11 @@ _BARE_IMAGE_URL = re.compile(
 
 
 def _clean_content(text: str) -> str:
-    """Remove llms index notices and image noise from docs content."""
+    """Remove llms index notices, Mintlify footer and image noise from docs content."""
     text = text.replace("\r\n", "\n")
     text = _DOC_INDEX_HEADING.sub("", text)
     text = _DOC_INDEX_LINES.sub("", text)
+    text = _MINTLIFY_BOILERPLATE.sub("", text)
     text = _MD_IMAGE.sub("", text)
     text = _MD_IMAGE_LINK.sub(lambda match: match.group(1), text)
     text = _EMPTY_LINK.sub("", text)

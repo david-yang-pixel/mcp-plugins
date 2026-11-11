@@ -66,7 +66,8 @@ TOOLS = [
         "description": (
             "Search GitHub pull requests for known fixes. Returns compact items "
             "(number, title, state, merged_at, labels, body snippet, html_url). When nothing "
-            "matches, repo_access tells whether the repository is accessible at all."
+            "matches, repo_access tells whether the repository is accessible at all; an "
+            "invisible repository fails with code REPO_NOT_ACCESSIBLE plus repo_access."
         ),
         "inputSchema": {
             "type": "object",
@@ -175,7 +176,8 @@ TOOLS = [
         "description": (
             "Search GitHub issues for bug reports, regressions, and known limitations. "
             "Returns compact items. When nothing matches, repo_access tells whether the "
-            "repository is accessible and whether issues are enabled."
+            "repository is accessible and whether issues are enabled; an invisible "
+            "repository fails with code REPO_NOT_ACCESSIBLE plus repo_access."
         ),
         "inputSchema": {
             "type": "object",
@@ -275,8 +277,9 @@ TOOLS = [
             "repo (owner/name, takes precedence over scope), scope (org or owner/repo), "
             "path and language. Results can include private repositories visible to the "
             "token: every item carries repository.full_name and repository.private; use "
-            "visibility to filter. For version- or tag-specific Dify source, keep using "
-            "dify-source."
+            "visibility to filter. A repo-scoped search on an invisible repository fails "
+            "with code REPO_NOT_ACCESSIBLE plus repo_access. For version- or tag-specific "
+            "Dify source, keep using dify-source."
         ),
         "inputSchema": {
             "type": "object",
@@ -363,7 +366,15 @@ async def _search_issue_like(
     max_body = _body_limit(arguments, "max_body_chars", 300)
     out = _Output(arguments)
     full_query = f"repo:{repo} is:{kind} {query}"
-    data = await _request(settings, "/search/issues", params={"q": full_query, "per_page": str(limit)})
+    try:
+        data = await _request(
+            settings, "/search/issues", params={"q": full_query, "per_page": str(limit)}
+        )
+    except httpx.HTTPStatusError as e:
+        explained = await _search_error_repo_access(e, settings, repo, purpose=kind)
+        if explained is None:
+            raise
+        return explained
     if out.raw:
         return success(data)
     items = data.get("items") or []
@@ -607,12 +618,19 @@ async def _code_search(arguments: dict[str, Any], settings: Settings) -> dict[st
     limit = optional_int(arguments, "limit", 10, minimum=1, maximum=30)
     out = _Output(arguments)
     full_query = _code_query(query, scope=scope, language=language, path=path, repo=repo)
-    data = await _request(
-        settings,
-        "/search/code",
-        params={"q": full_query, "per_page": str(limit)},
-        text_match=True,
-    )
+    probe_repo = repo or (scope if "/" in scope else "")
+    try:
+        data = await _request(
+            settings,
+            "/search/code",
+            params={"q": full_query, "per_page": str(limit)},
+            text_match=True,
+        )
+    except httpx.HTTPStatusError as e:
+        explained = await _search_error_repo_access(e, settings, probe_repo, purpose="code")
+        if explained is None:
+            raise
+        return explained
     raw_items = [item for item in data.get("items") or [] if isinstance(item, dict)]
     kept = [item for item in raw_items if _visibility_matches(item, visibility)]
     if out.raw:
@@ -633,7 +651,6 @@ async def _code_search(arguments: dict[str, Any], settings: Settings) -> dict[st
                 f"{result['filtered_out']} of {len(raw_items)} returned results were hidden "
                 f"by visibility={visibility}."
             )
-    probe_repo = repo or (scope if "/" in scope else "")
     if probe_repo and not raw_items:
         result["repo_access"] = await _repo_access(settings, probe_repo, purpose="code")
     return success(result)
@@ -658,6 +675,36 @@ def _visibility_matches(item: dict[str, Any], visibility: str) -> bool:
     return private if visibility == "private" else not private
 
 
+async def _search_error_repo_access(
+    error: httpx.HTTPStatusError, settings: Settings, repo: str, *, purpose: str
+) -> dict[str, Any] | None:
+    """Turn a repo-scoped search HTTP 422 into REPO_NOT_ACCESSIBLE when the repo is invisible.
+
+    GitHub search answers 422 (not an empty result) when a ``repo:`` qualifier names a
+    repository that does not exist or the token cannot see. Returns None when the error
+    has another cause (e.g. invalid query syntax on an accessible repo, or an
+    inconclusive probe); the caller then keeps the original error.
+    """
+    if not repo or error.response.status_code != 422:
+        return None
+    access = await _repo_access(settings, repo, purpose=purpose)
+    if access.get("accessible") is not False:
+        return None
+    payload = failure(
+        "REPO_NOT_ACCESSIBLE",
+        f"Repository {repo} cannot be searched: it does not exist or is not accessible to "
+        f"the configured token (search returned HTTP 422; repository probe returned HTTP "
+        f"{access.get('http_status')}). See repo_access.",
+    )
+    payload["repo_access"] = access
+    return payload
+
+
+def _rate_limited(response: httpx.Response) -> bool:
+    """GitHub signals primary and secondary rate limits on 403 with these headers."""
+    return response.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in response.headers
+
+
 async def _repo_access(settings: Settings, repo: str, *, purpose: str) -> dict[str, Any]:
     """Explain a zero-result search: missing/inaccessible repo vs. genuinely no match.
 
@@ -672,10 +719,16 @@ async def _repo_access(settings: Settings, repo: str, *, purpose: str) -> dict[s
                 "Repository not found or not visible to the configured token; zero results "
                 "may mean no access rather than no matches."
             )
-        elif status in (401, 403):
-            note = "Token was rejected or lacks permission (or is rate limited) for this repository."
+        elif status in (401, 403) and not _rate_limited(e.response):
+            note = "Token was rejected or lacks permission for this repository."
         else:
-            note = "Repository probe failed; zero results are inconclusive."
+            # 5xx, 429 or a rate-limited 403 says nothing about access.
+            return {
+                "repo": repo,
+                "accessible": None,
+                "http_status": status,
+                "note": "Repository probe failed temporarily; results are inconclusive.",
+            }
         return {"repo": repo, "accessible": False, "http_status": status, "note": note}
     except Exception as e:  # noqa: BLE001
         return {

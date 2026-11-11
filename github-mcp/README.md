@@ -43,6 +43,22 @@
 
 探测失败不会导致搜索本身失败。
 
+### 仓库不可访问
+
+限定仓库的搜索（PR/issue 搜索，或代码搜索带 `repo`/`owner/repo` 形式的 `scope`）在目标仓库不存在或 token 无权访问时，GitHub 返回 HTTP 422 而不是 0 条结果。此时服务同样探测 `GET /repos/{owner}/{repo}`：确认不可访问（`accessible: false`）时返回 `success: false`、`code: "REPO_NOT_ACCESSIBLE"`，并附带上述 `repo_access`；仓库可访问（如查询语法错误）或探测结果不确定时，保留原始 `GITHUB_API_ERROR` 错误。
+
+## 审计日志
+
+每次 `tools/call` 向 stdout 输出一行 JSON（logger `github_mcp.audit`，入口 `main_github()` 将 INFO 日志配置到 stdout）：
+
+```json
+{"time": "2026-11-11T08:41:43Z", "tool": "github_search_issues", "duration_ms": 412, "outcome": "failed", "error": "REPO_NOT_ACCESSIBLE", "response_chars": 520, "args": {"keys": ["query", "repo"], "values": {"repo": "langgenius/dify-saas"}}}
+```
+
+- `outcome` 为 `success`/`failed`，`error` 为错误码（成功时为 `null`），`response_chars` 为返回文本长度。
+- `args.keys` 只记录参数名；`args.values` 只记录非敏感参数（如 `repo`、`scope`、`pr_number`、`issue_number`、`page`、`limit`）。搜索词 `query`、`path`、`fields` 等只记录键名，不记录值；返回内容不写入日志。
+- 写日志失败不会影响工具调用。
+
 ## 开发和测试
 
 ```bash

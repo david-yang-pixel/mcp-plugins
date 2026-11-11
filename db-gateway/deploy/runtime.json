@@ -71,8 +71,7 @@
       "listen_host": "127.0.0.1",
       "listen_port": 18081,
       "request_timeout_seconds": 35,
-      "require_ticket_id": false,
-      "missing_ticket_alert_interval_seconds": 0
+      "audit_log_dir": "/var/lib/mcp/logs"
     },
     "teleport": {
       "proxy": "teleport.dify.dev:443",
