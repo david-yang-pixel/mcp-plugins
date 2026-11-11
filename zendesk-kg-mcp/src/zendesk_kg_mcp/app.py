@@ -17,12 +17,21 @@ from .retrieval import RetrievalClient, RetrievalError
 from .settings import Settings
 
 
+HEALTH_PATH = "/health"
+_PUBLIC_HEALTH_METHODS = frozenset({"GET", "HEAD"})
+
+
+def _is_public_health_request(scope: Scope) -> bool:
+    # Exact match only: "/health/", "/healthz" and "/health/x" still require authentication.
+    return scope.get("path") == HEALTH_PATH and scope.get("method") in _PUBLIC_HEALTH_METHODS
+
+
 class Authentication:
     def __init__(self, app: ASGIApp, settings: Settings):
         self.app, self.settings = app, settings
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send):
-        if scope["type"] == "http":
+        if scope["type"] == "http" and not _is_public_health_request(scope):
             expected = self.settings.api_key.get_secret_value()
             if not expected:
                 await JSONResponse({"error": "MCP authentication is not configured"}, status_code=503)(scope, receive, send)
@@ -90,8 +99,10 @@ def create_app(settings: Settings | None = None, retrieval: RetrievalClient | No
         return CallToolResult(content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False))],
             structuredContent=result)
 
-    @server.custom_route("/health", methods=["GET"])
+    @server.custom_route(HEALTH_PATH, methods=["GET"])
     async def health(request):
+        # Unauthenticated liveness/config probe: only a boolean and the fixed service name, never
+        # key material, upstream details or which credential is missing.
         return JSONResponse({"ok": settings.configured, "service": "zendesk-kg-mcp"},
             status_code=200 if settings.configured else 503)
 

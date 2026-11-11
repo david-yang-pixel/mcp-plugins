@@ -31,6 +31,11 @@ def test_official_client_can_discover_and_search_over_http():
             while not server.started and time.monotonic() < deadline:
                 time.sleep(0.02)
             assert server.started
+            base = url.removesuffix("/mcp")
+            with httpx.Client(trust_env=False) as plain:
+                health = plain.get(base + "/health")
+                assert health.status_code == 200 and health.json() == {"ok": True, "service": "zendesk-kg-mcp"}
+                assert plain.post(url, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).status_code == 401
 
             async def verify():
                 async with httpx2.AsyncClient(headers={"Authorization": "Bearer synthetic-sdk-key"}, trust_env=False) as http:

@@ -62,12 +62,54 @@ def test_unauthorized_requests_never_reach_upstream(probe, headers):
     client, calls = probe
     for path in ("/mcp", "/health"):
         assert client.post(path, headers=headers, json={}).status_code == 401
+    assert client.post("/mcp", headers=headers | {"Accept": "application/json"},
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).status_code == 401
     assert calls == []
 
 
 def test_api_key_header_is_supported(probe):
     client, _ = probe
     assert client.get("/health", headers={"X-API-Key": MCP_KEY}).status_code == 200
+    response = client.post("/mcp", headers={"X-API-Key": MCP_KEY, "Accept": "application/json"},
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+    assert response.status_code == 200 and response.json()["result"]["tools"]
+
+
+@pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer wrong"}, {"X-API-Key": "wrong"}])
+def test_health_is_public_and_exposes_no_sensitive_data(probe, headers):
+    client, calls = probe
+    response = client.get("/health", headers=headers)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {"ok": True, "service": "zendesk-kg-mcp"}
+    assert MCP_KEY not in response.text and UPSTREAM_KEY not in response.text
+    assert "www-authenticate" not in response.headers
+    assert client.head("/health", headers=headers).status_code == 200
+    assert calls == []
+
+
+def test_mcp_still_requires_credentials_when_health_is_public(probe):
+    client, calls = probe
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+    assert client.post("/mcp", headers={"Accept": "application/json"}, json=body).status_code == 401
+    assert client.get("/mcp").status_code == 401
+    for headers in ({"Authorization": "Bearer wrong"}, {"X-API-Key": "wrong"}):
+        assert client.post("/mcp", headers=headers | {"Accept": "application/json"}, json=body).status_code in (401, 403)
+    assert calls == []
+
+
+@pytest.mark.parametrize("path", ["/health/", "/healthz", "/health/x", "/health/../mcp", "/Health",
+    "/mcp/health", "/health%2F"])
+def test_health_bypass_is_exact_path_only(probe, path):
+    client, calls = probe
+    assert client.get(path).status_code == 401
+    assert calls == []
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "PATCH"])
+def test_health_bypass_is_read_only(probe, method):
+    client, _ = probe
+    assert client.request(method, "/health").status_code == 401
 
 
 def test_full_request_mapping_and_response_preservation(probe):
@@ -160,10 +202,14 @@ def test_oversized_response_is_bounded():
 
 def test_missing_credentials_fail_closed():
     with TestClient(create_app(Settings()), base_url="http://localhost") as client:
-        assert client.get("/health").status_code == 503
+        response = client.get("/health")
+        assert response.status_code == 503
+        assert response.json() == {"ok": False, "service": "zendesk-kg-mcp"}
         assert client.post("/mcp", headers=HEADERS, json={}).status_code == 503
+        assert client.get("/healthz").status_code == 503
     with TestClient(create_app(Settings(api_key=MCP_KEY)), base_url="http://localhost") as client:
         assert client.get("/health", headers=HEADERS).status_code == 503
+        assert client.get("/health").json() == {"ok": False, "service": "zendesk-kg-mcp"}
         assert call(client, {"query": "x"})["result"]["structuredContent"]["error"]["code"] == "NOT_CONFIGURED"
 
 
