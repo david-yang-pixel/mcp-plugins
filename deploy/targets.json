@@ -24,6 +24,11 @@
         "source": "/usr/local/bin/tsh",
         "destination": "/usr/local/bin/tsh",
         "readonly": true
+      },
+      {
+        "source": "@data/logs",
+        "destination": "/var/lib/mcp/logs",
+        "readonly": false
       }
     ],
     "command": [],
@@ -159,11 +164,15 @@
         "source": "@data/oauth",
         "destination": "/var/lib/mcp/oauth",
         "readonly": false
+      },
+      {
+        "source": "@data/logs",
+        "destination": "/var/lib/mcp/logs",
+        "readonly": false
       }
     ],
     "command": [],
     "env_keys": [
-      "ZENDESK_API_TOKEN",
       "ZENDESK_AUTH_MODE",
       "ZENDESK_EMAIL",
       "ZENDESK_MCP_ALLOWED_CUSTOM_FIELD_IDS",
@@ -172,6 +181,7 @@
       "ZENDESK_MCP_CACHE_MAX_ENTRIES",
       "ZENDESK_MCP_CACHE_TTL_SECONDS",
       "ZENDESK_MCP_CONNECT_TIMEOUT_SECONDS",
+      "ZENDESK_MCP_DISABLED_TOOLS",
       "ZENDESK_MCP_HOST",
       "ZENDESK_MCP_MAX_RETRIES",
       "ZENDESK_MCP_PORT",

@@ -1,8 +1,8 @@
 FROM python:3.12-slim
 
 # Upgrade: set both values from the release's difyctl-v<version>-checksums.txt, then rebuild.
-ARG DIFY_VERSION=1.18.0
-ARG DIFYCTL_SHA256=2ab8eafb3c6870272fef0c9d1faea99181500905091a6c7b38e4e5c9822eb99b
+ARG DIFY_VERSION=1.19.0
+ARG DIFYCTL_SHA256=3c855fd9d225950518c97a561c055da73e3ed632118553329441442c6a8cf00d
 
 WORKDIR /app
 RUN python -c "import hashlib, sys, urllib.request; version, expected = sys.argv[1:]; \

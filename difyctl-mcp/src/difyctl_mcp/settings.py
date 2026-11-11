@@ -40,7 +40,7 @@ class Settings:
     difyctl_bin: str = "/usr/local/bin/difyctl"
     skills_dir: Path = Path("/opt/difyctl/skills")
     dify_server: str = "https://cloud.dify.ai"
-    dify_version: str = "1.18.0"
+    dify_version: str = "1.19.0"
     static_client_id: str = ""
     service_token: str = ""
     service_email: str = ""
@@ -83,7 +83,7 @@ class Settings:
             difyctl_bin=env.get("DIFYCTL_BIN", "/usr/local/bin/difyctl"),
             skills_dir=Path(env.get("DIFYCTL_SKILLS_DIR", "/opt/difyctl/skills")),
             dify_server=env.get("DIFY_SERVER", "https://cloud.dify.ai").strip().rstrip("/"),
-            dify_version=env.get("DIFY_VERSION", "1.18.0"),
+            dify_version=env.get("DIFY_VERSION", "1.19.0"),
             static_client_id=env.get("MCP_STATIC_CLIENT_ID", ""),
             static_client_secret=env.get("MCP_STATIC_CLIENT_SECRET", ""),
             service_token=env.get("DIFYCTL_MCP_SERVICE_TOKEN", ""),
