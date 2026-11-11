@@ -121,7 +121,7 @@ def test_repo_status_isolates_broken_repo(env):
     broken.mkdir()
     (broken / "HEAD").write_text("garbage\n", encoding="utf-8")
 
-    payload = _call(_client(), "repo_status")
+    payload = _call(_client(), "repo_status", detail=True)
 
     assert payload["success"] is True
     by_repo = {item["repo"]: item for item in payload["data"]}
@@ -131,6 +131,58 @@ def test_repo_status_isolates_broken_repo(env):
     assert by_repo["missing"]["cloned"] is False
     assert by_repo["missing"]["full_history"] is True
 
+    summary = {item["repo"]: item for item in _call(_client(), "repo_status")["data"]}
+    assert summary["other"]["last_error"].startswith(by_repo["other"]["code"] + ": ")
+    assert summary["missing"]["commit"] is None
+
+
+_SUMMARY_FIELDS = {"repo", "commit", "default_branch_committed_at", "stale", "shallow", "last_error"}
+
+
+def test_repo_status_defaults_to_compact_summary(env):
+    git_ops._BACKGROUND_STATE["dify"] = {"last_error": "fetch failed: boom"}
+
+    payload = _call(_client(), "repo_status")
+
+    assert payload["success"] is True
+    assert [item["repo"] for item in payload["data"]] == ["dify", "other", "missing"]
+    for item in payload["data"]:
+        assert set(item) == _SUMMARY_FIELDS
+    dify = payload["data"][0]
+    assert dify["commit"] == _git("rev-parse", "HEAD", cwd=env["origin"])
+    assert dify["default_branch_committed_at"]
+    assert dify["shallow"] is True
+    assert dify["stale"] is None  # background refresh disabled in tests
+    assert dify["last_error"] == "fetch failed: boom"
+
+
+def test_repo_status_detail_returns_full_entries(env):
+    detail = _call(_client(), "repo_status", detail=True)["data"]
+    dify = next(item for item in detail if item["repo"] == "dify")
+
+    assert _SUMMARY_FIELDS - {"last_error"} < set(dify)
+    for field in ("path", "cloned", "head_commit", "last_fetch_at_iso", "tag_count"):
+        assert field in dify
+    assert "last_error" in dify["background_refresh"]
+
+
+def test_repo_status_single_repo_summary_and_detail(env):
+    client = _client()
+
+    summary = _call(client, "repo_status", repo="dify")["data"]
+    detail = _call(client, "repo_status", repo="dify", detail=True)["data"]
+
+    assert set(summary) == _SUMMARY_FIELDS
+    assert summary["commit"] == detail["commit"]
+    assert detail["cloned"] is True and "fetch_refspecs" in detail
+
+
+def test_repo_status_rejects_non_boolean_detail(env):
+    payload = _call(_client(), "repo_status", detail="yes")
+
+    assert payload["success"] is False
+    assert payload["code"] == "BAD_ARGUMENT"
+
 
 def test_new_clone_respects_full_history_setting(env, monkeypatch):
     monkeypatch.setenv("SOURCE_MCP_FULL_HISTORY_REPOS", "dify")
@@ -138,7 +190,7 @@ def test_new_clone_respects_full_history_setting(env, monkeypatch):
     _call(_client(), "refresh_repos", repos=["other"])
 
     assert _shallow(env["base"] / "other") is True
-    status = {item["repo"]: item for item in _call(_client(), "repo_status")["data"]}
+    status = {item["repo"]: item for item in _call(_client(), "repo_status", detail=True)["data"]}
     assert status["other"]["full_history"] is False
     assert status["dify"]["full_history"] is True
 

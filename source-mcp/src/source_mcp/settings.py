@@ -25,8 +25,7 @@ class Settings(BaseSettings):
     )
     repos: str = Field(
         default=(
-            "dify,dify-billing,dify-marketplace-backend,"
-            "dify-marketplace-frontend,dify-plugin-daemon,saas-deploy"
+            "dify,dify-billing,dify-plugin-daemon,saas-deploy"
         ),
         validation_alias="SOURCE_MCP_REPOS",
     )

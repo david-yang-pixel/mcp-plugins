@@ -68,8 +68,13 @@ def test_deploy_runtime_config_matches_new_settings():
         (Path(__file__).resolve().parents[1] / "deploy" / "runtime.json").read_text()
     )["environment"]
     repos = config["SOURCE_MCP_REPOS"].split(",")
-    for repo in ("dify-billing", "rbac", "dify-marketplace", "dify-marketplace-backend"):
+    for repo in ("dify-billing", "rbac", "dify-marketplace"):
         assert repo in repos
+    # The marketplace moved to the dify-marketplace monorepo; the old split repos
+    # are no longer cloned (their names survive only as deployment names).
+    for repo in ("dify-marketplace-backend", "dify-marketplace-frontend"):
+        assert repo not in repos
+    assert len(repos) == len(set(repos)) == 15
     deployments = json.loads(config["SOURCE_MCP_RUNTIME_DEPLOYMENTS"])
     assert deployments["dify"] == "dify-api-oltp"
     assert deployments["dify-sandbox"] == "dify-sandbox"
