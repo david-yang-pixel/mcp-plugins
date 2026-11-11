@@ -1,12 +1,42 @@
 from __future__ import annotations
 
 import json
+import logging
+import sys
+import time
 from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import Header, HTTPException
 
 PROTOCOL_VERSION = "2025-03-26"
 ToolHandler = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
+
+audit = logging.getLogger("github_mcp.audit")
+
+# Argument values that are safe to log. Everything else (search queries, code paths,
+# field lists, free text) is logged by key name only.
+AUDIT_VALUE_KEYS = frozenset(
+    {
+        "repo",
+        "owner",
+        "scope",
+        "pr_number",
+        "issue_number",
+        "tag",
+        "base",
+        "head",
+        "page",
+        "per_page",
+        "limit",
+        "visibility",
+        "raw",
+        "include_patch",
+        "include_comments",
+    }
+)
+_AUDIT_MAX_KEYS = 32
+_AUDIT_MAX_KEY_CHARS = 64
+_AUDIT_MAX_VALUE_CHARS = 200
 
 
 def check_auth(
@@ -151,3 +181,70 @@ def optional_bool(arguments: dict[str, Any], name: str, default: bool) -> bool:
     if isinstance(value, str) and value.strip().lower() in {"false", "0", "no"}:
         return False
     raise ValueError(f"{name} must be a boolean")
+
+
+def _audit_args(arguments: Any) -> dict[str, Any]:
+    if not isinstance(arguments, dict):
+        return {"keys": [], "values": {}}
+    keys = sorted(str(key)[:_AUDIT_MAX_KEY_CHARS] for key in arguments)[:_AUDIT_MAX_KEYS]
+    values: dict[str, Any] = {}
+    for key in keys:
+        if key not in AUDIT_VALUE_KEYS:
+            continue
+        value = arguments.get(key)
+        if isinstance(value, str):
+            values[key] = value[:_AUDIT_MAX_VALUE_CHARS]
+        elif isinstance(value, (bool, int, float)) or value is None:
+            values[key] = value
+    return {"keys": keys, "values": values}
+
+
+def _audit_outcome(response: Any) -> tuple[str, Optional[str], int]:
+    """Return (outcome, error code, response_chars) for a tools/call JSON-RPC response."""
+    if not isinstance(response, dict):
+        return "failed", "INTERNAL_ERROR", 0
+    if "error" in response:
+        err = response.get("error") or {}
+        code = err.get("code")
+        error = "UNKNOWN_TOOL" if code == -32601 else f"JSONRPC_{code}"
+        return "failed", error, len(json.dumps(response, ensure_ascii=False))
+    result = response.get("result") or {}
+    content = result.get("content") or []
+    text = content[0].get("text", "") if content and isinstance(content[0], dict) else ""
+    payload = result.get("structuredContent") or {}
+    if payload.get("success"):
+        return "success", None, len(text)
+    code = payload.get("code")
+    return "failed", str(code) if code else "UNKNOWN_ERROR", len(text)
+
+
+def audit_tool_call(*, tool: Any, arguments: Any, started: float, response: Any) -> None:
+    """Emit one JSON line per tools/call. Never raises: logging must not break a call."""
+    try:
+        outcome, error, response_chars = _audit_outcome(response)
+        audit.info(
+            json.dumps(
+                {
+                    "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "tool": str(tool)[:100] if tool is not None else None,
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                    "outcome": outcome,
+                    "error": error,
+                    "response_chars": response_chars,
+                    "args": _audit_args(arguments),
+                },
+                ensure_ascii=False,
+            )
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def configure_logging() -> None:
+    """Send INFO logs (including the audit line) to stdout as bare messages.
+
+    uvicorn's default log config only touches its own loggers, so without this the
+    root logger stays at WARNING and audit lines would be dropped.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+    audit.setLevel(logging.INFO)
