@@ -870,6 +870,48 @@ async def test_timeout_index_lookup_is_bounded_by_a_short_budget(tmp_path, monke
 
 
 @pytest.mark.asyncio
+async def test_timeout_index_budget_exhaustion_backs_off(tmp_path, monkeypatch):
+    from db_gateway import core
+
+    async def hang(**_kwargs):
+        await asyncio.sleep(10)
+
+    meta = AsyncMock(side_effect=hang)
+    monkeypatch.setattr(core, "_INDEX_HINT_TOTAL_BUDGET_SECONDS", 0.05)
+    with patch("db_gateway.core.run_metadata_query", meta):
+        first = await asyncio.wait_for(_timeout_query(tmp_path), timeout=2)
+        second = await asyncio.wait_for(_timeout_query(tmp_path), timeout=2)
+
+    original = "查询超时：psql 在 30s（另加计数预算）内未完成，已终止"
+    assert first.error == original and second.error == original
+    # The budget-exhausted lookup starts the 60s backoff: no second catalog query.
+    assert meta.await_count == 1
+    assert len(core._INDEX_CACHE_FAILED_AT) == 1
+
+
+@pytest.mark.asyncio
+async def test_timeout_index_hint_propagates_request_cancellation(tmp_path):
+    from db_gateway import core
+
+    started = asyncio.Event()
+
+    async def hang(**_kwargs):
+        started.set()
+        await asyncio.sleep(10)
+
+    with patch("db_gateway.core.run_metadata_query", AsyncMock(side_effect=hang)):
+        task = asyncio.create_task(core._timeout_index_hint(
+            cfg=_cfg(tmp_path), database_key="prod", db_name="langgenius", db_port=56061,
+            body="SELECT * FROM apps",
+        ))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert core._INDEX_CACHE_FAILED_AT == {}
+
+
+@pytest.mark.asyncio
 async def test_timeout_without_table_names_skips_index_lookup(tmp_path):
     meta = AsyncMock(return_value=_INDEX_ROWS)
     with patch("db_gateway.core.run_metadata_query", meta):
