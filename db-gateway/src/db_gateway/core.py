@@ -598,11 +598,17 @@ def _metadata_kwargs(cfg: Any, *, db_name: str, db_port: int) -> dict[str, Any]:
     return kwargs
 
 
+def _index_cache_key(
+    cfg: Any, *, database_key: str, db_name: str, db_port: int,
+) -> tuple[Any, ...]:
+    return (database_key, cfg.postgres.host, db_port, cfg.postgres.user, db_name)
+
+
 async def _cached_indexes(
     cfg: Any, *, database_key: str, db_name: str, db_port: int,
 ) -> list[list[Any]] | None:
     """All user indexes of one database; cached in-process for an hour."""
-    cache_key = (database_key, cfg.postgres.host, db_port, cfg.postgres.user, db_name)
+    cache_key = _index_cache_key(cfg, database_key=database_key, db_name=db_name, db_port=db_port)
     now = time.monotonic()
     cached = _INDEX_CACHE.get(cache_key)
     if cached is not None and now - cached[0] < _INDEX_CACHE_TTL_SECONDS:
@@ -671,7 +677,19 @@ async def _timeout_index_hint(
             _cached_indexes(cfg, database_key=database_key, db_name=db_name, db_port=db_port),
             timeout=_INDEX_HINT_TOTAL_BUDGET_SECONDS,
         )
-    except Exception as e:  # includes asyncio.TimeoutError
+    except asyncio.TimeoutError:
+        # The budget ran out: wait_for cancelled the lookup with CancelledError,
+        # which _cached_indexes does not record, so start the backoff here.
+        # Cancellation of the request itself is not caught and still propagates.
+        key = _index_cache_key(cfg, database_key=database_key, db_name=db_name, db_port=db_port)
+        _INDEX_CACHE_FAILED_AT[key] = time.monotonic()
+        logger.warning(
+            "timeout_index_hint_failed",
+            database=database_key,
+            error=f"TimeoutError: index lookup exceeded {_INDEX_HINT_TOTAL_BUDGET_SECONDS}s",
+        )
+        return ""
+    except Exception as e:
         logger.warning(
             "timeout_index_hint_failed",
             database=database_key,
