@@ -5,8 +5,8 @@
 ## 开发和测试
 
 ```bash
-uv sync --locked --extra dev
-uv run --locked --extra dev python -m pytest
+uv sync --locked --all-extras --all-groups
+uv run --locked pytest -q
 cp .env.example .env
 # 填写本地凭证后启动
 uv run --locked docs-tool-service
@@ -39,7 +39,8 @@ uv run --locked docs-tool-service
   - API 参考、插件开发、CLI、learn、quick-start 等两边共用的页面标为 `shared`，两种过滤都保留；若正文含 "only available on Dify Cloud"、"self-hosted only"、"仅适用于自部署" 等明确标记，则归入对应版本（当前官方语料中几乎没有此类标记）；
   - 页面 `.md` 没有 frontmatter 等元数据可用；
   - 企业文档标为 `enterprise`，视为私有部署：`cloud` 时排除，`self-hosted` 时保留。
-- 每条结果包含 `title`、`url`、`description`（摘要）、`source`、`language`、`version`（版本族，社区文档为 `null`）、`edition`、`matched_terms`。响应另含 `filters`（实际生效的过滤条件）、`notices`、`indexed_pages`（已加载页数）、`searched_pages`（过滤后参与检索的页数）。
+  - `cloud` 不是硬过滤：`shared` 页面仍会返回，但 Cloud 专属页面排在命中同样多查询词的 `shared` 页面之前（见下方排序规则第 3 条）。`all`、`self-hosted` 的排序不变。
+- 每条结果包含 `title`、`url`、`description`（摘要；OpenAPI 生成的 API 参考页固定为接口的 `summary — description`，其他页面为围绕查询词的正文片段）、`source`、`language`、`version`（版本族，社区文档为 `null`）、`edition`、`matched_terms`。响应另含 `filters`（实际生效的过滤条件）、`notices`、`indexed_pages`（已加载页数）、`searched_pages`（过滤后参与检索的页数）。
 
 ### 排序规则
 
@@ -47,14 +48,33 @@ uv run --locked docs-tool-service
 
 1. 命中全部查询词的页面优先，其后按命中词数排序；
 2. 同等命中数按加权分：标题命中 > heading 命中 > URL 路径命中 > 正文命中（正文出现次数有上限）；每个词按逆文档频率加权，多数页面都有的常见词（如 workflow）权重低，罕见词（如 timeout）权重高；完整短语出现在标题、heading、正文时额外加分；
-3. 英文按词前缀匹配（`timeout` 可匹配 `timeouts`，`api` 不匹配 `rapid`）；中日文按子串匹配，连续中文不切词，多个关键词建议用空格分隔。
+3. `edition=cloud` 时，Cloud 专属页面视为每个命中的查询词额外命中一个权重为 `CLOUD_EDITION_BOOST`（`tools.py` 常量，默认 5.0；对比标题 12、heading 8、URL 6、正文 2–5）的字段，同样乘以该词的逆文档频率。它只在命中词数相同的页面之间调整顺序，不会让页面越过命中更多查询词的页面；设为 0 即关闭。例如 `知识库 文档上传 大小限制` 在 `edition=cloud` 下，「知识库存储与文档配额」排在共用的「Agent 知识库 API」之前；
+4. 英文按词前缀匹配（`timeout` 可匹配 `timeouts`，`api` 不匹配 `rapid`）；中日文按子串匹配，连续中文不切词，多个关键词建议用空格分隔。
 
 摘要选取覆盖最多查询词、并以最罕见词为中心的片段。
 
 ### 内容清洗与标题
 
-- 建索引及 `official_docs_read` 返回前会去掉 llms 的 "Documentation Index" 说明块、markdown 图片 `![..](..)`、指向图片的链接（保留链接文字）、图片引用定义、HTML `<img>`、空的 `<Frame>` 以及裸图片 URL（png/jpg/gif/webp/svg 等）；非图片链接保留。
+- 建索引及 `official_docs_read` 返回前会去掉 llms 的 "Documentation Index" 说明块、Mintlify 页脚（每个页面 `.md` 末尾的 "This documentation is built and hosted on Mintlify…"，以及 "Powered by Mintlify"、"Was this page helpful?"、"Suggest edits" 等整行站点文字；正文中提到 Mintlify 的句子保留）、markdown 图片 `![..](..)`、指向图片的链接（保留链接文字）、图片引用定义、HTML `<img>`、空的 `<Frame>` 以及裸图片 URL（png/jpg/gif/webp/svg 等）；非图片链接保留。
+- 仅建索引时（`official_docs_read` 保留原文）还会：
+  - 去掉 zh/ja 页面开头的 AI 翻译提示（"本文档由 AI 自动翻译…"、"このドキュメントは AI によって自動翻訳されています…"）；
+  - 把 API 参考页内嵌的整份 OpenAPI YAML（`## OpenAPI` 加 ````` ````yaml <spec> <method> <path> ````` 代码块）换成可读文本：`METHOD /path`、`summary`、`description`，以及参数、请求体字段（跟随 `#/components/...` 的 `$ref`）和响应码的说明；每页重复的 `info`、`servers`、`tags`、`components` 等整份规范内容不再进入索引，避免无关查询命中所有 API 页；
+  - 英文 `llms-full.txt` 中的规范引用行（`/en/api-reference/openapi_service.json post /apps/annotations`）改为 `POST /apps/annotations`。
+- 索引在运行时由官方 feed 抓取生成（缓存至少 6 小时），仓库中没有预构建索引，无需重新生成；部署（进程重启）后首次搜索即按新规则建索引。
 - `official_docs_read` 的标题依次取 frontmatter `title`、`<title>`、第一个 H1（markdown `# `，跳过代码块；或 HTML `<h1>`）。
+
+## 审计日志
+
+每次 `tools/call`（包括未知工具和参数格式错误）向 stdout 输出一行 JSON，日志器为 `docs_tool_service.audit`，格式与 difyctl-mcp 的审计日志一致：
+
+```json
+{"time": "2026-11-11T08:00:00Z", "tool": "official_docs_search", "duration_ms": 412, "outcome": "success", "error": null, "response_chars": 5120, "args": {"edition": "cloud", "language": "zh", "limit": 5, "query": null}}
+```
+
+- `time` 为 UTC；`outcome` 为 `success` 或 `failed`；`error` 为工具错误码（如 `BAD_ARGUMENT`、`OFFICIAL_CONTENT_HTTP_ERROR`）、JSON-RPC 错误码（未知工具为 `-32601`）或 `null`；处理器异常时为 `INTERNAL_ERROR`；`response_chars` 为返回文本长度。
+- `args` 列出全部参数名；只有 `source`、`language`、`version`、`edition`、`section`、`limit`、`offset`、`max_chars`、`cursor` 这类非敏感参数在值为不超过 64 字符的标量时记录值，其余（包括 `query`、`url`）值一律为 `null`，不记录搜索内容。
+- `main_docs()` 启动时为该日志器单独挂 stdout handler（INFO 级、不向 root 传播），不受 uvicorn 日志配置影响，也不会把 httpx 等其他库的 INFO 日志带到 stdout。uvicorn 自身的启动日志仍在 stderr，访问日志仍在 stdout。
+- 写日志失败不会影响工具调用结果。
 
 所有工具都在 `tools/list` 中声明 `annotations.readOnlyHint: true`、`destructiveHint: false`。OpenConnector 等客户端据此判断读写，未声明时新工具会被当作 write 并要求确认。
 
