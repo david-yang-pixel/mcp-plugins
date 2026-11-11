@@ -747,6 +747,33 @@ def pull_image(image, revision, payload):
     return metadata["Id"]
 
 
+# Mirrors the health part of verify_service from inside the container. Only
+# characters that normalize_target allows are interpolated, and the key is read
+# from the container's own environment, so no secret enters the Docker config.
+HEALTH_PROBE = (
+    "import json,os,urllib.request as u;"
+    "k=os.environ.get('{key}','');"
+    "r=u.Request('http://127.0.0.1:{port}{path}',"
+    "headers={{'Authorization':'Bearer '+k,'X-API-Key':k,'Accept':'application/json'}});"
+    "d=json.load(u.urlopen(r,timeout=4));"
+    "raise SystemExit(1 if isinstance(d,dict) and d.get('ok') is False else 0)"
+)
+# Per-container rotation: takes effect on the next deployment of a service,
+# without restarting the Docker daemon or any other container.
+LOG_ARGUMENTS = ["--log-driver", "json-file", "--log-opt", "max-size=20m", "--log-opt", "max-file=5"]
+
+
+def health_command(target):
+    port = target.get("container_port", target["port"])
+    return 'python -c "' + HEALTH_PROBE.format(key=target["auth_key"], port=port, path=target["health_path"]) + '"'
+
+
+def health_arguments(target):
+    """Docker health status for monitoring; Docker does not restart on it."""
+    return ["--health-cmd", health_command(target), "--health-interval", "30s", "--health-timeout", "5s",
+            "--health-retries", "3", "--health-start-period", "60s"]
+
+
 def run_arguments(service, image, revision, target, release):
     network = target.get("network", "host")
     args = ["docker", "run", "-d", "--name", service, "--network", network, "--restart", "always",
@@ -773,6 +800,7 @@ def run_arguments(service, image, revision, target, release):
         args += ["--mount", definition]
     for key, destination in target["secret_file_paths"].items():
         args += ["--mount", f"type=bind,source={release / key},target={destination},readonly"]
+    args += health_arguments(target) + LOG_ARGUMENTS
     return args + [image] + target["command"]
 
 
