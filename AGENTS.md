@@ -19,7 +19,7 @@
 2. 按当前 Python 3.12 + uv 构建约定准备 `src/`、`tests/`、`README.md`、无真实凭据的配置示例、`Dockerfile`、`pyproject.toml`、`uv.lock` 和 `requirements.runtime.txt`。完整代码应留在该服务目录内。
 3. 添加 `<服务>/deploy/runtime.json`，声明 `deployment`、`environment`、`secrets` 和 `secret_files`。`deployment` 至少声明固定的 `container_port`、`auth_key`、`health_path`；省略 `port` 或设为 `"auto"`。环境变量中的应用端口必须与 `container_port` 一致，需要测试启动参数时增加非敏感的 `smoke_environment`。
 4. 容器内监听 `0.0.0.0:<container_port>`，使用 bridge 网络。首次部署由服务器在全局部署锁内从 20000–29999 分配空闲主机端口，避开旧服务、部署记录、Docker 容器保留端口及实际监听端口，仅绑定 `127.0.0.1:<已分配端口>:<container_port>`。分配结果保存于服务状态；更新时必须复用，分配记录异常应报错，不得静默换端口。不得申请 host 网络、特权容器、Docker socket 或任意主机目录挂载。
-5. 健康接口返回 JSON；`/mcp` 支持带鉴权的 `tools/list` 并返回工具列表；错误密钥必须返回 401 或 403。认证密钥必须映射为必需的 GitHub Secret。镜像应能使用合成密钥完成启动和工具发现测试，不依赖生产凭据执行冒烟测试。
+5. 健康接口返回 JSON；`/mcp` 支持带鉴权的 `tools/list` 并返回工具列表；错误密钥必须返回 401 或 403。认证密钥必须映射为必需的 GitHub Secret。镜像应能使用合成密钥完成启动和工具发现测试，不依赖生产凭据执行冒烟测试。部署器会用 `/bin/sh` 和 `python` 在容器内探测健康接口作为 Docker 健康检查，镜像必须带这两者。
 6. 有持久化数据时使用 `@data/<名称>`，挂载到 `/var/lib/mcp/` 下，由部署器创建该服务专属数据目录。新增文件密钥的容器路径必须位于 `/run/mcp-secrets/` 下。
 7. 配齐对应 GitHub Secrets，运行所需验证并确认只选中新服务；在获得推送授权后推送到 `main`，由 CI/CD 首次分配端口、创建容器、添加 Nginx 路由并验证 `https://zendesk.smlershou.top/<服务名>/mcp`。复用现有域名、DNS 与证书，无需为每个 MCP 新建域名。无需运行 `bootstrap_secrets.py`、重新生成工作流或手动在服务器创建旧容器。
 
