@@ -7,6 +7,40 @@ STATUS_VALUES = ["new", "open", "pending", "hold", "solved"]
 PRIORITY_VALUES = ["low", "normal", "high", "urgent"]
 TYPE_VALUES = ["question", "incident", "problem", "task"]
 
+# Single source of truth for which tools never change Zendesk or server state.
+# Used for MCP tool annotations and for retrying read-only calls on network errors.
+READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "get_ticket",
+        "list_tickets",
+        "search_tickets",
+        "get_ticket_comments",
+        "get_ticket_conversation_log",
+        "list_attachments",
+        "download_attachment",
+        "get_user",
+        "list_views",
+        "get_view_tickets",
+        "list_groups",
+        "search_help_center",
+        "get_article",
+        "zendesk_auth_status",
+    }
+)
+
+READ_ONLY_ANNOTATIONS: dict[str, bool] = {
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": True,
+}
+WRITE_ANNOTATIONS: dict[str, bool] = {
+    "readOnlyHint": False,
+    "destructiveHint": False,
+    "idempotentHint": False,
+    "openWorldHint": True,
+}
+
 
 def _base_paging_properties() -> dict[str, Any]:
     return {
@@ -314,3 +348,34 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
 ]
+
+
+def tool_annotations(name: str) -> dict[str, bool]:
+    return dict(READ_ONLY_ANNOTATIONS if name in READ_ONLY_TOOL_NAMES else WRITE_ANNOTATIONS)
+
+
+for _tool in TOOL_SCHEMAS:
+    _tool["annotations"] = tool_annotations(_tool["name"])
+del _tool
+
+TOOL_NAMES: frozenset[str] = frozenset(tool["name"] for tool in TOOL_SCHEMAS)
+
+_TOOL_PREFIX = "zendesk_"
+
+
+def resolve_disabled_tools(raw: str) -> frozenset[str]:
+    """Parse a comma-separated tool list; names may be given with or without the ``zendesk_`` prefix."""
+    resolved: set[str] = set()
+    for item in raw.split(","):
+        name = item.strip()
+        if not name:
+            continue
+        candidates = [name, _TOOL_PREFIX + name]
+        if name.startswith(_TOOL_PREFIX):
+            candidates.append(name[len(_TOOL_PREFIX):])
+        resolved.update(candidate for candidate in candidates if candidate in TOOL_NAMES)
+    return frozenset(resolved)
+
+
+def enabled_tool_schemas(disabled: frozenset[str]) -> list[dict[str, Any]]:
+    return [tool for tool in TOOL_SCHEMAS if tool["name"] not in disabled]

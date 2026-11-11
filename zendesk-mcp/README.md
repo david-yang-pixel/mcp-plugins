@@ -33,7 +33,19 @@ Zendesk 将在 2027-04-30 停用 Support API token。生产环境使用 `ZENDESK
 - 首次授权的 Zendesk 用户会被锁定，之后重新授权必须是同一用户；确需更换时设置 `ZENDESK_OAUTH_EXPECTED_USER_ID` 为新用户 ID 并部署。每次成功授权都写入审计日志（只记录用户 ID）。
 - 访问令牌只发送到 `https://<子域名>.zendesk.com`，附件 CDN 等其他主机不会收到；遇到 401 会强制刷新一次再重试。工具结果、日志和 `/health` 不包含任何令牌、授权码或校验码。
 
-所有工单修改都以授权人的 Zendesk 身份记录。需要临时回退到 API token 时，把 `deploy/runtime.json` 中 `ZENDESK_AUTH_MODE` 改为 `api_token` 并部署；注意 Zendesk 会自动停用连续 30 天未使用的 API token。
+所有工单修改都以授权人的 Zendesk 身份记录。
+
+OAuth 模式不读取 `ZENDESK_API_TOKEN`，也不需要 `ZENDESK_EMAIL`；`deploy/runtime.json` 已不再映射 `ZENDESK_API_TOKEN`。`/health` 的 `zendesk_configured` 只取决于 OAuth 授权状态。需要临时回退到 API token 时，把 `deploy/runtime.json` 中 `ZENDESK_AUTH_MODE` 改为 `api_token`，在 `secrets` 中重新加入 `ZENDESK_API_TOKEN`（GitHub Secret `MCP_ZENDESK_MCP__ZENDESK_API_TOKEN`）并部署；注意 Zendesk 会自动停用连续 30 天未使用的 API token。
+
+## 工具注解与禁用工具
+
+`tools/list` 为每个工具返回 MCP `annotations`（`readOnlyHint`、`destructiveHint`、`idempotentHint`、`openWorldHint`）。只读工具集合唯一定义在 `src/zendesk_mcp/mcp_schema.py` 的 `READ_ONLY_TOOL_NAMES`，包括 `zendesk_auth_status`；`add_internal_note`、`update_ticket_status`、`update_ticket_metadata` 及 `zendesk_auth_start`、`zendesk_auth_complete` 标记为非只读。
+
+`ZENDESK_MCP_DISABLED_TOOLS` 填写逗号分隔的工具名（允许空格，留空表示不禁用）。名称可带或不带 `zendesk_` 前缀，例如 `auth_start` 与 `zendesk_auth_start` 等价；无法识别的名称会被忽略。被禁用的工具不会出现在 `tools/list` 中，调用时返回与不存在的工具相同的 `unknown tool` 错误。生产配置当前禁用 `search_help_center,get_article`。
+
+## 审计日志
+
+工单写操作和 OAuth 授权写入 `ZENDESK_MCP_AUDIT_LOG`（JSON Lines）。生产路径为 `/var/lib/mcp/logs/audit.jsonl`，对应持久化挂载 `@data/logs` → `/var/lib/mcp/logs`（服务器 `/opt/mcp-plugins/data/zendesk-mcp/logs/`），重新部署不会丢失。父目录不存在时自动创建；镜像以 root 运行，可写入部署器创建的 root 0700 目录。
 
 ## 构建
 

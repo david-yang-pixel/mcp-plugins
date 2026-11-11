@@ -15,7 +15,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from .client import _oauth_provider
-from .mcp_schema import TOOL_SCHEMAS
+from .mcp_schema import TOOL_NAMES, enabled_tool_schemas
 from .oauth import OAuthError
 from .settings import Settings, get_settings
 from .tools import handle_tool_call
@@ -95,11 +95,11 @@ def _tool_result(request_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _tools_list(request_id: Any) -> dict[str, Any]:
+def _tools_list(request_id: Any, settings: Settings) -> dict[str, Any]:
     return {
         "jsonrpc": "2.0",
         "id": request_id,
-        "result": {"tools": TOOL_SCHEMAS},
+        "result": {"tools": enabled_tool_schemas(settings.disabled_tool_set)},
     }
 
 
@@ -244,7 +244,7 @@ def create_app() -> FastAPI:
                 },
             }
         if method == "tools/list":
-            return _tools_list(request_id)
+            return _tools_list(request_id, settings)
         if method == "ping":
             return {"jsonrpc": "2.0", "id": request_id, "result": {}}
         if method != "tools/call":
@@ -252,7 +252,7 @@ def create_app() -> FastAPI:
 
         params = body.get("params") or {}
         name = params.get("name")
-        if not any(tool["name"] == name for tool in TOOL_SCHEMAS):
+        if name not in TOOL_NAMES or name in settings.disabled_tool_set:
             return _jsonrpc_error(request_id, -32601, f"unknown tool: {name}")
         arguments = params.get("arguments") or {}
         if not isinstance(arguments, dict):
