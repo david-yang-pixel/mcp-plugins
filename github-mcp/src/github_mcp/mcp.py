@@ -240,11 +240,25 @@ def audit_tool_call(*, tool: Any, arguments: Any, started: float, response: Any)
         pass
 
 
-def configure_logging() -> None:
-    """Send INFO logs (including the audit line) to stdout as bare messages.
+class _StdoutHandler(logging.StreamHandler):  # type: ignore[type-arg]
+    """Writes to whatever sys.stdout is at emit time (survives stream swaps)."""
 
-    uvicorn's default log config only touches its own loggers, so without this the
-    root logger stays at WARNING and audit lines would be dropped.
+    def emit(self, record: logging.LogRecord) -> None:
+        self.stream = sys.stdout
+        super().emit(record)
+
+
+def configure_logging() -> None:
+    """Send github_mcp.audit INFO lines to stdout as bare JSON (idempotent).
+
+    Only the audit logger gets a handler. The root logger stays at WARNING so
+    third-party INFO logs (httpx logs every request URL, including search
+    queries and paths) are never emitted.
     """
-    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+    if any(isinstance(h, _StdoutHandler) for h in audit.handlers):
+        return
+    handler = _StdoutHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    audit.addHandler(handler)
     audit.setLevel(logging.INFO)
+    audit.propagate = False

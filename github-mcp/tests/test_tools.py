@@ -704,6 +704,33 @@ def test_search_422_with_inconclusive_probe_keeps_original_error(github) -> None
     assert result["code"] == "GITHUB_API_ERROR" and "HTTP 422" in result["error"]
 
 
+@pytest.mark.parametrize(
+    ("status", "headers"),
+    [(500, {}), (503, {}), (429, {}), (403, {"x-ratelimit-remaining": "0"}), (403, {"retry-after": "60"})],
+)
+def test_search_422_with_temporary_probe_failure_keeps_original_error(github, status, headers) -> None:
+    github(
+        {
+            "/search/issues": lambda r: httpx.Response(422, json=_SEARCH_422),
+            "/repos/o/r": lambda r: httpx.Response(status, headers=headers, json={"message": "x"}),
+        }
+    )
+    result = call("github_search_issues", {"repo": "o/r", "query": "x"})
+    assert result["code"] == "GITHUB_API_ERROR" and "HTTP 422" in result["error"]
+    assert "repo_access" not in result
+
+
+def test_zero_results_with_temporary_probe_failure_is_inconclusive(github) -> None:
+    github(
+        {
+            "/search/code": lambda r: httpx.Response(200, json={"total_count": 0, "items": []}),
+            "/repos/o/r": lambda r: httpx.Response(503, json={"message": "x"}),
+        }
+    )
+    access = call("github_code_search", {"query": "q", "repo": "o/r"})["data"]["repo_access"]
+    assert access["accessible"] is None and access["http_status"] == 503
+
+
 def test_search_non_422_error_does_not_probe(github) -> None:
     fake = github({"/search/issues": lambda r: httpx.Response(500, json={"message": "boom"})})
     result = call("github_search_issues", {"repo": "o/r", "query": "x"})

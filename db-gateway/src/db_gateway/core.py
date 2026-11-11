@@ -728,7 +728,7 @@ async def execute_schema_lookup(
         refs = schema_info.parse_table_refs(tables)
     except ValueError as e:
         return fail("INVALID_ARGUMENT", str(e), audit=False)
-    requested = [f"{schema}.{table}" if schema else table for schema, table, _q in refs]
+    requested = [f"{r.schema}.{r.table}" if r.schema else r.table for r in refs]
     names = schema_info.lookup_names(refs)
     db_name, db_port = _db_target(cfg, database)
     timeout = min(

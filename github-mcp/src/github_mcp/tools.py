@@ -700,6 +700,11 @@ async def _search_error_repo_access(
     return payload
 
 
+def _rate_limited(response: httpx.Response) -> bool:
+    """GitHub signals primary and secondary rate limits on 403 with these headers."""
+    return response.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in response.headers
+
+
 async def _repo_access(settings: Settings, repo: str, *, purpose: str) -> dict[str, Any]:
     """Explain a zero-result search: missing/inaccessible repo vs. genuinely no match.
 
@@ -714,10 +719,16 @@ async def _repo_access(settings: Settings, repo: str, *, purpose: str) -> dict[s
                 "Repository not found or not visible to the configured token; zero results "
                 "may mean no access rather than no matches."
             )
-        elif status in (401, 403):
-            note = "Token was rejected or lacks permission (or is rate limited) for this repository."
+        elif status in (401, 403) and not _rate_limited(e.response):
+            note = "Token was rejected or lacks permission for this repository."
         else:
-            note = "Repository probe failed; zero results are inconclusive."
+            # 5xx, 429 or a rate-limited 403 says nothing about access.
+            return {
+                "repo": repo,
+                "accessible": None,
+                "http_status": status,
+                "note": "Repository probe failed temporarily; results are inconclusive.",
+            }
         return {"repo": repo, "accessible": False, "http_status": status, "note": note}
     except Exception as e:  # noqa: BLE001
         return {

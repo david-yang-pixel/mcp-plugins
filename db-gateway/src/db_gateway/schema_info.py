@@ -9,7 +9,7 @@ placeholders for psycopg); no caller-provided text is ever spliced into SQL.
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, NamedTuple, Sequence
 
 # Abbreviations for common PostgreSQL type names (also used by dump_db_schema.py).
 TYPE_ABBREV = {
@@ -75,17 +75,28 @@ _NAME_PART = r'(?:"(?:[^"]|"")+"|[^".\s]+)'
 _TABLE_REF_RE = re.compile(rf"^({_NAME_PART})(?:\.({_NAME_PART}))?$")
 
 
+class TableRef(NamedTuple):
+    """A requested table. A quoted part must match exactly; an unquoted one may also
+    match its lower-cased form (PostgreSQL folds unquoted identifiers)."""
+
+    schema: str | None
+    table: str
+    quoted: bool
+    schema_quoted: bool = False
+
+
 def _unquote(part: str) -> tuple[str, bool]:
     if part.startswith('"') and part.endswith('"') and len(part) >= 2:
         return part[1:-1].replace('""', '"'), True
     return part, False
 
 
-def parse_table_refs(value: Any) -> list[tuple[str | None, str, bool]]:
+def parse_table_refs(value: Any) -> list[TableRef]:
     """Validate the ``tables`` argument: ``"t"``, ``"schema.t"`` or ``'"Quoted"'``.
 
     Accepts a list of strings or one string (comma-separated allowed). Returns
-    ``(schema, table, quoted)``; ``quoted`` means the name must match exactly.
+    ``TableRef(schema, table, quoted, schema_quoted)``; a quoted part must match
+    exactly.
     Raises ValueError with a message for the caller.
     """
     if isinstance(value, str):
@@ -94,7 +105,7 @@ def parse_table_refs(value: Any) -> list[tuple[str | None, str, bool]]:
         items = list(value)
     else:
         raise ValueError("tables 必须是表名字符串数组，例如 [\"workflow_runs\"]")
-    refs: list[tuple[str | None, str, bool]] = []
+    refs: list[TableRef] = []
     for item in items:
         if not isinstance(item, str):
             raise ValueError("tables 中的每一项都必须是字符串")
@@ -105,14 +116,15 @@ def parse_table_refs(value: Any) -> list[tuple[str | None, str, bool]]:
         if not m:
             raise ValueError(f"无效的表名: {text[:80]!r}（格式：table 或 schema.table）")
         if m.group(2) is None:
-            schema, (table, quoted) = None, _unquote(m.group(1))
+            schema, schema_quoted = None, False
+            table, quoted = _unquote(m.group(1))
         else:
-            schema, _ = _unquote(m.group(1))
+            schema, schema_quoted = _unquote(m.group(1))
             table, quoted = _unquote(m.group(2))
         for part in (schema, table):
             if part is not None and len(part) > _MAX_IDENTIFIER_LENGTH:
                 raise ValueError(f"表名过长（超过 {_MAX_IDENTIFIER_LENGTH} 字符）: {text[:80]!r}")
-        ref = (schema, table, quoted)
+        ref = TableRef(schema, table, quoted, schema_quoted)
         if ref not in refs:
             refs.append(ref)
     if not refs:
@@ -122,25 +134,29 @@ def parse_table_refs(value: Any) -> list[tuple[str | None, str, bool]]:
     return refs
 
 
-def lookup_names(refs: Iterable[tuple[str | None, str, bool]]) -> list[str]:
+def lookup_names(refs: Iterable[TableRef]) -> list[str]:
     """Table names to bind into COLUMNS_SQL / INDEXES_SQL (exact + folded case)."""
     names: list[str] = []
-    for _schema, table, quoted in refs:
-        for name in (table,) if quoted else (table, table.lower()):
+    for ref in refs:
+        table = ref.table
+        for name in (table,) if ref.quoted else (table, table.lower()):
             if name not in names:
                 names.append(name)
     return names
 
 
-def _matches(ref: tuple[str | None, str, bool], schema: str, table: str) -> bool:
-    ref_schema, ref_table, quoted = ref
-    if ref_schema is not None and schema not in (ref_schema, ref_schema.lower()):
+def _name_matches(actual: str, wanted: str, quoted: bool) -> bool:
+    return actual == wanted or (not quoted and actual == wanted.lower())
+
+
+def _matches(ref: TableRef, schema: str, table: str) -> bool:
+    if ref.schema is not None and not _name_matches(schema, ref.schema, ref.schema_quoted):
         return False
-    return table == ref_table or (not quoted and table == ref_table.lower())
+    return _name_matches(table, ref.table, ref.quoted)
 
 
 def build_schema_tables(
-    refs: Sequence[tuple[str | None, str, bool]],
+    refs: Sequence[TableRef],
     column_rows: Sequence[Sequence[Any]],
     index_rows: Sequence[Sequence[Any]],
 ) -> tuple[list[dict[str, Any]], list[str]]:
@@ -175,10 +191,10 @@ def build_schema_tables(
             entry for (schema, table), entry in tables.items()
             if _matches(ref, str(schema), str(table))
         ]
-        exact = [e for e in matched if e["table"] == ref[1]]
+        exact = [e for e in matched if e["table"] == ref.table]
         matched = exact or matched
         if not matched:
-            missing.append(f"{ref[0]}.{ref[1]}" if ref[0] else ref[1])
+            missing.append(f"{ref.schema}.{ref.table}" if ref.schema else ref.table)
         for entry in sorted(matched, key=lambda e: (e["schema"] != "public", e["schema"])):
             if entry not in result:
                 result.append(entry)

@@ -140,6 +140,23 @@ def test_configure_logging_emits_audit_lines_on_stdout_at_info() -> None:
     assert "github_get_pr" not in proc.stderr
 
 
+def test_configure_logging_keeps_httpx_request_urls_out_of_stdout() -> None:
+    # httpx logs "HTTP Request: GET <url>" at INFO; the search query sits in that URL.
+    code = (
+        "import logging, httpx\n"
+        "from github_mcp.mcp import configure_logging\n"
+        "configure_logging()\n"
+        "configure_logging()\n"
+        "t = httpx.MockTransport(lambda r: httpx.Response(200, json={}))\n"
+        "httpx.Client(transport=t).get('https://api.github.com/search/issues', params={'q': 'secret-term'})\n"
+        "assert logging.getLogger().getEffectiveLevel() == logging.WARNING\n"
+        "assert len(logging.getLogger('github_mcp.audit').handlers) == 1\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert "secret-term" not in proc.stdout + proc.stderr
+
+
 def test_main_github_configures_logging_before_serving(monkeypatch) -> None:
     from github_mcp import app as app_module
 

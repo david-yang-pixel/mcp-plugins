@@ -16,9 +16,10 @@ def test_catalog_sql_takes_table_names_as_bind_parameters():
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        (["workflow_runs"], [(None, "workflow_runs", False)]),
-        ("apps, public.tenants", [(None, "apps", False), ("public", "tenants", False)]),
-        (['"MixedCase"', "apps", "apps"], [(None, "MixedCase", True), (None, "apps", False)]),
+        (["workflow_runs"], [(None, "workflow_runs", False, False)]),
+        ("apps, public.tenants", [(None, "apps", False, False), ("public", "tenants", False, False)]),
+        (['"MixedCase"', "apps", "apps"], [(None, "MixedCase", True, False), (None, "apps", False, False)]),
+        (['"Audit".events'], [("Audit", "events", False, True)]),
     ],
 )
 def test_parse_table_refs(value, expected):
@@ -62,6 +63,25 @@ def test_build_schema_tables_matches_schema_and_reports_missing():
     assert tables[0]["indexes"] == [{"name": "workflow_runs_pkey", "definition": "CREATE UNIQUE INDEX ..."}]
     assert tables[1]["columns"][0] == {"name": "id", "type": "bigint", "nullable": True}
     assert missing == ["other.workflow_runs", "nope"]
+
+
+def test_build_schema_tables_quoted_schema_matches_exactly():
+    columns = [
+        ["Audit", "events", "id", "bigint", "int8", None, "NO", None],
+        ["audit", "events", "id", "uuid", "uuid", None, "NO", None],
+    ]
+    quoted = schema_info.parse_table_refs(['"Audit".events'])
+    tables, missing = schema_info.build_schema_tables(quoted, columns, [])
+    assert [(t["schema"], t["table"]) for t in tables] == [("Audit", "events")] and missing == []
+
+    # Only the lower-case schema exists: a quoted "Audit" must not fall back to it.
+    tables, missing = schema_info.build_schema_tables(quoted, columns[1:], [])
+    assert tables == [] and missing == ["Audit.events"]
+
+    # Unquoted Audit folds to audit, as in PostgreSQL.
+    unquoted = schema_info.parse_table_refs(["Audit.events"])
+    tables, _ = schema_info.build_schema_tables(unquoted, columns[1:], [])
+    assert [(t["schema"], t["table"]) for t in tables] == [("audit", "events")]
 
 
 def test_indexes_for_tables():
