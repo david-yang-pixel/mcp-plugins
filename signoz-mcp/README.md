@@ -69,6 +69,18 @@ uv run --locked signoz-mcp
 
 所有工具都在 `tools/list` 中声明 `annotations.readOnlyHint: true`、`destructiveHint: false`。OpenConnector 等客户端据此判断读写，未声明时新工具会被当作 write 并要求确认。
 
+### 调用审计日志
+
+每次 `tools/call` 由 `signoz_mcp.audit` logger 以 INFO 级别向 stdout 输出一行 JSON（格式与 difyctl-mcp 审计日志一致；`main()` 启动时独立配置该 handler，不依赖 uvicorn 日志配置），例如：
+
+```json
+{"time": "2026-11-11T08:00:00Z", "tool": "signoz_search_logs", "duration_ms": 812, "outcome": "success", "error": null, "response_chars": 5321, "args": {"keys": ["deployment", "environment", "searchText", "tenant", "timeRange"], "values": {"deployment": "dify-api", "environment": "production", "timeRange": "1h"}}}
+```
+
+- `outcome` 为 `success`/`failed`；`error` 为失败时的错误代码（如 `BAD_ARGUMENTS`、`SZ_TIMEOUT`，未预期异常为 `INTERNAL_ERROR`），成功为 `null`；`response_chars` 为返回文本长度。
+- `args.keys` 只记录参数名；`args.values` 仅记录 `deployment`、`service`、`environment`、`signal`、`aggregation`、`requestType`、`timeRange` 的标量值（字符串截断至 128 字符），`sz_run` 额外只记录子命令名 `command`。查询 SQL、`searchText`、过滤条件、`tenant`、`traceId` 及返回内容不会写入日志；未知工具名记为 `(unknown)`。
+- 审计写入失败不会影响工具调用结果。
+
 ## 构建
 
 ```bash
