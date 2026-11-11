@@ -11,7 +11,7 @@ from db_gateway.app_context import (
     CONFIG_KEY,
     TELEPORT_AUTH_TOKEN_STORE_KEY,
 )
-from db_gateway.core import execute_gateway_query
+from db_gateway.core import execute_gateway_query, execute_schema_lookup
 from db_gateway.mcp import handle_mcp_message, mcp_sse_response
 from db_gateway.teleport_auth_web import (
     handle_teleport_auth_get,
@@ -72,15 +72,38 @@ async def handle_query(request: web.Request) -> web.Response:
         cfg=cfg,
         database=str(body.get("database") or ""),
         sql=str(body.get("sql") or ""),
-        ticket_id=str(body.get("ticket_id") or ""),
         offset=body.get("offset"),
         limit=body.get("limit"),
         output_format=body.get("format") or "csv",
+        explain=body.get("explain"),
     )
     status = 200 if result.success else 400
     if result.code == "TELEPORT_EXPIRED":
         status = 503
     return web.json_response(result.to_json(), status=status)
+
+
+async def handle_schema(request: web.Request) -> web.Response:
+    """HTTP form of the db_gateway_schema tool (used by the stdio MCP client)."""
+    cfg = request.app[APP_CONFIG_KEY]
+    if not _authorized(request, cfg):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "invalid json"}, status=400)
+
+    result = await execute_schema_lookup(
+        cfg=cfg,
+        database=str(body.get("database") or ""),
+        tables=body.get("tables"),
+    )
+    status = 200 if result.get("success") else 400
+    if result.get("code") == "TELEPORT_EXPIRED":
+        status = 503
+    return web.json_response(result, status=status)
 
 
 async def handle_mcp_post(request: web.Request) -> web.Response:
@@ -149,6 +172,7 @@ def create_db_gateway_app(cfg: Any | None = None) -> web.Application:
     app.router.add_get("/healthz", handle_healthz)
     app.router.add_get("/status", handle_status)
     app.router.add_post("/query", handle_query)
+    app.router.add_post("/schema", handle_schema)
     app.router.add_get("/mcp", handle_mcp_get)
     app.router.add_get("/sse", handle_mcp_get)
     app.router.add_post("/mcp", handle_mcp_post)

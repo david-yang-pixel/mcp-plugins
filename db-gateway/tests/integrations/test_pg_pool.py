@@ -392,3 +392,129 @@ async def test_warm_query_uses_two_round_trips(database, manager, monkeypatch):
     paged = await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT id FROM t ORDER BY id", offset=5, limit=5))
     assert paged.total_rows == 25 and paged.has_more is True
     assert len(calls) == 2  # setup+fetch, then count+unlock+rollback
+
+
+# ---------------------------------------------------------------------------
+# Error hints, EXPLAIN, catalog lookups (db_gateway_schema / timeout hints)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def workflow_db(database):
+    with psycopg.connect(
+        host=database["host"], port=database["port"], user=database["user"],
+        dbname=database["database"], autocommit=True,
+    ) as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS workflow_runs (id uuid PRIMARY KEY, tenant_id uuid NOT NULL, "
+            "status varchar(255) DEFAULT 'running', created_at timestamp, tags text[])"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS workflow_run_tenant_idx ON workflow_runs (tenant_id, created_at)"
+        )
+    return database
+
+
+async def test_pool_error_includes_hint_and_position(workflow_db, manager):
+    with pytest.raises(RuntimeError) as info:
+        await run_pool_query(
+            manager=manager,
+            **_kwargs(workflow_db, sql="SELECT id\nFROM workflow_runs WHERE stauts = 'x'"),
+        )
+    text = str(info.value)
+    assert 'column "stauts" does not exist' in text
+    assert 'HINT:  Perhaps you meant to reference the column "workflow_runs.status".' in text
+    assert "POSITION:  36 (line 2, column 26 of the submitted SQL)" in text
+
+
+async def test_pool_uuid_text_mismatch_has_cast_hint(workflow_db, manager):
+    with pytest.raises(RuntimeError, match="explicit type casts"):
+        await run_pool_query(
+            manager=manager,
+            **_kwargs(workflow_db, sql="SELECT 1 FROM workflow_runs WHERE tenant_id = 'x'::text"),
+        )
+
+
+@pytest.mark.parametrize("use_pool", [True, False])
+async def test_explain_returns_plan_without_executing(workflow_db, manager, use_pool):
+    if not use_pool and shutil.which("psql") is None:
+        pytest.skip("psql not installed")
+    # pg_sleep in the select list would take 5s if the statement were executed.
+    sql = "SELECT pg_sleep(5), id FROM workflow_runs WHERE tenant_id = gen_random_uuid() -- note"
+    started = time.monotonic()
+    if use_pool:
+        result = await run_pool_query(manager=manager, explain=True, **_kwargs(workflow_db, sql=sql))
+    else:
+        result = await run_psql(explain=True, **_kwargs(workflow_db, sql=sql))
+    assert time.monotonic() - started < 3
+    assert result.columns == ["QUERY PLAN"]
+    plan = "\n".join(row[0] for row in result.rows)
+    assert "workflow_runs" in plan and "actual time" not in plan
+    assert result.total_rows == len(result.rows) and result.has_more is False
+
+
+async def test_explain_error_is_reported_with_hint(workflow_db, manager):
+    with pytest.raises(RuntimeError, match="HINT:  Perhaps you meant"):
+        await run_pool_query(
+            manager=manager, explain=True,
+            **_kwargs(workflow_db, sql="SELECT stauts FROM workflow_runs"),
+        )
+    # The connection is clean afterwards.
+    ok = await run_pool_query(manager=manager, **_kwargs(workflow_db, sql="SELECT 1 AS x"))
+    assert ok.rows == [["1"]]
+
+
+@pytest.mark.parametrize("use_pool", [True, False])
+async def test_schema_lookup_shows_workflow_runs_columns_and_indexes(workflow_db, manager, use_pool, tmp_path, monkeypatch):
+    from db_gateway import pg_pool
+    from db_gateway.config import AppConfig
+    from db_gateway.core import execute_schema_lookup
+
+    monkeypatch.setattr(pg_pool, "MANAGER", manager)
+    cfg = AppConfig()
+    cfg.resources.base_dir = str(tmp_path)
+    cfg.postgres.host = workflow_db["host"]
+    cfg.postgres.user = workflow_db["user"]
+    cfg.postgres.db_prod = workflow_db["database"]
+    cfg.postgres.port_prod = workflow_db["port"]
+    cfg.postgres.driver = "pool" if use_pool else "psql"
+    cfg.postgres.pool_watch_teleport_keys = False
+
+    data = await execute_schema_lookup(cfg=cfg, database="prod", tables=["workflow_runs", "missing_one"])
+
+    assert data["success"] is True, data
+    (table,) = data["tables"]
+    assert [c["name"] for c in table["columns"]] == ["id", "tenant_id", "status", "created_at", "tags"]
+    assert {c["name"]: c["type"] for c in table["columns"]}["status"] == "varchar(255)"
+    assert {c["name"]: c["type"] for c in table["columns"]}["tags"] == "text[]"
+    assert {i["name"] for i in table["indexes"]} == {"workflow_runs_pkey", "workflow_run_tenant_idx"}
+    assert data["not_found"] == ["missing_one"]
+
+
+async def test_timeout_error_lists_indexes_from_the_database(workflow_db, manager, tmp_path, monkeypatch):
+    from db_gateway import core, pg_pool
+    from db_gateway.config import AppConfig
+
+    monkeypatch.setattr(pg_pool, "MANAGER", manager)
+    core._INDEX_CACHE.clear()
+    core._INDEX_CACHE_FAILED_AT.clear()
+    cfg = AppConfig()
+    cfg.resources.base_dir = str(tmp_path)
+    cfg.postgres.host = workflow_db["host"]
+    cfg.postgres.user = workflow_db["user"]
+    cfg.postgres.db_prod = workflow_db["database"]
+    cfg.postgres.port_prod = workflow_db["port"]
+    cfg.postgres.driver = "pool"
+    cfg.postgres.pool_watch_teleport_keys = False
+    cfg.postgres.query_timeout_seconds = 1
+    cfg.postgres.count_timeout_seconds = 0
+
+    try:
+        result = await core.execute_gateway_query(
+            cfg=cfg, database="prod",
+            sql="SELECT pg_sleep(3), id FROM workflow_runs RIGHT JOIN (SELECT 1) x ON true",
+        )
+    finally:
+        core._INDEX_CACHE.clear()
+    assert result.code == "QUERY_TIMEOUT"
+    assert "workflow_run_tenant_idx ON public.workflow_runs USING btree (tenant_id, created_at)" in result.error

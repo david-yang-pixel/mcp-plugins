@@ -205,3 +205,153 @@ def has_top_level_order_by(tokens: list[Token]) -> bool:
         ):
             return True
     return False
+
+
+# Words that may directly precede a "(" without making it a function call.
+_GROUP_PREFIX_WORDS = {
+    "FROM", "JOIN", "ON", "AND", "OR", "NOT", "WHERE", "IN", "EXISTS", "AS",
+    "LATERAL", "UNION", "INTERSECT", "EXCEPT", "ALL", "SELECT", "WITH", "HAVING",
+    "BY", "THEN", "ELSE", "WHEN", "DISTINCT", "USING", "MATERIALIZED", "RECURSIVE",
+}
+_QUERY_START_WORDS = {"SELECT", "WITH", "VALUES", "TABLE"}
+# Words that end a FROM item (so they are not taken as its alias).
+_FROM_ITEM_STOP_WORDS = {
+    "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR", "WINDOW",
+    "UNION", "INTERSECT", "EXCEPT", "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS",
+    "NATURAL", "ON", "USING", "TABLESAMPLE", "RETURNING", "SELECT", "FROM", "WITH",
+}
+
+
+def _identifier(tok: Token) -> str | None:
+    """Catalog name of an identifier token (unquoted names fold to lower case)."""
+    if tok.kind == "word" and _WORD_START.match(tok.text):
+        return tok.text.lower()
+    if tok.kind == "qident":
+        return re.sub(r'^(?:[Uu]&)?"|"$', "", tok.text).replace('""', '"')
+    return None
+
+
+def referenced_tables(tokens: list[Token]) -> list[tuple[str | None, str]]:
+    """Best-effort ``(schema, table)`` list of relations named after FROM/JOIN.
+
+    Used only to add index hints to timeout errors, so it never raises and may
+    miss exotic syntax. CTE names and ``FROM`` inside function calls such as
+    ``EXTRACT(year FROM ts)`` are skipped.
+    """
+    sig = significant(tokens)
+    n = len(sig)
+    # Is each "(" a function-call frame?  FROM inside a call frame is not a FROM clause.
+    in_call: list[bool] = []
+    inside_call: list[bool] = []  # is the innermost open frame at token i a call?
+    for idx, tok in enumerate(sig):
+        inside_call.append(bool(in_call) and in_call[-1])
+        if tok.kind != "punct":
+            continue
+        if tok.text == "(":
+            prev = sig[idx - 1] if idx > 0 else None
+            nxt = sig[idx + 1] if idx + 1 < n else None
+            starts_query = (
+                nxt is not None and nxt.kind == "word" and nxt.text.upper() in _QUERY_START_WORDS
+            )
+            after_name = (
+                prev is not None
+                and prev.kind in ("word", "qident")
+                and prev.text.upper() not in _GROUP_PREFIX_WORDS
+            )
+            in_call.append(after_name and not starts_query)
+        elif tok.text == ")" and in_call:
+            in_call.pop()
+
+    cte_names: set[str] = set()
+    for idx, tok in enumerate(sig):
+        if not (tok.kind == "word" and tok.text.upper() == "AS"):
+            continue
+        j = idx + 1
+        if j < n and sig[j].kind == "word" and sig[j].text.upper() == "NOT":
+            j += 1
+        if j < n and sig[j].kind == "word" and sig[j].text.upper() == "MATERIALIZED":
+            j += 1
+        if not (j < n and sig[j].kind == "punct" and sig[j].text == "("):
+            continue
+        k = idx - 1
+        if k >= 0 and sig[k].kind == "punct" and sig[k].text == ")":
+            depth = 0
+            while k >= 0:  # skip the CTE column list
+                if sig[k].kind == "punct" and sig[k].text == ")":
+                    depth += 1
+                elif sig[k].kind == "punct" and sig[k].text == "(":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                k -= 1
+            k -= 1
+        if k >= 0:
+            name = _identifier(sig[k])
+            if name:
+                cte_names.add(name)
+
+    def skip_parens(i: int) -> int:
+        depth = 0
+        while i < n:
+            if sig[i].kind == "punct" and sig[i].text == "(":
+                depth += 1
+            elif sig[i].kind == "punct" and sig[i].text == ")":
+                depth -= 1
+                if depth <= 0:
+                    return i + 1
+            i += 1
+        return i
+
+    found: list[tuple[str | None, str]] = []
+
+    def parse_item(i: int) -> int:
+        while i < n and sig[i].kind == "word" and sig[i].text.upper() in ("ONLY", "LATERAL"):
+            i += 1
+        if i >= n:
+            return i
+        if sig[i].kind == "punct" and sig[i].text == "(":
+            return skip_parens(i)
+        first = _identifier(sig[i])
+        if first is None or (sig[i].kind == "word" and sig[i].text.upper() in _FROM_ITEM_STOP_WORDS):
+            return i
+        schema: str | None = None
+        name = first
+        i += 1
+        if i + 1 < n and sig[i].kind == "punct" and sig[i].text == ".":
+            second = _identifier(sig[i + 1])
+            if second is not None:
+                schema, name = first, second
+                i += 2
+        if i < n and sig[i].kind == "punct" and sig[i].text == "(":
+            return skip_parens(i)  # set-returning function, not a table
+        if schema is not None or name not in cte_names:
+            if (schema, name) not in found:
+                found.append((schema, name))
+        return i
+
+    def skip_alias(i: int) -> int:
+        if i < n and sig[i].kind == "word" and sig[i].text.upper() == "AS":
+            i += 1
+        if (
+            i < n
+            and sig[i].kind in ("word", "qident")
+            and _identifier(sig[i]) is not None
+            and sig[i].text.upper() not in _FROM_ITEM_STOP_WORDS
+        ):
+            i += 1
+            if i < n and sig[i].kind == "punct" and sig[i].text == "(":
+                i = skip_parens(i)  # column alias list
+        return i
+
+    for idx, tok in enumerate(sig):
+        if tok.kind != "word" or inside_call[idx]:
+            continue
+        keyword = tok.text.upper()
+        if keyword == "JOIN":
+            parse_item(idx + 1)
+        elif keyword == "FROM":
+            i = parse_item(idx + 1)
+            i = skip_alias(i)
+            while i < n and sig[i].kind == "punct" and sig[i].text == ",":
+                i = skip_alias(parse_item(i + 1))
+    return found

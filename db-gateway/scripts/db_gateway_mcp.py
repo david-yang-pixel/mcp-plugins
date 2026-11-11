@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Minimal stdio MCP server for DB Gateway.
 
-Exposes one tool (schema shared with the HTTP MCP endpoint):
-  - db_gateway_query(database, sql, ticket_id="", offset=0, limit=None, format="csv")
+Exposes the tools of the HTTP MCP endpoint (schemas shared with it):
+  - db_gateway_query(database, sql, offset=0, limit=None, format="csv", explain=false)
+    -> POST <DB_GATEWAY_URL>/query
+  - db_gateway_schema(database, tables) -> POST <DB_GATEWAY_URL>/schema
 
 The MCP server itself does not hold Teleport credentials. It forwards requests
 to the DB Gateway HTTP API, which owns Teleport, DB proxy, renewal, SQL safety,
@@ -21,7 +23,7 @@ from urllib import request
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from db_gateway.mcp_schema import TOOL_SCHEMA
+from db_gateway.mcp_schema import SCHEMA_TOOL_SCHEMA, TOOL_SCHEMA, TOOLS
 
 
 def _send(obj: dict[str, Any]) -> None:
@@ -38,6 +40,26 @@ def _error(req_id: Any, code: int, message: str) -> None:
 
 
 def _gateway_query(args: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "database": args.get("database"),
+        "sql": args.get("sql"),
+    }
+    # Only forward optional args when given, so older gateways keep working.
+    # Unknown arguments (e.g. the retired ticket_id) are dropped.
+    for key in ("offset", "limit", "format", "explain"):
+        if args.get(key) is not None:
+            payload[key] = args[key]
+    return _gateway_post("/query", payload)
+
+
+def _gateway_schema(args: dict[str, Any]) -> dict[str, Any]:
+    return _gateway_post("/schema", {
+        "database": args.get("database"),
+        "tables": args.get("tables"),
+    })
+
+
+def _gateway_post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
     base_url = os.environ.get("DB_GATEWAY_URL", "").rstrip("/")
     api_key = os.environ.get("DB_GATEWAY_API_KEY", "")
     # Gateway budget = query_timeout_seconds (30) + count_timeout_seconds (5) + connect.
@@ -56,18 +78,9 @@ def _gateway_query(args: dict[str, Any]) -> dict[str, Any]:
         }
 
     headers = {"X-API-Key": api_key}
-    payload: dict[str, Any] = {
-        "database": args.get("database"),
-        "sql": args.get("sql"),
-        "ticket_id": args.get("ticket_id") or "",
-    }
-    # Only forward optional paging/format args when given, so older gateways keep working.
-    for key in ("offset", "limit", "format"):
-        if args.get(key) is not None:
-            payload[key] = args[key]
     body = json.dumps(payload).encode("utf-8")
     req = request.Request(
-        f"{base_url}/query",
+        f"{base_url}{path}",
         data=body,
         headers={**headers, "Content-Type": "application/json"},
         method="POST",
@@ -108,16 +121,23 @@ def _handle(req: dict[str, Any]) -> None:
         return
 
     if method == "tools/list":
-        _result(req_id, {"tools": [TOOL_SCHEMA]})
+        _result(req_id, {"tools": TOOLS})
         return
 
     if method == "tools/call":
         params = req.get("params") or {}
         name = params.get("name")
-        if name != "db_gateway_query":
+        args = params.get("arguments") or {}
+        if not isinstance(args, dict):
+            _error(req_id, -32602, "arguments must be an object")
+            return
+        if name == TOOL_SCHEMA["name"]:
+            data = _gateway_query(args)
+        elif name == SCHEMA_TOOL_SCHEMA["name"]:
+            data = _gateway_schema(args)
+        else:
             _error(req_id, -32601, f"unknown tool: {name}")
             return
-        data = _gateway_query(params.get("arguments") or {})
         _result(req_id, {
             "content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}],
             "isError": not bool(data.get("success")),

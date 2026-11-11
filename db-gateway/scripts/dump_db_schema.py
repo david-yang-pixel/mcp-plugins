@@ -14,6 +14,10 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+# Type abbreviations are shared with the db_gateway_schema tool.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from db_gateway.schema_info import TYPE_ABBREV, shorten_type  # noqa: E402,F401
+
 DB_FILES = [
     ("langgenius", "Dify SaaS 主业务库（tenant / app / workflow / dataset / 用户数据）"),
     ("billing", "订阅 / 订单 / 退款 / 配额计费"),
@@ -22,19 +26,6 @@ DB_FILES = [
 
 # 这些列名是常见样板字段，schema 不用列出
 NOISE_COLUMNS = {"created_at", "updated_at", "deleted_at"}
-
-# 简化常见 PG 类型缩写
-TYPE_ABBREV = {
-    "character varying": "varchar",
-    "timestamp without time zone": "timestamp",
-    "timestamp with time zone": "timestamptz",
-    "double precision": "double",
-}
-
-
-def shorten_type(t: str) -> str:
-    return TYPE_ABBREV.get(t, t)
-
 
 def render(tmp_dir: Path, out_path: Path) -> None:
     out: list[str] = []

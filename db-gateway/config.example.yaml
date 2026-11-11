@@ -25,8 +25,9 @@ postgres:
 db_gateway:
   listen_host: 127.0.0.1
   listen_port: 18081
-  require_ticket_id: false
-  missing_ticket_alert_interval_seconds: 0
+  # Audit log directory (file: db_gateway_audit.log). Empty/omitted:
+  # <resources.base_dir>/<resources.state_dir>/logs
+  audit_log_dir: ""
 teleport:
   proxy: teleport.example.com:443
   auth_home: ./.tsh

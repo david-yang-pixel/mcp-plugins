@@ -24,16 +24,20 @@ HTTP `POST /query` 与 MCP `tools/call`（`/mcp`，以及 `scripts/db_gateway_mc
 | --- | --- | --- |
 | `database` | 是 | `prod` / `billing` / `plugin` |
 | `sql` | 是 | 单条只读查询，必须以 `SELECT` 或 `WITH` 开头，可带前置括号，例如 `(SELECT 1) UNION ALL (SELECT 2)`。末尾分号和注释会被去掉。 |
-| `ticket_id` | 否* | Zendesk 工单号，写入审计日志。开启 `require_ticket_id` 后必填。 |
 | `offset` | 否 | 跳过的行数，默认 `0`。翻页时传上一页的 `next_offset`。 |
 | `limit` | 否 | 每页行数，默认且最大为 `postgres.max_rows`（默认 1000），超过时按上限返回并给出 warning。 |
 | `format` | 否 | `csv`（默认）或 `json`。 |
+| `explain` | 否 | 布尔值，默认 `false`。为 `true` 时返回执行计划而不是数据，见下文。 |
+
+`ticket_id` 参数已移除。旧调用方继续传入时会被静默忽略，不报错，也不再产生 warning；其他未知参数同样忽略。
 
 分页不要在 SQL 里自己写 `LIMIT/OFFSET`，直接用 `offset`/`limit` 参数。只有原查询带顶层 `ORDER BY`（最好包含唯一键）时翻页结果才稳定；分页时如果原查询没有顶层 `ORDER BY`，返回里会带 warning。
 
 ### 返回字段
 
-- `success`、`code`、`error`：失败时 `code` 为 `UNKNOWN_DATABASE`、`INVALID_ARGUMENT`、`TICKET_ID_REQUIRED`、`SQL_SAFETY_ERROR`、`TELEPORT_EXPIRED`、`QUERY_TIMEOUT` 或 `QUERY_ERROR`。
+- `success`、`code`、`error`：失败时 `code` 为 `UNKNOWN_DATABASE`、`INVALID_ARGUMENT`、`SQL_SAFETY_ERROR`、`TELEPORT_EXPIRED`、`QUERY_TIMEOUT` 或 `QUERY_ERROR`。
+  - `QUERY_ERROR`（pool 模式）的 `error` 与 psql 输出一致，包含 PostgreSQL 的 `ERROR`、`DETAIL`、`HINT`，以及出错位置：`POSITION`（相对调用方提交的 SQL，换算掉网关包装的前缀）、`LINE n:` 原文和 `^` 标记。例如列名写错时会带 `HINT:  Perhaps you meant to reference the column "workflow_runs.status".`，`uuid = text` 时会提示显式类型转换。psql 模式直接返回 psql 的错误输出（同样含 `HINT`，但 `LINE` 行号按包装后的语句计算，比原 SQL 多 1）。
+  - `QUERY_TIMEOUT` 的 `error` 末尾附上查询涉及表（从 SQL 的 `FROM`/`JOIN` 中提取，排除 CTE 名）在 `pg_indexes` 中的现有索引定义，方便判断条件是否命中索引。索引列表在进程内按库缓存，最多每小时刷新一次；获取索引用单独的短超时（语句 2 秒，总预算 5 秒），失败时只记日志、60 秒内不重试，原超时错误保持不变。
 - `row_count`：本页真实数据行数，按 CSV 解析计数（多行字段算一行，没有 psql 的 `(N rows)` 页脚）。
 - `total_rows`：结果总行数。无法得出时为 `null`，原因写在 `warnings` 里，例如计数超时。
 - `has_more` / `truncated`：后面是否还有数据；`truncated` 是旧字段，值与 `has_more` 相同。
@@ -41,7 +45,7 @@ HTTP `POST /query` 与 MCP `tools/call`（`/mcp`，以及 `scripts/db_gateway_mc
 - `columns`：列名数组。
 - `format=csv`：`csv` 为表头加数据。psql CSV 中 **NULL 与空字符串都输出为空字段**，无法区分；需要区分时请用 `json`。
 - `format=json`：`csv` 为空字符串，另返回 `rows`（**数组的数组**，与 `columns` 顺序一致，保留重名列）和 `column_types`（PostgreSQL 类型名，例如 `integer`、`timestamp with time zone`，由 psql `\gdesc` 获取，只解析不执行，额外一次往返）。值都是 PostgreSQL 文本表示的字符串（数字、`t`/`f`、JSON 文本等不做类型转换），SQL NULL 为 `null`，空字符串为 `""`。
-- `warnings`：例如缺少 ticket_id、limit 被截断、分页缺少 ORDER BY、offset 超出总行数、total_rows 为 null 的原因。
+- `warnings`：例如 limit 被截断、分页缺少 ORDER BY、offset 超出总行数、total_rows 为 null 的原因。
 - `elapsed_ms`：psql 进程耗时（旧字段）。`timing_ms` 为分阶段耗时，同时写入审计日志和结构化日志：
   - `queue_wait_ms`：等待本库并发槽位（`max_concurrent_queries`）。
   - `psql_spawn_ms`：启动 psql 子进程。
@@ -64,6 +68,10 @@ HTTP `POST /query` 与 MCP `tools/call`（`/mcp`，以及 `scripts/db_gateway_mc
 4. 在同一游标上执行 `MOVE ALL` 计算 `total_rows`，受 `count_timeout_seconds` 限制。这样不会再次执行原查询；超时只让 `total_rows` 为 `null`，本页数据照常返回。
 
 用户 SQL 只出现在以 SQL 开头的 `-c` 参数中，psql 原样发给服务端，不解析其中的 `\` 元命令或 `:变量`。
+
+### 执行计划 `explain=true`
+
+SQL 先按原规则通过只读校验（调用方自己写 `EXPLAIN ...` 仍会被拒绝），然后由网关在校验后的语句前加上 `EXPLAIN `，在 `BEGIN TRANSACTION READ ONLY` + `statement_timeout` 中执行。不使用 `ANALYZE`，语句只做规划、不会真正执行。返回结构与普通查询相同：`columns` 为 `["QUERY PLAN"]`，每行计划是一行数据（`json` 时 `column_types` 为 `["text"]`）；`offset`/`limit` 在完整计划上分页，`total_rows` 为计划总行数。审计日志记 `"explain": true`。
 
 ### 连接方式 `postgres.driver`
 
@@ -101,10 +109,24 @@ pool 模式与 Teleport 续签的配合：
 | `postgres.max_rows` | 1000 | 单页上限。 |
 | `postgres.query_timeout_seconds` | 30 | 主查询 `statement_timeout`。psql 进程总超时为该值加 `count_timeout_seconds`。 |
 | `postgres.count_timeout_seconds` | 5 | total_rows 计数预算，设为 `0` 时不计数（仍会通过 `has_more` 判断是否有下一页）。 |
-| `db_gateway.require_ticket_id` | false | 设为 true 时，缺少 ticket_id 直接拒绝（`TICKET_ID_REQUIRED`）。也可用环境变量 `DB_GATEWAY_REQUIRE_TICKET_ID=true`。 |
-| `db_gateway.missing_ticket_alert_interval_seconds` | 0 | 大于 0 时，缺少 ticket_id 会通过现有飞书机器人提醒，两次提醒至少间隔该秒数，期间的次数合并到下一条；为 0 时不提醒。 |
+| `db_gateway.audit_log_dir` | 空 | 审计日志目录，文件名固定为 `db_gateway_audit.log`，目录不存在时自动创建；相对路径相对 `config.yaml` 所在目录。为空时使用 `<resources.base_dir>/<resources.state_dir>/logs`。生产配置为 `/var/lib/mcp/logs`（挂载 `@data/logs`，持久化）。 |
 
-未开启 `require_ticket_id` 时，缺少 ticket_id 的查询照常执行，但返回 warning，审计日志记录 `"ticket_id_missing": true`。审计日志每条都带 `ticket_id_missing`、`offset`、`limit`、`format` 字段，成功时另有 `total_rows`、`has_more`、`timing_ms`。stdio 客户端默认超时 `DB_GATEWAY_TIMEOUT=45` 秒。
+已移除的 `db_gateway.require_ticket_id`、`db_gateway.missing_ticket_alert_interval_seconds` 和环境变量 `DB_GATEWAY_REQUIRE_TICKET_ID` 不再生效；旧 `config.yaml` 中仍有这些键时照常加载并忽略。
+
+审计日志每条都带 `offset`、`limit`、`format` 字段（`explain=true` 时另有 `explain`），成功时另有 `total_rows`、`has_more`、`timing_ms`；`db_gateway_schema` 的调用记为 `"tool": "db_gateway_schema"` 并带 `tables`。stdio 客户端默认超时 `DB_GATEWAY_TIMEOUT=45` 秒。
+
+## 表结构工具 `db_gateway_schema`
+
+MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同一套参数。
+
+| 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `database` | 是 | `prod` / `billing` / `plugin`（与 `db_gateway_query` 相同） |
+| `tables` | 是 | 表名数组，最多 20 个，例如 `["workflow_runs"]`。可写 `schema.table`；未写 schema 时匹配所有非系统 schema（`public` 排在前面）；区分大小写的表名用双引号，例如 `"\"MyTable\""`。 |
+
+返回 `tables`：每张表一项，含 `schema`、`table`、`columns`（`name`、`type`、`nullable`，有默认值时带 `default`）和 `indexes`（`name`、`definition`，即 `pg_indexes.indexdef`，主键索引名通常以 `_pkey` 结尾）。找不到的表放在 `not_found`，并在 `warnings` 中说明。失败时 `success=false`，`code` 为 `UNKNOWN_DATABASE`、`INVALID_ARGUMENT`、`TELEPORT_EXPIRED`、`QUERY_TIMEOUT` 或 `QUERY_ERROR`。
+
+列来自 `information_schema.columns`，索引来自 `pg_indexes`。两条查询都是网关内置的只读 SQL，表名只作为绑定参数传入（`table_name = ANY(%s)`），在 `READ ONLY` 事务中以 `statement_timeout`（`query_timeout_seconds` 与 15 秒取小）执行后回滚。pool 模式复用连接池；psql 模式用 psycopg 临时建一条连接，用完关闭。类型名缩写（`varchar`、`timestamptz` 等）与 `scripts/dump_db_schema.py` 共用 `db_gateway.schema_info`。
 
 所有工具都在 `tools/list` 中声明 `annotations.readOnlyHint: true`、`destructiveHint: false`。OpenConnector 等客户端据此判断读写，未声明时新工具会被当作 write 并要求确认。
 

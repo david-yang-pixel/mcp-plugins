@@ -88,7 +88,6 @@ def test_stdio_forwards_paging_and_format(monkeypatch):
     assert captured["body"] == {
         "database": "prod",
         "sql": "SELECT 1",
-        "ticket_id": "",
         "offset": 10,
         "limit": 5,
         "format": "json",
@@ -108,9 +107,10 @@ def test_stdio_omits_unset_optional_args(monkeypatch):
     monkeypatch.setenv("DB_GATEWAY_API_KEY", "k")
     monkeypatch.setattr(module.request, "urlopen", fake_urlopen)
 
+    # Legacy callers still sending ticket_id: dropped, not forwarded.
     module._gateway_query({"database": "prod", "sql": "SELECT 1", "ticket_id": "77"})
 
-    assert captured["body"] == {"database": "prod", "sql": "SELECT 1", "ticket_id": "77"}
+    assert captured["body"] == {"database": "prod", "sql": "SELECT 1"}
 
 
 def test_stdio_tools_list_matches_http_schema():
@@ -118,3 +118,59 @@ def test_stdio_tools_list_matches_http_schema():
 
     module = _load_stdio_module()
     assert module.TOOL_SCHEMA is TOOL_SCHEMA or module.TOOL_SCHEMA == TOOL_SCHEMA
+
+
+def test_stdio_forwards_explain(monkeypatch):
+    module = _load_stdio_module()
+    captured = {}
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResponse({"success": True})
+
+    monkeypatch.setenv("DB_GATEWAY_URL", "http://gateway.invalid")
+    monkeypatch.setenv("DB_GATEWAY_API_KEY", "k")
+    monkeypatch.setattr(module.request, "urlopen", fake_urlopen)
+
+    module._gateway_query({"database": "prod", "sql": "SELECT 1", "explain": True})
+
+    assert captured["url"] == "http://gateway.invalid/query"
+    assert captured["body"] == {"database": "prod", "sql": "SELECT 1", "explain": True}
+
+
+def test_stdio_schema_tool_posts_to_schema_endpoint(monkeypatch, capsys):
+    module = _load_stdio_module()
+    captured = {}
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        captured["key"] = req.get_header("X-api-key")
+        return _FakeResponse({"success": True, "tables": [{"table": "workflow_runs"}]})
+
+    monkeypatch.setenv("DB_GATEWAY_URL", "http://gateway.invalid/")
+    monkeypatch.setenv("DB_GATEWAY_API_KEY", "k")
+    monkeypatch.setattr(module.request, "urlopen", fake_urlopen)
+
+    module._handle({
+        "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+        "params": {"name": "db_gateway_schema", "arguments": {"database": "prod", "tables": ["workflow_runs"]}},
+    })
+
+    assert captured["url"] == "http://gateway.invalid/schema"
+    assert captured["body"] == {"database": "prod", "tables": ["workflow_runs"]}
+    assert captured["key"] == "k"
+    out = json.loads(capsys.readouterr().out)
+    assert out["result"]["isError"] is False
+
+
+def test_stdio_tools_list_has_both_tools(capsys):
+    from db_gateway.mcp_schema import TOOLS
+
+    module = _load_stdio_module()
+    module._handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    tools = json.loads(capsys.readouterr().out)["result"]["tools"]
+    assert [t["name"] for t in tools] == ["db_gateway_query", "db_gateway_schema"]
+    assert tools == TOOLS
+    assert all(t["annotations"]["readOnlyHint"] is True for t in tools)

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -52,14 +52,18 @@ class PostgresConfig(BaseModel):
 
 
 class DbGatewayConfig(BaseModel):
+    # Unknown keys are ignored (pydantic default), so old config.yaml files that
+    # still carry the retired require_ticket_id / missing_ticket_alert_interval_seconds
+    # keep loading.
+    model_config = ConfigDict(extra="ignore")
+
     api_key: str = ""
     listen_host: str = "127.0.0.1"
     listen_port: int = 18081
     request_timeout_seconds: int = 35
-    # true 时缺少 ticket_id 的查询直接拒绝（TICKET_ID_REQUIRED）；默认 false 兼容现有调用方。
-    require_ticket_id: bool = False
-    # >0 时缺少 ticket_id 会发飞书提醒，同类提醒至少间隔该秒数；0 关闭。
-    missing_ticket_alert_interval_seconds: int = 0
+    # 审计日志目录（文件名固定为 db_gateway_audit.log）；为空时使用
+    # <resources.base_dir>/<resources.state_dir>/logs。相对路径相对 config.yaml 所在目录。
+    audit_log_dir: str = ""
 
 
 class TeleportConfig(BaseModel):
@@ -96,7 +100,6 @@ class EnvSettings(BaseSettings):
     db_gateway_api_key: str = ""
     db_gateway_listen_host: str | None = None
     db_gateway_listen_port: int | None = None
-    db_gateway_require_ticket_id: bool | None = None
     teleport_user: str = ""
     teleport_public_base_url: str = ""
     teleport_password: str = ""
@@ -124,6 +127,8 @@ def load_config(config_path: str = "config.yaml") -> AppConfig:
         return str(pp)
 
     cfg.resources.base_dir = _resolve(cfg.resources.base_dir)
+    if cfg.db_gateway.audit_log_dir.strip():
+        cfg.db_gateway.audit_log_dir = _resolve(cfg.db_gateway.audit_log_dir.strip())
 
     env = EnvSettings()
     if env.pg_password:
@@ -134,8 +139,6 @@ def load_config(config_path: str = "config.yaml") -> AppConfig:
         cfg.db_gateway.listen_host = env.db_gateway_listen_host
     if env.db_gateway_listen_port is not None:
         cfg.db_gateway.listen_port = env.db_gateway_listen_port
-    if env.db_gateway_require_ticket_id is not None:
-        cfg.db_gateway.require_ticket_id = env.db_gateway_require_ticket_id
     if env.teleport_user:
         cfg.teleport.user = env.teleport_user
     if env.teleport_public_base_url:

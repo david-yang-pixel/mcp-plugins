@@ -37,8 +37,11 @@ from psycopg.types.string import TextLoader
 from psycopg_pool import AsyncConnectionPool, PoolClosed, PoolTimeout
 
 from db_gateway.postgres import (
+    EXPLAIN_PREFIX,
+    WRAP_PREFIX,
     PsqlResult,
     TeleportAuthExpired,
+    explain_result,
     rows_to_csv,
     validate_read_only_sql,
     wrap_query,
@@ -303,11 +306,69 @@ def _is_connection_failure(error: BaseException, conn: Optional[psycopg.AsyncCon
     return isinstance(error, psycopg.OperationalError) and getattr(error, "sqlstate", None) is None
 
 
+# Attribute set on a psycopg error raised by a batch that contains the user's
+# SQL: (user SQL body, 0-based offset of the body in the text sent to the server).
+_SQL_CONTEXT_ATTR = "_db_gateway_sql_context"
+
+
+def _remember_sql(error: BaseException, body: str, body_start: int) -> None:
+    try:
+        setattr(error, _SQL_CONTEXT_ATTR, (body, body_start))
+    except Exception:  # noqa: BLE001 - only used to improve the message
+        pass
+
+
+def _position_lines(sql: str, position: int) -> list[str]:
+    """psql-style ``LINE n: ...`` + caret for a 1-based character position."""
+    before = sql[: position - 1]
+    line_no = before.count("\n") + 1
+    line_start = before.rfind("\n") + 1
+    column = position - line_start
+    line_end = sql.find("\n", line_start)
+    line_text = sql[line_start:] if line_end < 0 else sql[line_start:line_end]
+    window_start = max(0, column - 1 - 100)
+    segment = line_text[window_start:window_start + 200]
+    prefix = f"LINE {line_no}: " + ("..." if window_start else "")
+    caret = " " * (len(prefix) + column - 1 - window_start) + "^"
+    return [
+        f"POSITION:  {position} (line {line_no}, column {column} of the submitted SQL)",
+        prefix + segment,
+        caret,
+    ]
+
+
 def _error_text(error: psycopg.Error) -> str:
+    """psql-like error text: ERROR, DETAIL, HINT and the error position.
+
+    Positions are reported relative to the caller's SQL (the server counts
+    them in the wrapped statement the gateway actually sent).
+    """
     diag = getattr(error, "diag", None)
-    primary = getattr(diag, "message_primary", None) if diag is not None else None
-    text = primary or str(error).strip() or type(error).__name__
-    return f"ERROR:  {text}"
+
+    def field(name: str) -> Optional[str]:
+        value = getattr(diag, name, None) if diag is not None else None
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    text = field("message_primary") or str(error).strip() or type(error).__name__
+    lines = [f"ERROR:  {text}"]
+    detail = field("message_detail")
+    if detail:
+        lines.append(f"DETAIL:  {detail}")
+    hint = field("message_hint")
+    if hint:
+        lines.append(f"HINT:  {hint}")
+    position = field("statement_position")
+    if position and position.isdigit():
+        pos = int(position)
+        context = getattr(error, _SQL_CONTEXT_ATTR, None)
+        if context is None:
+            lines.append(f"POSITION:  {pos}")
+        else:
+            body, body_start = context
+            relative = pos - body_start
+            if 1 <= relative <= len(body):
+                lines.extend(_position_lines(body, relative))
+    return "\n".join(lines)
 
 
 async def _column_types(
@@ -339,6 +400,7 @@ async def run_pool_query(
     limit: int | None = None,
     count_timeout: float = 0,
     describe: bool = False,
+    explain: bool = False,
     settings: PoolSettings | None = None,
     auth_home: str | None = None,
     manager: PoolManager | None = None,
@@ -348,6 +410,10 @@ async def run_pool_query(
     Same contract as ``postgres.run_psql``: cursor in a READ ONLY transaction,
     ``MOVE offset`` -> ``FETCH limit+1`` -> ``MOVE ALL`` for ``total_rows``. The
     count runs only when the page is full; otherwise the total is exact.
+
+    ``explain=True`` runs ``EXPLAIN <validated SQL>`` (never ANALYZE, so the
+    statement is planned but not executed) and returns the plan lines as rows of
+    a ``QUERY PLAN`` column.
 
     Raises:
         PsqlSafetyError: SQL failed read-only validation
@@ -374,9 +440,9 @@ async def run_pool_query(
     return await asyncio.wait_for(
         _run(
             manager, key, password=password, settings=settings, auth_home=auth_home,
-            wrapped=wrapped, timeout=float(timeout), page_limit=page_limit,
+            body=body, wrapped=wrapped, timeout=float(timeout), page_limit=page_limit,
             offset=offset, count_timeout=count_timeout, describe=describe,
-            started=started,
+            explain=explain, started=started,
         ),
         timeout=deadline,
     )
@@ -389,20 +455,23 @@ async def _run(
     password: str,
     settings: PoolSettings,
     auth_home: str | None,
+    body: str,
     wrapped: str,
     timeout: float,
     page_limit: int,
     offset: int,
     count_timeout: float,
     describe: bool,
+    explain: bool,
     started: float,
 ) -> PsqlResult:
     for attempt in range(2):
         try:
             return await _run_once(
                 manager, key, password=password, settings=settings, auth_home=auth_home,
-                wrapped=wrapped, timeout=timeout, page_limit=page_limit, offset=offset,
-                count_timeout=count_timeout, describe=describe, started=started,
+                body=body, wrapped=wrapped, timeout=timeout, page_limit=page_limit,
+                offset=offset, count_timeout=count_timeout, describe=describe,
+                explain=explain, started=started,
             )
         except PoolClosed as e:
             # A concurrent query reset this pool between lookup and checkout
@@ -422,12 +491,14 @@ async def _run_once(
     password: str,
     settings: PoolSettings,
     auth_home: str | None,
+    body: str,
     wrapped: str,
     timeout: float,
     page_limit: int,
     offset: int,
     count_timeout: float,
     describe: bool,
+    explain: bool,
     started: float,
 ) -> PsqlResult:
     conn: Optional[psycopg.AsyncConnection] = None
@@ -441,12 +512,18 @@ async def _run_once(
             timing["pool_new_connections"] = float(manager.new_connections(key, pool))
             finished = False
             try:
-                result = await _query_page(
-                    manager, conn, wrapped=wrapped, timeout=timeout,
-                    page_limit=page_limit, offset=offset,
-                    count_timeout=count_timeout, describe=describe,
-                    timing=timing, started=started,
-                )
+                if explain:
+                    result = await _explain_page(
+                        conn, body=body, timeout=timeout, page_limit=page_limit,
+                        offset=offset, timing=timing, started=started,
+                    )
+                else:
+                    result = await _query_page(
+                        manager, conn, body=body, wrapped=wrapped, timeout=timeout,
+                        page_limit=page_limit, offset=offset,
+                        count_timeout=count_timeout, describe=describe,
+                        timing=timing, started=started,
+                    )
                 finished = True
                 return result
             finally:
@@ -515,6 +592,7 @@ async def _query_page(
     manager: PoolManager,
     conn: psycopg.AsyncConnection,
     *,
+    body: str,
     wrapped: str,
     timeout: float,
     page_limit: int,
@@ -543,7 +621,12 @@ async def _query_page(
     if offset > 0:
         batch.append(f"MOVE FORWARD {int(offset)} IN {_CURSOR_NAME}")
     batch.append(f"FETCH FORWARD {page_limit + 1} FROM {_CURSOR_NAME}")
-    await cur.execute(";\n".join(batch))
+    sent = ";\n".join(batch)
+    try:
+        await cur.execute(sent)
+    except psycopg.Error as e:
+        _remember_sql(e, body, sent.index(wrapped) + len(WRAP_PREFIX))
+        raise
     results = await _results(cur)
     skipped = max(0, results[3][1]) if offset > 0 else 0
     _status, _count, fetched_rows, description, pgresult = results[-1]
@@ -614,3 +697,148 @@ async def _query_page(
         offset_skipped=skipped,
         timing_ms=timing,
     )
+
+
+async def _explain_page(
+    conn: psycopg.AsyncConnection,
+    *,
+    body: str,
+    timeout: float,
+    page_limit: int,
+    offset: int,
+    timing: dict[str, float],
+    started: float,
+) -> PsqlResult:
+    """``EXPLAIN`` (no ANALYZE: plans only, never executes) in one round trip."""
+    head = [
+        "BEGIN TRANSACTION READ ONLY",
+        f"SET LOCAL statement_timeout = {int(timeout * 1000)}",
+    ]
+    prefix = ";\n".join(head) + ";\n" + EXPLAIN_PREFIX
+    # Newline before ';' so a trailing "--" comment cannot swallow what follows.
+    sent = prefix + body + "\n;\n" + ";\n".join([_UNLOCK_ALL, "ROLLBACK"])
+    cur = conn.cursor()
+    query_started = time.perf_counter()
+    try:
+        await cur.execute(sent)
+    except psycopg.Error as e:
+        _remember_sql(e, body, len(prefix))
+        raise
+    results = await _results(cur)
+    timing["query_ms"] = _ms(time.perf_counter() - query_started)
+    _status, _count, plan_rows, description, _pgresult = results[2]
+    columns = [col.name for col in description or []] or ["QUERY PLAN"]
+    rows = [["" if v is None else str(v) for v in row] for row in plan_rows or []]
+    return explain_result(
+        columns, rows, offset=offset, page_limit=page_limit,
+        elapsed_ms=int((time.perf_counter() - started) * 1000), timing=timing,
+    )
+
+
+async def _metadata_rows(
+    conn: psycopg.AsyncConnection, sql: str, params: Any, timeout: float,
+) -> list[list[Any]]:
+    await conn.execute(
+        f"BEGIN TRANSACTION READ ONLY; SET LOCAL statement_timeout = {int(timeout * 1000)}"
+    )
+    cur = await conn.execute(sql, params)
+    rows = [list(row) for row in await cur.fetchall()]
+    await conn.execute("ROLLBACK")
+    return rows
+
+
+async def run_metadata_query(
+    *,
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    database: str,
+    sql: str,
+    params: Any = None,
+    timeout: float = 5.0,
+    use_pool: bool = True,
+    settings: PoolSettings | None = None,
+    auth_home: str | None = None,
+    manager: PoolManager | None = None,
+) -> list[list[Any]]:
+    """Run one trusted, parameterized catalog query (READ ONLY, statement_timeout).
+
+    ``sql`` must be gateway-owned text (e.g. ``schema_info.COLUMNS_SQL``); caller
+    input only ever travels in ``params`` as bind parameters. With
+    ``use_pool=False`` (psql driver) a one-off connection is opened and closed.
+
+    Raises TeleportAuthExpired for connection failures, StatementTimeout /
+    asyncio.TimeoutError for timeouts and RuntimeError for other errors.
+    """
+    settings = settings or PoolSettings()
+    key = PoolKey(host=host, port=int(port), user=user, database=database)
+    manager = manager or MANAGER
+    deadline = float(timeout) + settings.acquire_timeout_seconds + 5
+
+    async def pooled() -> list[list[Any]]:
+        for attempt in range(2):
+            pool: Optional[AsyncConnectionPool] = None
+            conn: Optional[psycopg.AsyncConnection] = None
+            try:
+                pool = await manager.pool_for(
+                    key, password=password, settings=settings, auth_home=auth_home,
+                )
+                async with pool.connection() as conn:
+                    try:
+                        return await _metadata_rows(conn, sql, params, timeout)
+                    except Exception:
+                        await _cleanup_after_error(conn)
+                        raise
+                    finally:
+                        manager.touch(conn)
+            except PoolClosed as e:
+                if attempt == 0:
+                    continue
+                raise TeleportAuthExpired(f"connection reset: {e}") from e
+            except PoolTimeout as e:
+                if pool is not None:
+                    await manager.drain(key, "no connection within acquire timeout", pool=pool)
+                raise TeleportAuthExpired(
+                    f"could not connect to server: no PostgreSQL connection to "
+                    f"{key.host}:{key.port} ({e})"
+                ) from e
+            except psycopg.errors.QueryCanceled as e:
+                raise StatementTimeout(_error_text(e)) from e
+            except psycopg.Error as e:
+                if _is_connection_failure(e, conn):
+                    if pool is not None:
+                        await manager.drain(key, f"connection failure: {str(e).strip()[:200]}", pool=pool)
+                    raise TeleportAuthExpired(f"connection reset: {str(e).strip()}") from e
+                raise RuntimeError(_error_text(e)) from e
+            except OSError as e:
+                if pool is not None:
+                    await manager.drain(key, f"connection failure: {e}", pool=pool)
+                raise TeleportAuthExpired(f"Connection refused: {e}") from e
+        raise AssertionError("unreachable")
+
+    async def one_off() -> list[list[Any]]:
+        try:
+            conn = await psycopg.AsyncConnection.connect(
+                make_conninfo(
+                    host=host, port=int(port), user=user, password=password or None,
+                    dbname=database, sslmode="disable",
+                    connect_timeout=settings.connect_timeout_seconds,
+                    application_name="db-gateway", client_encoding="UTF8",
+                ),
+                autocommit=True,
+            )
+        except (psycopg.OperationalError, OSError) as e:
+            raise TeleportAuthExpired(f"could not connect to server: {str(e).strip()}") from e
+        try:
+            return await _metadata_rows(conn, sql, params, timeout)
+        except psycopg.errors.QueryCanceled as e:
+            raise StatementTimeout(_error_text(e)) from e
+        except psycopg.Error as e:
+            if _is_connection_failure(e, conn):
+                raise TeleportAuthExpired(f"connection reset: {str(e).strip()}") from e
+            raise RuntimeError(_error_text(e)) from e
+        finally:
+            await conn.close()
+
+    return await asyncio.wait_for(pooled() if use_pool else one_off(), timeout=deadline)

@@ -104,3 +104,70 @@ async def test_failed_pool_open_does_not_close_a_newer_pool(monkeypatch):
     assert manager._pools[key] is newer
     assert not newer.closed
     await newer.close()
+
+
+class _Diag:
+    def __init__(self, **fields):
+        self.message_primary = fields.get("primary")
+        self.message_detail = fields.get("detail")
+        self.message_hint = fields.get("hint")
+        self.statement_position = fields.get("position")
+
+
+class _FakePgError(Exception):
+    def __init__(self, **fields):
+        super().__init__(fields.get("primary") or "")
+        self.diag = _Diag(**fields)
+
+
+def test_error_text_includes_hint_and_position():
+    from db_gateway.pg_pool import _error_text
+
+    err = _FakePgError(
+        primary='column "stauts" does not exist',
+        hint='Perhaps you meant to reference the column "workflow_runs.status".',
+        position="35",
+    )
+    text = _error_text(err)
+    assert text.splitlines() == [
+        'ERROR:  column "stauts" does not exist',
+        'HINT:  Perhaps you meant to reference the column "workflow_runs.status".',
+        "POSITION:  35",
+    ]
+
+
+def test_error_text_maps_position_into_the_callers_sql():
+    from db_gateway.pg_pool import _error_text, _remember_sql
+
+    body = "SELECT id\nFROM workflow_runs WHERE tenant_id = 'x'::text"
+    sent = "BEGIN;\nDECLARE c CURSOR FOR SELECT * FROM (\n" + body + "\n) AS q"
+    start = sent.index(body)
+    position = start + body.index("= 'x'") + 1  # server positions are 1-based
+    err = _FakePgError(
+        primary="operator does not exist: uuid = text",
+        hint="No operator matches the given name and argument types. You might need to add explicit type casts.",
+        detail="some detail",
+        position=str(position),
+    )
+    _remember_sql(err, body, start)
+    lines = _error_text(err).splitlines()
+    assert lines[0] == "ERROR:  operator does not exist: uuid = text"
+    assert lines[1] == "DETAIL:  some detail"
+    assert lines[2].startswith("HINT:  No operator matches")
+    assert lines[3] == "POSITION:  46 (line 2, column 36 of the submitted SQL)"
+    assert lines[4] == "LINE 2: FROM workflow_runs WHERE tenant_id = 'x'::text"
+    assert lines[5].index("^") == len("LINE 2: ") + 35
+
+
+def test_error_text_drops_positions_outside_the_callers_sql():
+    from db_gateway.pg_pool import _error_text, _remember_sql
+
+    err = _FakePgError(primary="syntax error", position="3")
+    _remember_sql(err, "SELECT 1", 40)
+    assert _error_text(err) == "ERROR:  syntax error"
+
+
+def test_error_text_without_diag_falls_back_to_message():
+    from db_gateway.pg_pool import _error_text
+
+    assert _error_text(RuntimeError("boom")) == "ERROR:  boom"  # type: ignore[arg-type]

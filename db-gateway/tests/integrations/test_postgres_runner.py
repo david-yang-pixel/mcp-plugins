@@ -271,3 +271,62 @@ async def test_unsafe_sql_never_spawns_psql():
                 sql="SELECT 1; DELETE FROM t", timeout=1, max_rows=10,
             )
     spawn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_explain_runs_explain_without_cursor_or_count():
+    stdout = (
+        "QUERY PLAN\n"
+        "Seq Scan on t  (cost=0.00..1.01 rows=1 width=4)\n"
+        '"  Filter: (id = 1)"\n'
+        f"Time: 0.4 ms\n{MARK} fetch 0\n"
+    )
+    result, cmd, _ = await _run(stdout, sql="SELECT id FROM t WHERE id = 1;", explain=True, count_timeout=5)
+
+    sqls = _sql_args(cmd)
+    assert sqls[0] == "\\timing on"
+    assert sqls[1] == (
+        "BEGIN TRANSACTION READ ONLY; SET LOCAL statement_timeout = 30000; "
+        "EXPLAIN SELECT id FROM t WHERE id = 1\n"
+    )
+    assert not any("DECLARE" in s or "MOVE" in s or "ANALYZE" in s for s in sqls)
+    assert result.columns == ["QUERY PLAN"]
+    assert result.rows == [["Seq Scan on t  (cost=0.00..1.01 rows=1 width=4)"], ["  Filter: (id = 1)"]]
+    assert result.total_rows == 2 and result.has_more is False
+    assert result.column_types == ["text"]
+    assert result.csv.startswith("QUERY PLAN\nSeq Scan on t")
+
+
+@pytest.mark.asyncio
+async def test_explain_pages_plan_lines_in_memory():
+    plan = "\n".join(f"line {i}" for i in range(5))
+    stdout = f"QUERY PLAN\n{plan}\nTime: 0.4 ms\n{MARK} fetch 0\n"
+    result, _, _ = await _run(stdout, explain=True, offset=1, limit=2)
+
+    assert result.rows == [["line 1"], ["line 2"]]
+    assert result.has_more is True and result.total_rows == 5 and result.offset_skipped == 1
+
+
+@pytest.mark.asyncio
+async def test_explain_still_validates_sql_before_spawning():
+    spawn = AsyncMock()
+    with patch("db_gateway.postgres.asyncio.create_subprocess_exec", spawn):
+        for sql in ("EXPLAIN ANALYZE SELECT 1", "SELECT 1; DELETE FROM t"):
+            with pytest.raises(PsqlSafetyError):
+                await run_psql(
+                    host="localhost", port=1, user="u", password="p", database="d",
+                    sql=sql, timeout=1, max_rows=10, explain=True,
+                )
+    spawn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_psql_error_text_keeps_hint():
+    stderr = (
+        'ERROR:  column "stauts" does not exist\n'
+        "LINE 2: SELECT * FROM t WHERE stauts = 1\n"
+        "                              ^\n"
+        'HINT:  Perhaps you meant to reference the column "t.status".\n'
+    )
+    with pytest.raises(RuntimeError, match="HINT:  Perhaps you meant"):
+        await _run("", stderr=stderr, returncode=1)
