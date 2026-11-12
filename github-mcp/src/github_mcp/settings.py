@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     github_write_enabled: bool = Field(default=False, validation_alias="GITHUB_MCP_WRITE_ENABLED")
     github_write_owners: str = Field(default="david-yang-pixel", validation_alias="GITHUB_MCP_WRITE_OWNERS")
     github_upstream_repos: str = Field(default="", validation_alias="GITHUB_MCP_UPSTREAM_REPOS")
+    # Opt-in: let github_create_pr target any repository when the head branch is
+    # ``owner:branch`` with ``owner`` in GITHUB_MCP_WRITE_OWNERS (a PR from an own fork).
+    github_pr_from_own_fork: bool = Field(default=False, validation_alias="GITHUB_MCP_PR_FROM_OWN_FORK")
     github_write_rate_per_hour: int = Field(default=30, validation_alias="GITHUB_MCP_WRITE_RATE_PER_HOUR")
 
     @property

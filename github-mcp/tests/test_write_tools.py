@@ -479,6 +479,137 @@ def test_create_pr_from_fork_to_upstream(github) -> None:
     assert sent["head"] == "david-yang-pixel:fix/title-match" and sent["draft"] is True
 
 
+# --------------------------------------------- PRs from own forks (opt-in)
+
+_PR_CREATED = {"number": 7, "html_url": "https://github.com/langgenius/dify/pull/7", "state": "open", "draft": False}
+
+
+def _pr_routes(repo: str = "langgenius/dify") -> dict:
+    return {
+        ("GET", f"/repos/{repo}"): {"default_branch": "main"},
+        ("POST", f"/repos/{repo}/pulls"): lambda r: httpx.Response(201, json=_PR_CREATED),
+    }
+
+
+def test_pr_from_own_fork_to_unlisted_repo_allowed_when_enabled(github) -> None:
+    fake = github(_pr_routes())
+    result = run(
+        "github_create_pr",
+        {"repo": "langgenius/dify", "title": "t", "head": "david-yang-pixel:fix/x"},
+        settings(github_pr_from_own_fork=True),
+    )
+    assert result["success"] is True and result["data"]["number"] == 7, result
+    assert fake.body("POST", "/repos/langgenius/dify/pulls")["head"] == "david-yang-pixel:fix/x"
+
+
+def test_pr_from_own_fork_head_owner_is_case_insensitive(github) -> None:
+    github(_pr_routes())
+    result = run(
+        "github_create_pr",
+        {"repo": "langgenius/dify", "title": "t", "head": "David-Yang-Pixel:fix/x", "base": "main"},
+        settings(github_pr_from_own_fork=True),
+    )
+    assert result["success"] is True, result
+
+
+@pytest.mark.parametrize("overrides", [{}, {"github_pr_from_own_fork": False}])
+def test_pr_from_own_fork_to_unlisted_repo_denied_when_disabled(github, overrides) -> None:
+    # ``{}``: the setting is absent altogether, i.e. the default is off.
+    fake = github(_pr_routes())
+    result = run(
+        "github_create_pr",
+        {"repo": "langgenius/dify", "title": "t", "head": "david-yang-pixel:fix/x", "base": "main"},
+        settings(**overrides),
+    )
+    assert result["code"] == "REPO_NOT_ALLOWED", result
+    assert fake.requests == []
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        "someone-else:fix/x",  # fork owned by another account
+        "langgenius:fix/x",  # branch owner is the target's owner, still not ours
+        "fix/x",  # no owner: the branch lives in the target repo
+    ],
+)
+def test_pr_to_unlisted_repo_denied_unless_head_is_own_fork(github, head) -> None:
+    fake = github(_pr_routes())
+    result = run(
+        "github_create_pr",
+        {"repo": "langgenius/dify", "title": "t", "head": head, "base": "main"},
+        settings(github_pr_from_own_fork=True),
+    )
+    assert result["code"] == "REPO_NOT_ALLOWED", result
+    assert fake.requests == []
+
+
+def test_pr_with_malformed_head_owner_is_rejected(github) -> None:
+    fake = github(_pr_routes())
+    for head in (":fix/x", "david-yang-pixel:other:fix/x", "david-yang-pixel/dify:fix/x"):
+        result = run(
+            "github_create_pr",
+            {"repo": "langgenius/dify", "title": "t", "head": head, "base": "main"},
+            settings(github_pr_from_own_fork=True),
+        )
+        assert result["success"] is False, (head, result)
+    assert fake.requests == []
+
+
+@pytest.mark.parametrize(
+    "name,arguments",
+    [
+        ("github_create_issue", {"repo": "langgenius/dify", "title": "t"}),
+        ("github_add_comment", {"repo": "langgenius/dify", "issue_number": 1, "body": "b"}),
+        ("github_create_branch", {"repo": "langgenius/dify", "branch": "x", "from_ref": "main"}),
+        ("github_commit_files", {"repo": "langgenius/dify", "branch": "main", "message": "m", "files": [{"path": "a", "content": "b"}]}),
+        ("github_fork_repo", {"repo": "Stardm0/MoonTV", "organization": "langgenius"}),
+    ],
+)
+def test_own_fork_switch_does_not_open_other_writes(github, name, arguments) -> None:
+    fake = github({})
+    result = run(name, arguments, settings(github_pr_from_own_fork=True))
+    assert result["code"] == "REPO_NOT_ALLOWED", result
+    assert fake.requests == []
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_allowlist_rules_for_prs_unchanged_by_switch(github, enabled) -> None:
+    s = settings(github_pr_from_own_fork=enabled)
+    github({**_pr_routes("Stardm0/MoonTV"), **_pr_routes("someorg/anything"), **_pr_routes("david-yang-pixel/x")})
+    # Exact rule, owner/* rule and own repo: allowed with or without a head owner.
+    for repo in ("Stardm0/MoonTV", "someorg/anything", "david-yang-pixel/x"):
+        for head in ("fix/x", "someone-else:fix/x"):
+            result = run("github_create_pr", {"repo": repo, "title": "t", "head": head, "base": "main"}, s)
+            assert result["success"] is True, (repo, head, result)
+    # A repo that only shares the owner of an exact rule is still not listed.
+    result = run("github_create_pr", {"repo": "Stardm0/Other", "title": "t", "head": "fix/x", "base": "main"}, s)
+    assert result["code"] == "REPO_NOT_ALLOWED", result
+
+
+def test_pr_from_own_fork_still_counts_against_rate_limit(github) -> None:
+    github(_pr_routes())
+    s = settings(github_pr_from_own_fork=True, github_write_rate_per_hour=1)
+    args = {"repo": "langgenius/dify", "title": "t", "head": "david-yang-pixel:fix/x", "base": "main"}
+    assert run("github_create_pr", args, s)["success"] is True
+    assert run("github_create_pr", args, s)["code"] == "RATE_LIMITED"
+
+
+def test_pr_from_own_fork_setting_defaults_off_and_reads_env(monkeypatch) -> None:
+    from github_mcp.settings import Settings
+
+    monkeypatch.delenv("GITHUB_MCP_PR_FROM_OWN_FORK", raising=False)
+    assert Settings(_env_file=None).github_pr_from_own_fork is False
+    monkeypatch.setenv("GITHUB_MCP_PR_FROM_OWN_FORK", "true")
+    assert Settings(_env_file=None).github_pr_from_own_fork is True
+
+
+def test_create_pr_description_mentions_own_fork_rule() -> None:
+    description = next(t for t in write.TOOLS if t["name"] == "github_create_pr")["description"]
+    assert "GITHUB_MCP_PR_FROM_OWN_FORK" in description
+    assert "GITHUB_MCP_UPSTREAM_REPOS" in description
+
+
 def test_add_comment_and_body_limit(github) -> None:
     fake = github(
         {
