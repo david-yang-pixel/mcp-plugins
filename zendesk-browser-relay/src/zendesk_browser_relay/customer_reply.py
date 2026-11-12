@@ -83,8 +83,12 @@ def _normalize_email_paragraphs(body: str) -> str:
     return "\n\n".join(paragraphs)
 
 
-def format_customer_reply(body: str) -> str:
-    """Normalize a customer email and append the required footer exactly once."""
+def format_customer_reply(body: str, append_footer: bool = True) -> str:
+    """Normalize a customer email and append the required footer exactly once.
+
+    With ``append_footer=False`` the body is normalized the same way (newlines,
+    existing footers stripped, paragraphs) but no footer is appended.
+    """
 
     normalized = body.replace("\\r\\n", "\n").replace("\\n", "\n")
     normalized = normalized.replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -98,6 +102,8 @@ def format_customer_reply(body: str) -> str:
 
     normalized = re.sub(r"[ \t]+\n", "\n", normalized)
     normalized = _normalize_email_paragraphs(normalized)
+    if not append_footer:
+        return normalized
     if re.search(r'[\u3040-\u30ff]', normalized):
         footer = CUSTOMER_REPLY_FOOTER_JA
     elif re.search(r'[\u3400-\u9fff]', normalized):
