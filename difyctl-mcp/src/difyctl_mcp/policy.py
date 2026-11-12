@@ -89,6 +89,11 @@ def _is_scalar(schema) -> bool:
     return schema.get("type") in ("string", "integer", "number", "boolean")
 
 
+def include_secret_allowed() -> bool:
+    """DIFYCTL_ALLOW_INCLUDE_SECRET=true lets include_secret=true through (exported DSL then holds plaintext secrets)."""
+    return os.environ.get("DIFYCTL_ALLOW_INCLUDE_SECRET", "false").strip().lower() in ("1", "true", "yes")
+
+
 def check_input(op: str, descriptor: dict, data) -> bytes:
     if not isinstance(data, dict):
         raise PolicyError("invalid_input", "input must be a JSON object.")
@@ -101,8 +106,10 @@ def check_input(op: str, descriptor: dict, data) -> bytes:
         if isinstance(value, str) and value.startswith("@") and not _is_scalar(properties.get(key)):
             raise PolicyError("file_reference_rejected",
                               f"input.{key}: '@file' references are not allowed; pass the JSON value itself.")
-    if "include_secret" in data and data["include_secret"] not in (None, False):
-        raise PolicyError("forbidden_input", "include_secret=true is not allowed: secrets must not leave Dify in plaintext.")
+    if ("include_secret" in data and data["include_secret"] not in (None, False)
+            and not include_secret_allowed()):
+        raise PolicyError("forbidden_input", "include_secret=true is not allowed: secrets must not leave Dify in plaintext "
+                                             "(set DIFYCTL_ALLOW_INCLUDE_SECRET=true to allow).")
     return encoded
 
 
