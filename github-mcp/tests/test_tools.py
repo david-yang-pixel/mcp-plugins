@@ -744,6 +744,8 @@ def test_every_tool_schema_documents_its_arguments() -> None:
         props = tool["inputSchema"]["properties"]
         for required in tool["inputSchema"].get("required", []):
             assert required in props
+        if tool["name"] in tools.WRITE_TOOL_NAMES or tool["name"] == "github_get_file":
+            continue  # write tools and get_file return their own compact shape
         assert "fields" in props and "raw" in props
     code = next(t for t in tools.TOOLS if t["name"] == "github_code_search")
     assert "dify-source" in code["description"]

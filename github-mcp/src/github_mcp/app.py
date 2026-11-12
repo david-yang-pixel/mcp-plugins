@@ -11,9 +11,11 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from . import tools as github_tools
 from .mcp import (
     audit_tool_call,
-    check_auth,
+    check_auth_scope,
     configure_logging,
+    failure,
     initialize_result,
+    is_write_tool,
     jsonrpc_error,
     tool_result,
     tools_list_result,
@@ -27,6 +29,7 @@ SERVICE_DEFS = {
         "tools": github_tools.TOOLS,
         "handler": github_tools.handle,
         "api_key_attr": "github_api_key",
+        "write_api_key_attr": "github_write_api_key",
     }
 }
 
@@ -41,6 +44,7 @@ def create_service_app(service_name: str) -> FastAPI:
             "ok": True,
             "service": spec["name"],
             "api_key_configured": bool(getattr(settings, spec["api_key_attr"])),
+            "write_enabled": bool(getattr(settings, "write_active", False)),
         }
 
     @app.get("/sse")
@@ -78,7 +82,7 @@ def create_service_app(service_name: str) -> FastAPI:
         authorization: Optional[str] = Header(default=None),
         settings: Settings = Depends(get_settings),
     ) -> Any:
-        _check_service_auth(spec, authorization, settings)
+        scope = _check_service_auth(spec, authorization, settings)
         try:
             body = await request.json()
         except Exception:
@@ -91,7 +95,7 @@ def create_service_app(service_name: str) -> FastAPI:
         if method == "initialize":
             return initialize_result(request_id, service_name=spec["name"])
         if method == "tools/list":
-            return tools_list_result(request_id, spec["tools"])
+            return tools_list_result(request_id, _visible_tools(spec, scope, settings))
         if method == "ping":
             return {"jsonrpc": "2.0", "id": request_id, "result": {}}
         if method != "tools/call":
@@ -102,8 +106,10 @@ def create_service_app(service_name: str) -> FastAPI:
             params = {}
         started = time.monotonic()
         response: Any = None
+        tool = _find_tool(spec, params.get("name"))
+        write = bool(tool and is_write_tool(tool))
         try:
-            response = await _call_tool(spec, request_id, params, settings)
+            response = await _call_tool(spec, request_id, params, settings, scope)
             return response
         finally:
             audit_tool_call(
@@ -111,17 +117,44 @@ def create_service_app(service_name: str) -> FastAPI:
                 arguments=params.get("arguments"),
                 started=started,
                 response=response,
+                write=write,
+                scope=scope,
             )
 
     return app
 
 
+def _find_tool(spec: dict[str, Any], name: Any) -> Optional[dict[str, Any]]:
+    return next((tool for tool in spec["tools"] if tool["name"] == name), None)
+
+
+def _visible_tools(spec: dict[str, Any], scope: str, settings: Settings) -> list[dict[str, Any]]:
+    show_write = scope == "write" and bool(getattr(settings, "write_active", False))
+    return [tool for tool in spec["tools"] if show_write or not is_write_tool(tool)]
+
+
 async def _call_tool(
-    spec: dict[str, Any], request_id: Any, params: dict[str, Any], settings: Settings
+    spec: dict[str, Any],
+    request_id: Any,
+    params: dict[str, Any],
+    settings: Settings,
+    scope: str = "read",
 ) -> dict[str, Any]:
     name = params.get("name")
-    if not any(tool["name"] == name for tool in spec["tools"]):
+    tool = _find_tool(spec, name)
+    if tool is None:
         return jsonrpc_error(request_id, -32601, f"unknown tool: {name}")
+    if is_write_tool(tool):
+        if scope != "write":
+            return tool_result(
+                request_id,
+                failure("FORBIDDEN_SCOPE", f"{name} is a write tool; connect with the write API key"),
+            )
+        if not getattr(settings, "write_active", False):
+            return tool_result(
+                request_id,
+                failure("WRITE_DISABLED", "write tools are disabled on this server"),
+            )
     arguments = params.get("arguments") or {}
     if not isinstance(arguments, dict):
         return tool_result(
@@ -148,10 +181,11 @@ def _check_service_auth(
     spec: dict[str, Any],
     authorization: Optional[str],
     settings: Settings,
-) -> None:
-    check_auth(
+) -> str:
+    return check_auth_scope(
         authorization=authorization,
-        api_key=str(getattr(settings, spec["api_key_attr"])),
+        read_key=str(getattr(settings, spec["api_key_attr"])),
+        write_key=str(getattr(settings, spec.get("write_api_key_attr", ""), "") or ""),
         service_name=spec["name"],
     )
 

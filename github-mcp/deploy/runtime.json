@@ -2,7 +2,11 @@
   "environment": {
     "GITHUB_MCP_HOST": "127.0.0.1",
     "GITHUB_MCP_PORT": "8111",
-    "GITHUB_MCP_TIMEOUT_SECONDS": "30"
+    "GITHUB_MCP_TIMEOUT_SECONDS": "30",
+    "GITHUB_MCP_WRITE_ENABLED": "false",
+    "GITHUB_MCP_WRITE_OWNERS": "david-yang-pixel",
+    "GITHUB_MCP_UPSTREAM_REPOS": "Stardm0/MoonTV",
+    "GITHUB_MCP_WRITE_RATE_PER_HOUR": "30"
   },
   "secrets": {
     "GITHUB_MCP_API_KEY": {
@@ -12,6 +16,14 @@
     "GITHUB_MCP_GITHUB_TOKEN": {
       "name": "MCP_GITHUB_MCP__GITHUB_MCP_GITHUB_TOKEN",
       "required": true
+    },
+    "GITHUB_MCP_WRITE_API_KEY": {
+      "name": "MCP_GITHUB_MCP__GITHUB_MCP_WRITE_API_KEY",
+      "required": false
+    },
+    "GITHUB_MCP_GITHUB_WRITE_TOKEN": {
+      "name": "MCP_GITHUB_MCP__GITHUB_MCP_GITHUB_WRITE_TOKEN",
+      "required": false
     }
   },
   "secret_files": {}

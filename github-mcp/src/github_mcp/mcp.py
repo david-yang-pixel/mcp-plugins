@@ -32,8 +32,21 @@ AUDIT_VALUE_KEYS = frozenset(
         "raw",
         "include_patch",
         "include_comments",
+        # write tools
+        "branch",
+        "from_ref",
+        "name",
+        "org",
+        "organization",
+        "private",
+        "draft",
+        "auto_init",
+        "default_branch_only",
+        "expected_head_sha",
     }
 )
+# Write results worth keeping in the audit line (never bodies or file contents).
+AUDIT_RESULT_KEYS = ("html_url", "sha", "number", "full_name", "id")
 _AUDIT_MAX_KEYS = 32
 _AUDIT_MAX_KEY_CHARS = 64
 _AUDIT_MAX_VALUE_CHARS = 200
@@ -52,6 +65,29 @@ def check_auth(
         )
     if authorization != f"Bearer {api_key}":
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def check_auth_scope(
+    *,
+    authorization: Optional[str],
+    read_key: str,
+    write_key: str,
+    service_name: str,
+) -> str:
+    """Return "write" for the write key, "read" for the read key, else raise 401.
+
+    An empty write key, or one equal to the read key, never grants write scope.
+    """
+    if not read_key:
+        raise HTTPException(
+            status_code=503,
+            detail=f"{service_name} API key is not configured",
+        )
+    if write_key and write_key != read_key and authorization == f"Bearer {write_key}":
+        return "write"
+    if authorization == f"Bearer {read_key}":
+        return "read"
+    raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 def auth_header(authorization: Optional[str] = Header(default=None)) -> Optional[str]:
@@ -93,25 +129,43 @@ def initialize_result(request_id: Any, *, service_name: str) -> dict[str, Any]:
     }
 
 
-# Every tool only reads external systems. Clients such as OpenConnector derive
-# read/write from these hints; without them unfamiliar tool names are treated as writes.
+# Clients such as OpenConnector derive read/write from these hints; without them
+# unfamiliar tool names are treated as writes. Read tools are annotated read-only;
+# tools marked with the internal ``"write": True`` flag get write annotations so the
+# client asks for explicit confirmation before running them.
 READ_ONLY_ANNOTATIONS: dict[str, Any] = {
     "readOnlyHint": True,
     "destructiveHint": False,
     "idempotentHint": True,
     "openWorldHint": True,
 }
+WRITE_ANNOTATIONS: dict[str, Any] = {
+    "readOnlyHint": False,
+    "destructiveHint": False,
+    "idempotentHint": False,
+    "openWorldHint": True,
+}
 
 
-def with_read_only_annotations(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {**tool, "annotations": {**READ_ONLY_ANNOTATIONS, **(tool.get("annotations") or {})}}
-        for tool in tools
-    ]
+def is_write_tool(tool: dict[str, Any]) -> bool:
+    return bool(tool.get("write"))
+
+
+def with_annotations(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = []
+    for tool in tools:
+        base = WRITE_ANNOTATIONS if is_write_tool(tool) else READ_ONLY_ANNOTATIONS
+        public = {k: v for k, v in tool.items() if k != "write"}
+        out.append({**public, "annotations": {**base, **(tool.get("annotations") or {})}})
+    return out
+
+
+# Kept for callers that only ever pass read tools.
+with_read_only_annotations = with_annotations
 
 
 def tools_list_result(request_id: Any, tools: list[dict[str, Any]]) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": with_read_only_annotations(tools)}}
+    return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": with_annotations(tools)}}
 
 
 def success(data: Any = None, *, output: str = "") -> dict[str, Any]:
@@ -196,7 +250,22 @@ def _audit_args(arguments: Any) -> dict[str, Any]:
             values[key] = value[:_AUDIT_MAX_VALUE_CHARS]
         elif isinstance(value, (bool, int, float)) or value is None:
             values[key] = value
+    # Counts only: file paths and contents of a commit are never logged.
+    for key in ("files", "delete_paths", "labels", "assignees"):
+        if isinstance(arguments.get(key), list):
+            values[f"{key}_count"] = len(arguments[key])
     return {"keys": keys, "values": values}
+
+
+def _audit_result(response: Any) -> Optional[dict[str, Any]]:
+    if not isinstance(response, dict):
+        return None
+    payload = (response.get("result") or {}).get("structuredContent") or {}
+    data = payload.get("data")
+    if not payload.get("success") or not isinstance(data, dict):
+        return None
+    picked = {k: data[k] for k in AUDIT_RESULT_KEYS if isinstance(data.get(k), (str, int))}
+    return picked or None
 
 
 def _audit_outcome(response: Any) -> tuple[str, Optional[str], int]:
@@ -218,24 +287,32 @@ def _audit_outcome(response: Any) -> tuple[str, Optional[str], int]:
     return "failed", str(code) if code else "UNKNOWN_ERROR", len(text)
 
 
-def audit_tool_call(*, tool: Any, arguments: Any, started: float, response: Any) -> None:
+def audit_tool_call(
+    *,
+    tool: Any,
+    arguments: Any,
+    started: float,
+    response: Any,
+    write: bool = False,
+    scope: Optional[str] = None,
+) -> None:
     """Emit one JSON line per tools/call. Never raises: logging must not break a call."""
     try:
         outcome, error, response_chars = _audit_outcome(response)
-        audit.info(
-            json.dumps(
-                {
-                    "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "tool": str(tool)[:100] if tool is not None else None,
-                    "duration_ms": int((time.monotonic() - started) * 1000),
-                    "outcome": outcome,
-                    "error": error,
-                    "response_chars": response_chars,
-                    "args": _audit_args(arguments),
-                },
-                ensure_ascii=False,
-            )
-        )
+        record: dict[str, Any] = {
+            "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "tool": str(tool)[:100] if tool is not None else None,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "outcome": outcome,
+            "error": error,
+            "response_chars": response_chars,
+            "args": _audit_args(arguments),
+        }
+        if write:
+            record["write"] = True
+            record["scope"] = scope
+            record["result"] = _audit_result(response)
+        audit.info(json.dumps(record, ensure_ascii=False))
     except Exception:  # noqa: BLE001
         pass
 
