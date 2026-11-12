@@ -7,7 +7,9 @@ Every write goes through the same gates, in this order, before any HTTP request:
 2. Argument validation.
 3. Repository allowlists: code (repos, branches, commits, fork targets) only ever
    lands under ``GITHUB_MCP_WRITE_OWNERS``; issues, PRs and comments may also target
-   repos listed in ``GITHUB_MCP_UPSTREAM_REPOS``.
+   repos listed in ``GITHUB_MCP_UPSTREAM_REPOS``. With ``GITHUB_MCP_PR_FROM_OWN_FORK``
+   on, a PR (only a PR) may target any repository when its head is ``owner:branch``
+   and that owner is in ``GITHUB_MCP_WRITE_OWNERS``.
 4. A per-process hourly write budget (``GITHUB_MCP_WRITE_RATE_PER_HOUR``).
 
 Requests use the write token only and never fall back to the read token. No tool
@@ -178,14 +180,24 @@ TOOLS: list[dict[str, Any]] = [
             "Open a pull request. repo is the target (base) repository; head is a branch "
             "in it, or owner:branch for a branch in a fork. base defaults to the target's "
             "default branch. The target must be your own (GITHUB_MCP_WRITE_OWNERS) or listed "
-            "in GITHUB_MCP_UPSTREAM_REPOS."
+            "in GITHUB_MCP_UPSTREAM_REPOS. Exception, only when the server sets "
+            "GITHUB_MCP_PR_FROM_OWN_FORK=true: the target may be any repository if head is "
+            "owner:branch and that owner is in GITHUB_MCP_WRITE_OWNERS (a PR from your own "
+            "fork). A head without an owner prefix always needs an own or listed target; "
+            "otherwise the call fails with REPO_NOT_ALLOWED."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "repo": _REPO,
                 "title": {"type": "string"},
-                "head": {"type": "string", "description": "branch, or owner:branch for a fork."},
+                "head": {
+                    "type": "string",
+                    "description": (
+                        "branch, or owner:branch for a fork. Use owner:branch (your own "
+                        "account as owner) to open a PR against a repository that is not listed."
+                    ),
+                },
                 "base": {"type": "string"},
                 "body": _BODY,
                 "draft": {"type": "boolean", "default": False},
@@ -268,6 +280,31 @@ def _check_interact(settings: Any, repo: str) -> None:
         "REPO_NOT_ALLOWED",
         f"{repo} is not in GITHUB_MCP_WRITE_OWNERS or GITHUB_MCP_UPSTREAM_REPOS",
     )
+
+
+def _check_pr(settings: Any, repo: str, head_owner: str) -> None:
+    """PRs: like ``_check_interact``, plus (opt-in) any target from an own fork.
+
+    The exception needs an explicit ``owner:branch`` head whose owner is in
+    ``GITHUB_MCP_WRITE_OWNERS``. A bare branch name means the branch lives in the
+    target repository, so it never qualifies.
+    """
+    if (
+        getattr(settings, "github_pr_from_own_fork", False) is True
+        and head_owner
+        and head_owner.lower() in _write_owners(settings)
+    ):
+        return
+    try:
+        _check_interact(settings, repo)
+    except WriteDenied as denied:
+        if getattr(settings, "github_pr_from_own_fork", False) is not True:
+            raise
+        raise WriteDenied(
+            denied.code,
+            f"{denied}; with GITHUB_MCP_PR_FROM_OWN_FORK a PR may also target it when head is "
+            "owner:branch and that owner is in GITHUB_MCP_WRITE_OWNERS",
+        ) from None
 
 
 _WRITE_TIMES: deque[float] = deque()
@@ -618,8 +655,8 @@ async def _create_pr(arguments: dict[str, Any], settings: Any) -> dict[str, Any]
     repo = _repo(required_str(arguments, "repo"))
     title = _text(arguments, "title", required=True, limit=MAX_TITLE_CHARS)
     head = required_str(arguments, "head")
-    head_owner, _, head_branch = head.rpartition(":")
-    if head_owner:
+    head_owner, colon, head_branch = head.rpartition(":")
+    if colon:
         _name(head_owner, "head owner")
     _branch(head_branch, "head")
     base = optional_str(arguments, "base")
@@ -628,7 +665,7 @@ async def _create_pr(arguments: dict[str, Any], settings: Any) -> dict[str, Any]
     body = _text(arguments, "body", required=False, limit=MAX_BODY_CHARS)
     draft = optional_bool(arguments, "draft", False)
     maintainer_can_modify = optional_bool(arguments, "maintainer_can_modify", True)
-    _check_interact(settings, repo)
+    _check_pr(settings, repo, head_owner)
     _take_rate_slot(settings)
 
     if not base:

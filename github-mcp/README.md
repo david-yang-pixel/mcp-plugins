@@ -71,6 +71,7 @@
 3. **仓库白名单**：
    - `GITHUB_MCP_WRITE_OWNERS`（逗号分隔，默认 `david-yang-pixel`）：只有这些账号或组织下才能建仓库、建分支、提交；fork 的目标账号也必须在这里。代码不会直接推到别人的仓库。
    - `GITHUB_MCP_UPSTREAM_REPOS`（逗号分隔，支持 `owner/*`）：除自己名下的仓库外，只有这些仓库允许开 issue、开 PR、发评论。
+   - `GITHUB_MCP_PR_FROM_OWN_FORK`（布尔，默认 `false`）：设为 `true` 后，`github_create_pr` 的目标仓库可以是任意仓库，前提是 `head` 写成 `owner:branch` 且该 `owner` 在 `GITHUB_MCP_WRITE_OWNERS` 里（即 PR 的来源分支在自己账号的 fork 中）。`head` 不带 `owner:` 前缀时仍按上面两条判断。只放开开 PR；开 issue、发评论以及建分支、提交、fork 的规则不变。
    - 不在名单内返回 `REPO_NOT_ALLOWED`。fork 未指定组织时会先请求 `GET /user` 确认写 token 的账号，再做白名单检查。
 4. **频率限制**：每个进程每小时最多 `GITHUB_MCP_WRITE_RATE_PER_HOUR` 次写操作（默认 30），超出返回 `RATE_LIMITED`。
 
