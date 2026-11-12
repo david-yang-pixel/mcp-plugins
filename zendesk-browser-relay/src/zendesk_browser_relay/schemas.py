@@ -84,6 +84,7 @@ class SendRequest(BaseModel):
         "security",
         "privacy",
     ] = "none"
+    append_footer: bool = True
 
     @model_validator(mode="before")
     @classmethod
@@ -119,10 +120,13 @@ class SendRequest(BaseModel):
         data["handoff_type"] = marker_type
         return data
 
-    @field_validator("body")
-    @classmethod
-    def normalize_customer_reply(cls, value: str) -> str:
-        return format_customer_reply(value)
+    @model_validator(mode="after")
+    def normalize_customer_reply(self) -> "SendRequest":
+        body = format_customer_reply(self.body, append_footer=self.append_footer)
+        if not body:
+            raise ValueError("body is empty after normalization")
+        self.body = body
+        return self
 
     @model_validator(mode="after")
     def require_snapshot_for_coordinated_delivery(self) -> "SendRequest":

@@ -89,3 +89,62 @@ def test_send_request_validation_does_not_duplicate_footer(body: str) -> None:
     second = SendRequest(ticket_id=1, body=first.body)
     assert first.body == second.body
     assert first.body.count('Dify AI Agent') == 1
+
+
+@pytest.mark.parametrize(
+    ('body', 'footer'),
+    [('Hello!', NEW_YORK_FOOTER), ('您好！已核对您的工作空间。', ZH_FOOTER),
+     ('こんにちは。お問い合わせありがとうございます。', JA_FOOTER)],
+)
+@pytest.mark.parametrize('extra', [{}, {'append_footer': True}])
+def test_send_request_appends_footer_by_default_and_when_true(
+    body: str, footer: str, extra: dict
+) -> None:
+    from zendesk_browser_relay.schemas import SendRequest
+
+    request = SendRequest(ticket_id=1, body=body, **extra)
+    assert request.append_footer is True
+    assert request.body == format_customer_reply(body) == f'{body}\n\n{footer}'
+
+
+@pytest.mark.parametrize('body', ['Hello!', '您好！已核对您的工作空间。', 'こんにちは'])
+def test_send_request_without_footer(body: str) -> None:
+    from zendesk_browser_relay.schemas import SendRequest
+
+    request = SendRequest(ticket_id=1, body=body, append_footer=False)
+    assert request.body == body
+    assert 'Dify AI Agent' not in request.body
+
+
+@pytest.mark.parametrize('footer', [NEW_YORK_FOOTER, ZH_FOOTER, JA_FOOTER])
+def test_send_request_without_footer_strips_existing_footer(footer: str) -> None:
+    from zendesk_browser_relay.schemas import SendRequest
+
+    incoming = 'Transferred to human support.\\nThey will reply soon.\n\n---\n' + footer
+    request = SendRequest(ticket_id=1, body=incoming, append_footer=False)
+    assert request.body == 'Transferred to human support.\n\nThey will reply soon.'
+    assert format_customer_reply(incoming, append_footer=False) == request.body
+
+
+def test_send_request_without_footer_rejects_footer_only_body() -> None:
+    from pydantic import ValidationError
+
+    from zendesk_browser_relay.schemas import SendRequest
+
+    with pytest.raises(ValidationError):
+        SendRequest(ticket_id=1, body=NEW_YORK_FOOTER, append_footer=False)
+
+
+def test_send_request_without_footer_keeps_handoff_marker_extraction() -> None:
+    from zendesk_browser_relay.schemas import SendRequest
+
+    request = SendRequest(
+        ticket_id=1,
+        body='[[DIFY_HANDOFF:billing]]\nTransferred to billing.',
+        run_token='t' * 16,
+        snapshot_customer_message_count=1,
+        snapshot_customer_last_message_id='m1',
+        append_footer=False,
+    )
+    assert request.handoff_type == 'billing'
+    assert request.body == 'Transferred to billing.'
