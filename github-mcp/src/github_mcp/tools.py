@@ -7,6 +7,7 @@ from urllib.parse import quote
 import httpx
 
 from . import shaping
+from . import write as write_tools
 from .mcp import (
     failure,
     optional_bool,
@@ -305,7 +306,32 @@ TOOLS = [
             "required": ["query"],
         },
     },
+    {
+        "name": "github_get_file",
+        "description": (
+            "Read one file (or list one directory) from a repository at a branch, tag or SHA "
+            "(default: the default branch). Text is returned decoded and truncated to "
+            "max_chars; use sha with github_commit_files' expected_head_sha workflow."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO_SCHEMA,
+                "path": {"type": "string", "description": "Repository-relative path; empty for the root."},
+                "ref": {"type": "string", "description": "Branch, tag or commit SHA."},
+                "max_chars": {
+                    "type": "integer",
+                    "default": 20000,
+                    "description": "Truncate decoded text to this many characters.",
+                },
+            },
+            "required": ["repo"],
+        },
+    },
 ]
+
+TOOLS = TOOLS + write_tools.TOOLS
+WRITE_TOOL_NAMES = write_tools.TOOL_NAMES
 
 
 class _Output:
@@ -338,8 +364,12 @@ async def handle(name: str, arguments: dict[str, Any], settings: Settings) -> di
     handler = _HANDLERS.get(name)
     if handler is None:
         return failure("UNKNOWN_TOOL", f"unknown tool: {name}")
+    if name in WRITE_TOOL_NAMES and not getattr(settings, "write_active", False):
+        return failure("WRITE_DISABLED", "write tools are disabled on this server")
     try:
         return await handler(arguments, settings)
+    except write_tools.WriteDenied as e:
+        return failure(e.code, str(e))
     except ValueError as e:
         return failure("BAD_ARGUMENT", str(e))
     except httpx.HTTPStatusError as e:
@@ -700,6 +730,53 @@ async def _search_error_repo_access(
     return payload
 
 
+async def _get_file(arguments: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    repo = _repo(required_str(arguments, "repo"))
+    path = optional_str(arguments, "path").strip("/")
+    if path and (".." in path.split("/") or any(c in path for c in "\0\r\n")):
+        raise ValueError("path must be a repository-relative path")
+    ref = optional_str(arguments, "ref")
+    if ref:
+        _git_ref(ref, "ref")
+    max_chars = optional_int(arguments, "max_chars", 20000, minimum=1, maximum=200_000)
+    params = {"ref": ref} if ref else None
+    resp = await _get(settings, f"/repos/{repo}/contents/{quote(path)}", params=params)
+    data = resp.json()
+    if isinstance(data, list):
+        entries = [
+            {"name": e.get("name"), "path": e.get("path"), "type": e.get("type"), "size": e.get("size"), "sha": e.get("sha")}
+            for e in data
+            if isinstance(e, dict)
+        ]
+        return success({"type": "dir", "path": path, "ref": ref or None, "entries": entries})
+    if not isinstance(data, dict):
+        raise RuntimeError("GitHub returned unexpected JSON")
+    result: dict[str, Any] = {
+        "type": data.get("type"),
+        "path": data.get("path"),
+        "ref": ref or None,
+        "sha": data.get("sha"),
+        "size": data.get("size"),
+        "html_url": data.get("html_url"),
+    }
+    if data.get("type") == "file" and data.get("encoding") == "base64":
+        import base64
+
+        raw = base64.b64decode(data.get("content") or "")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            result["binary"] = True
+            return success(result)
+        result["content"] = text[:max_chars]
+        if len(text) > max_chars:
+            result["content_truncated"] = True
+            result["content_chars"] = len(text)
+    elif data.get("type") == "file":
+        result["note"] = "File too large for the contents API (over 1 MB); content not returned."
+    return success(result)
+
+
 def _rate_limited(response: httpx.Response) -> bool:
     """GitHub signals primary and secondary rate limits on 403 with these headers."""
     return response.headers.get("x-ratelimit-remaining") == "0" or "retry-after" in response.headers
@@ -881,4 +958,6 @@ _HANDLERS: dict[str, Callable[[dict[str, Any], Settings], Awaitable[dict[str, An
     "github_list_releases": _list_releases,
     "github_get_release": _get_release,
     "github_code_search": _code_search,
+    "github_get_file": _get_file,
+    **write_tools.HANDLERS,
 }

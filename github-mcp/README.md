@@ -17,6 +17,21 @@
 | `github_list_releases` | Release 列表（新到旧） | `repo`、`page`、`per_page`（默认 10）、`max_body_chars`（默认 1000） |
 | `github_get_release` | 按 tag 读取 release；省略 `tag` 时读取最新正式版 | `repo`、`tag`、`max_body_chars` |
 | `github_code_search` | GitHub 代码搜索（仅默认分支） | `query`、`repo`、`scope`（默认 `langgenius`）、`path`、`language`、`visibility`、`limit`（≤30） |
+| `github_get_file` | 读取单个文件（解码文本）或列出目录 | `repo`、`path`、`ref`、`max_chars`（默认 20000） |
+
+### 写工具（默认关闭）
+
+只有用写密钥 `GITHUB_MCP_WRITE_API_KEY` 连接、且 `write_active` 为真时，以下工具才会出现在 `tools/list` 中并可调用。详见下文“写操作与安全”。
+
+| 工具 | 用途 | 主要参数 |
+| --- | --- | --- |
+| `github_fork_repo` | fork 仓库到自己账号或允许的组织（异步，返回 `ready: false`） | `repo`、`organization`、`name`、`default_branch_only` |
+| `github_create_repo` | 新建仓库 | `name`、`org`、`description`、`private`（默认 false）、`auto_init` |
+| `github_create_branch` | 从分支、tag 或 SHA 建分支（默认默认分支） | `repo`、`branch`、`from_ref` |
+| `github_commit_files` | 一次原子提交多个文件的新增、修改、删除；从不强推 | `repo`、`branch`、`message`、`files[{path, content, encoding, executable}]`、`delete_paths`、`expected_head_sha` |
+| `github_create_pr` | 开 PR；`head` 可写 `owner:branch` 从 fork 提交 | `repo`、`title`、`head`、`base`、`body`、`draft`、`maintainer_can_modify` |
+| `github_create_issue` | 开 issue | `repo`、`title`、`body`、`labels`、`assignees` |
+| `github_add_comment` | 在 issue 或 PR 会话下评论 | `repo`、`issue_number`、`body` |
 
 ### 返回格式
 
@@ -47,6 +62,24 @@
 
 限定仓库的搜索（PR/issue 搜索，或代码搜索带 `repo`/`owner/repo` 形式的 `scope`）在目标仓库不存在或 token 无权访问时，GitHub 返回 HTTP 422 而不是 0 条结果。此时服务同样探测 `GET /repos/{owner}/{repo}`：确认不可访问（`accessible: false`）时返回 `success: false`、`code: "REPO_NOT_ACCESSIBLE"`，并附带上述 `repo_access`；仓库可访问（如查询语法错误）或探测结果不确定时，保留原始 `GITHUB_API_ERROR` 错误。
 
+## 写操作与安全
+
+写操作在发出任何 GitHub 请求前依次经过以下检查：
+
+1. **写密钥**：用 `GITHUB_MCP_API_KEY` 连接时只能看到和调用只读工具，调用写工具返回 `FORBIDDEN_SCOPE`；用 `GITHUB_MCP_WRITE_API_KEY` 连接才看得到写工具。写密钥为空或与只读密钥相同时，永远不会授予写权限。
+2. **总开关**：`GITHUB_MCP_WRITE_ENABLED=true`，且写密钥、写 token 都已配置，否则写工具不出现，调用返回 `WRITE_DISABLED`。
+3. **仓库白名单**：
+   - `GITHUB_MCP_WRITE_OWNERS`（逗号分隔，默认 `david-yang-pixel`）：只有这些账号或组织下才能建仓库、建分支、提交；fork 的目标账号也必须在这里。代码不会直接推到别人的仓库。
+   - `GITHUB_MCP_UPSTREAM_REPOS`（逗号分隔，支持 `owner/*`）：除自己名下的仓库外，只有这些仓库允许开 issue、开 PR、发评论。
+   - 不在名单内返回 `REPO_NOT_ALLOWED`。fork 未指定组织时会先请求 `GET /user` 确认写 token 的账号，再做白名单检查。
+4. **频率限制**：每个进程每小时最多 `GITHUB_MCP_WRITE_RATE_PER_HOUR` 次写操作（默认 30），超出返回 `RATE_LIMITED`。
+
+写请求只使用 `GITHUB_MCP_GITHUB_WRITE_TOKEN`，不会回退到只读 token；只读工具也不会使用写 token。没有删除仓库、删除分支或强推的工具，`github_commit_files` 固定 `force: false`，分支移动时返回 `HEAD_MOVED` 且不覆盖任何内容。
+
+写 token 建议使用只勾选 `public_repo` 的经典 PAT（classic）：只有经典 token 能写不属于自己的公开仓库（给上游提 issue、PR、评论）。只在确实需要写私有仓库时才用 `repo`。
+
+其他错误码：`REPO_EXISTS`、`BRANCH_EXISTS`、`BRANCH_NOT_FOUND`、`REF_NOT_FOUND`、`EMPTY_REPOSITORY`、`PR_INVALID`。
+
 ## 审计日志
 
 每次 `tools/call` 向 stdout 输出一行 JSON（logger `github_mcp.audit`，入口 `main_github()` 将 INFO 日志配置到 stdout）：
@@ -57,6 +90,7 @@
 
 - `outcome` 为 `success`/`failed`，`error` 为错误码（成功时为 `null`），`response_chars` 为返回文本长度。
 - `args.keys` 只记录参数名；`args.values` 只记录非敏感参数（如 `repo`、`scope`、`pr_number`、`issue_number`、`page`、`limit`）。搜索词 `query`、`path`、`fields` 等只记录键名，不记录值；返回内容不写入日志。
+- 写工具的日志额外带 `write: true`、`scope` 和 `result`（只含 `html_url`、`sha`、`number`、`full_name`、`id`）；`files`、`delete_paths`、`labels`、`assignees` 只记录数量（`*_count`）。`title`、`body`、`message`、文件路径与内容不写入日志。
 - 写日志失败不会影响工具调用。
 
 ## 开发和测试
@@ -71,7 +105,7 @@ uv run --locked github-mcp
 
 使用 Python 3.12。单元测试用 `httpx.MockTransport` 模拟 GitHub API，不需要网络或真实凭据。
 
-所有工具都在 `tools/list` 中声明 `annotations.readOnlyHint: true`、`destructiveHint: false`。OpenConnector 等客户端据此判断读写，未声明时新工具会被当作 write 并要求确认。
+只读工具在 `tools/list` 中声明 `annotations.readOnlyHint: true`、`destructiveHint: false`；写工具声明 `readOnlyHint: false`，`github_commit_files` 另声明 `destructiveHint: true`。OpenConnector 等客户端据此判断读写，写工具需要显式确认后才执行。
 
 ## 构建
 

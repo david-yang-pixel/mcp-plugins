@@ -40,6 +40,7 @@ def test_github_mcp_exposes_only_github_tools(monkeypatch) -> None:
         "github_list_issue_comments",
         "github_list_releases",
         "github_get_release",
+        "github_get_file",
     }
 
 
@@ -99,7 +100,7 @@ def test_every_github_tool_is_annotated_read_only(monkeypatch) -> None:
     )
 
     tools = response.json()["result"]["tools"]
-    assert len(tools) == 11
+    assert len(tools) == 12
     for tool in tools:
         assert tool["annotations"]["readOnlyHint"] is True, tool["name"]
         assert tool["annotations"]["destructiveHint"] is False, tool["name"]
