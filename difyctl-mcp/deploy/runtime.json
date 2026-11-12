@@ -18,11 +18,12 @@
     "MCP_PUBLIC_URL": "https://zendesk.smlershou.top/difyctl-mcp",
     "MCP_ALLOWED_REDIRECT_URIS": "https://claude.ai/api/mcp/auth_callback https://claude.com/api/mcp/auth_callback http://localhost/callback http://127.0.0.1/callback",
     "DIFY_SERVER": "https://cloud.dify.ai",
-    "DIFYCTL_MAX_EFFECT": "write",
+    "DIFYCTL_MAX_EFFECT": "destructive",
     "DIFYCTL_TIMEOUT_SECONDS": "90",
     "DIFYCTL_MAX_TIMEOUT_SECONDS": "600",
     "DIFYCTL_MAX_OUTPUT_CHARS": "100000",
-    "DIFYCTL_MCP_SERVICE_SCOPE": "write"
+    "DIFYCTL_MCP_SERVICE_SCOPE": "destructive",
+    "DIFYCTL_ALLOW_INCLUDE_SECRET": "true"
   },
   "smoke_environment": {
     "DIFYCTL_MCP_HOST": "0.0.0.0",
