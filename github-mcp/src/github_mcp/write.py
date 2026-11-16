@@ -1,4 +1,4 @@
-"""Write tools: fork, create repository, create branch, commit, open PR/issue, comment.
+"""Write tools: fork, create repository, create/delete branch, commit, open PR/issue, comment.
 
 Every write goes through the same gates, in this order, before any HTTP request:
 
@@ -13,7 +13,9 @@ Every write goes through the same gates, in this order, before any HTTP request:
 4. A per-process hourly write budget (``GITHUB_MCP_WRITE_RATE_PER_HOUR``).
 
 Requests use the write token only and never fall back to the read token. No tool
-deletes repositories or branches, and commits never force-push.
+deletes repositories, and commits never force-push. ``github_delete_branch`` is the
+only deletion: own repositories only, never the default branch, and by default only
+a branch whose current head was merged through a pull request.
 """
 from __future__ import annotations
 
@@ -53,6 +55,7 @@ MAX_BODY_CHARS = 65_536
 MAX_TITLE_CHARS = 256
 MAX_MESSAGE_CHARS = 10_000
 MAX_LIST_ITEMS = 20
+PULLS_PAGE_SIZE = 100
 
 
 class WriteDenied(Exception):
@@ -133,6 +136,39 @@ TOOLS: list[dict[str, Any]] = [
             },
             "required": ["repo", "branch"],
         },
+    },
+    {
+        "name": "github_delete_branch",
+        "write": True,
+        "description": (
+            "Delete a branch, e.g. to clean up a fork after its pull request was merged. The "
+            "repository owner must be in GITHUB_MCP_WRITE_OWNERS and the default branch can "
+            "never be deleted. Unless force=true, the branch's current head must have been "
+            "merged through a pull request (in this repository or in the repository it was "
+            "forked from) and must have no open pull request; otherwise it fails with "
+            "BRANCH_NOT_MERGED or BRANCH_HAS_OPEN_PR and nothing is deleted. force=true "
+            "deletes an unmerged branch (closing its open pull requests): use it only when "
+            "the user explicitly asked to discard that work. The result includes deleted_sha, "
+            "which github_create_branch can restore from while GitHub still keeps the commit."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "branch": {"type": "string", "description": "Branch to delete."},
+                "force": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Delete even if the branch was not merged or has an open pull request.",
+                },
+                "expected_head_sha": {
+                    "type": "string",
+                    "description": "Optional: only delete if the branch is still at this SHA.",
+                },
+            },
+            "required": ["repo", "branch"],
+        },
+        "annotations": {"destructiveHint": True},
     },
     {
         "name": "github_commit_files",
@@ -536,6 +572,121 @@ async def _create_branch(arguments: dict[str, Any], settings: Any) -> dict[str, 
     )
 
 
+class _TooManyPulls(Exception):
+    """The PR list for a branch did not fit in one page, so it cannot be trusted."""
+
+
+async def _merged_pull(settings: Any, repo: str, info: dict[str, Any], branch: str, head_sha: str) -> tuple[str | None, str | None]:
+    """Look for pull requests from ``repo``'s ``branch``.
+
+    Returns ``(merged_url, open_url)``: a PR that merged exactly ``head_sha`` and a
+    still-open PR, each None when absent. PRs live in the base repository, so a
+    fork's parent and source are searched as well as the repository itself.
+    """
+    owner = repo.split("/", 1)[0]
+    targets = [repo]
+    for key in ("parent", "source"):
+        full_name = (info.get(key) or {}).get("full_name")
+        if (
+            isinstance(full_name, str)
+            and _REPO_RE.fullmatch(full_name)
+            and full_name.lower() not in [t.lower() for t in targets]
+        ):
+            targets.append(full_name)
+
+    merged_url: str | None = None
+    open_url: str | None = None
+    for target in targets:
+        pulls = await _send(
+            settings,
+            "GET",
+            f"/repos/{target}/pulls?state=all&head={owner}:{branch}&per_page={PULLS_PAGE_SIZE}",
+        )
+        if isinstance(pulls, list) and len(pulls) >= PULLS_PAGE_SIZE:
+            # Only one page is read; an open PR could be on a later one. Fail closed.
+            raise _TooManyPulls(target)
+        for pull in pulls if isinstance(pulls, list) else []:
+            head = pull.get("head") or {}
+            # ``head=owner:branch`` also matches the same branch name in the owner's other repos.
+            if str((head.get("repo") or {}).get("full_name", "")).lower() != repo.lower():
+                continue
+            if pull.get("state") == "open":
+                open_url = open_url or pull.get("html_url")
+            elif pull.get("merged_at") and head.get("sha") == head_sha:
+                merged_url = merged_url or pull.get("html_url")
+    return merged_url, open_url
+
+
+async def _delete_branch(arguments: dict[str, Any], settings: Any) -> dict[str, Any]:
+    repo = _repo(required_str(arguments, "repo"))
+    branch = _branch(required_str(arguments, "branch"))
+    force = optional_bool(arguments, "force", False)
+    expected = optional_str(arguments, "expected_head_sha")
+    if expected and not _SHA_RE.fullmatch(expected):
+        raise ValueError("expected_head_sha must be a 40-character commit SHA")
+    _check_owner(settings, repo.split("/", 1)[0])
+    _take_rate_slot(settings)
+
+    info = await _send(settings, "GET", f"/repos/{repo}")
+    default = info.get("default_branch") if isinstance(info, dict) else None
+    if not default:
+        raise RuntimeError(f"could not resolve the default branch of {repo}")
+    if branch == default:
+        return failure("DEFAULT_BRANCH", f"{branch} is the default branch of {repo} and is never deleted")
+
+    try:
+        ref = await _send(settings, "GET", f"/repos/{repo}/git/ref/heads/{branch}")
+    except httpx.HTTPStatusError as e:
+        if _status(e) in (404, 409):
+            return failure("BRANCH_NOT_FOUND", f"{branch} does not exist in {repo}")
+        raise
+    if not isinstance(ref, dict) or ref.get("ref") != f"refs/heads/{branch}":
+        return failure("BRANCH_NOT_FOUND", f"{branch} does not exist in {repo}")
+    head_sha = ref["object"]["sha"]
+    if expected and expected != head_sha:
+        return failure("HEAD_MOVED", f"{branch} is at {head_sha}, not {expected}; nothing was deleted")
+
+    merged_url: str | None = None
+    if not force:
+        try:
+            merged_url, open_url = await _merged_pull(settings, repo, info, branch, head_sha)
+        except _TooManyPulls as e:
+            return failure(
+                "TOO_MANY_PULLS",
+                f"{e} has {PULLS_PAGE_SIZE} or more pull requests from {branch}, too many to "
+                "check for open ones; nothing was deleted. Pass force=true only if the user "
+                "wants to delete it anyway",
+            )
+        if open_url:
+            return failure(
+                "BRANCH_HAS_OPEN_PR",
+                f"{branch} still has an open pull request ({open_url}); nothing was deleted",
+            )
+        if not merged_url:
+            return failure(
+                "BRANCH_NOT_MERGED",
+                f"no merged pull request contains the current head of {branch} ({head_sha}); "
+                "nothing was deleted. Pass force=true only if the user wants to discard it",
+            )
+
+    try:
+        await _send(settings, "DELETE", f"/repos/{repo}/git/refs/heads/{branch}")
+    except httpx.HTTPStatusError as e:
+        if _status(e) == 422:
+            return failure("DELETE_REJECTED", f"GitHub refused to delete {branch}: {e.response.text[:300]}")
+        raise
+    return success(
+        {
+            "repo": repo,
+            "branch": branch,
+            "deleted_sha": head_sha,
+            "merged_pr": merged_url,
+            "forced": force,
+            "note": "To restore, call github_create_branch with from_ref set to deleted_sha.",
+        }
+    )
+
+
 def _decode_files(arguments: dict[str, Any]) -> tuple[list[tuple[str, bytes, bool]], list[str]]:
     files = arguments.get("files") or []
     deletes = arguments.get("delete_paths") or []
@@ -733,6 +884,7 @@ HANDLERS: dict[str, Callable[[dict[str, Any], Any], Awaitable[dict[str, Any]]]] 
     "github_fork_repo": _fork_repo,
     "github_create_repo": _create_repo,
     "github_create_branch": _create_branch,
+    "github_delete_branch": _delete_branch,
     "github_commit_files": _commit_files,
     "github_create_pr": _create_pr,
     "github_create_issue": _create_issue,

@@ -454,6 +454,152 @@ def test_create_branch_from_default_and_exists(github) -> None:
     assert run("github_create_branch", {"repo": "david-yang-pixel/x", "branch": "b", "from_ref": "main"})["code"] == "BRANCH_EXISTS"
 
 
+# ------------------------------------------------------------ delete branch
+
+_FORK = "david-yang-pixel/MoonTV"
+_FORK_API = f"/repos/{_FORK}"
+_UPSTREAM_API = "/repos/Stardm0/MoonTV"
+
+
+def _pull(*, merged: bool, sha: str = HEAD, state: str = "closed", head_repo: str = _FORK, number: int = 42) -> dict:
+    return {
+        "number": number,
+        "state": state,
+        "merged_at": "2026-11-01T00:00:00Z" if merged else None,
+        "html_url": f"https://github.com/Stardm0/MoonTV/pull/{number}",
+        "head": {"sha": sha, "ref": "fix/x", "repo": {"full_name": head_repo}},
+    }
+
+
+def _delete_routes(*, upstream_pulls: list | None = None, own_pulls: list | None = None, delete_status: int = 204) -> dict:
+    return {
+        ("GET", _FORK_API): {"default_branch": "main", "fork": True, "parent": {"full_name": "Stardm0/MoonTV"}},
+        ("GET", f"{_FORK_API}/git/ref/heads/fix/x"): {"ref": "refs/heads/fix/x", "object": {"sha": HEAD}},
+        ("GET", f"{_FORK_API}/pulls"): own_pulls or [],
+        ("GET", f"{_UPSTREAM_API}/pulls"): upstream_pulls or [],
+        ("DELETE", f"{_FORK_API}/git/refs/heads/fix/x"): lambda r: httpx.Response(
+            delete_status, json={"message": "nope"} if delete_status != 204 else None
+        ),
+    }
+
+
+def _deleted(fake: FakeGitHub) -> bool:
+    return any(method == "DELETE" for method, _ in fake.calls())
+
+
+def test_delete_branch_merged_into_upstream(github) -> None:
+    fake = github(_delete_routes(upstream_pulls=[_pull(merged=True)]))
+    result = run("github_delete_branch", {"repo": _FORK, "branch": "fix/x"})
+    assert result["success"] is True, result
+    assert result["data"]["deleted_sha"] == HEAD and result["data"]["forced"] is False
+    assert result["data"]["merged_pr"] == "https://github.com/Stardm0/MoonTV/pull/42"
+    assert fake.calls()[-1] == ("DELETE", f"{_FORK_API}/git/refs/heads/fix/x")
+    # The PR lookup is scoped to this owner's branch.
+    lookup = next(r for r in fake.requests if r.url.path == f"{_UPSTREAM_API}/pulls")
+    assert lookup.url.params["head"] == "david-yang-pixel:fix/x" and lookup.url.params["state"] == "all"
+
+
+def test_delete_branch_merged_in_same_repo(github) -> None:
+    fake = github(_delete_routes(own_pulls=[_pull(merged=True)]))
+    assert run("github_delete_branch", {"repo": _FORK, "branch": "fix/x"})["success"] is True
+    assert _deleted(fake)
+
+
+@pytest.mark.parametrize(
+    "pulls,code",
+    [
+        ([], "BRANCH_NOT_MERGED"),  # never proposed
+        ([_pull(merged=False)], "BRANCH_NOT_MERGED"),  # closed without merging
+        ([_pull(merged=True, sha="b" * 40)], "BRANCH_NOT_MERGED"),  # commits added after the merge
+        ([_pull(merged=True, head_repo="david-yang-pixel/other")], "BRANCH_NOT_MERGED"),  # same branch name, other repo
+        ([_pull(merged=True), _pull(merged=False, state="open", number=43)], "BRANCH_HAS_OPEN_PR"),
+    ],
+)
+def test_delete_branch_refuses_unmerged_without_force(github, pulls, code) -> None:
+    fake = github(_delete_routes(upstream_pulls=pulls))
+    result = run("github_delete_branch", {"repo": _FORK, "branch": "fix/x"})
+    assert result["code"] == code, result
+    assert not _deleted(fake)
+
+
+def test_delete_branch_refuses_when_pull_list_may_be_incomplete(github) -> None:
+    # A full page: an open PR could be on a later page, so the merged one is not enough.
+    pulls = [_pull(merged=True)] + [_pull(merged=False, number=n) for n in range(100, 199)]
+    assert len(pulls) == write.PULLS_PAGE_SIZE
+    fake = github(_delete_routes(upstream_pulls=pulls))
+    result = run("github_delete_branch", {"repo": _FORK, "branch": "fix/x"})
+    assert result["code"] == "TOO_MANY_PULLS", result
+    assert not _deleted(fake)
+    fake = github(_delete_routes(upstream_pulls=pulls[:-1]))
+    assert run("github_delete_branch", {"repo": _FORK, "branch": "fix/x"})["success"] is True
+
+
+def test_delete_branch_force_skips_merge_check(github) -> None:
+    fake = github(_delete_routes())
+    result = run("github_delete_branch", {"repo": _FORK, "branch": "fix/x", "force": True})
+    assert result["success"] is True and result["data"]["forced"] is True, result
+    assert result["data"]["merged_pr"] is None
+    assert not any(path.endswith("/pulls") for _, path in fake.calls())
+    assert _deleted(fake)
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_delete_branch_never_deletes_default_branch(github, force) -> None:
+    fake = github({("GET", _FORK_API): {"default_branch": "main"}})
+    result = run("github_delete_branch", {"repo": _FORK, "branch": "main", "force": force})
+    assert result["code"] == "DEFAULT_BRANCH", result
+    assert not _deleted(fake)
+
+
+@pytest.mark.parametrize(
+    "repo",
+    ["Stardm0/MoonTV", "someorg/anything", "langgenius/dify"],  # upstream allowlist is not enough
+)
+def test_delete_branch_only_under_write_owners(github, repo) -> None:
+    fake = github({})
+    result = run(
+        "github_delete_branch",
+        {"repo": repo, "branch": "fix/x", "force": True},
+        settings(github_pr_from_own_fork=True),
+    )
+    assert result["code"] == "REPO_NOT_ALLOWED", result
+    assert fake.requests == []
+
+
+def test_delete_branch_expected_head_mismatch_and_missing_branch(github) -> None:
+    fake = github(_delete_routes(upstream_pulls=[_pull(merged=True)]))
+    args = {"repo": _FORK, "branch": "fix/x", "force": True}
+    assert run("github_delete_branch", {**args, "expected_head_sha": "b" * 40})["code"] == "HEAD_MOVED"
+    assert run("github_delete_branch", {**args, "expected_head_sha": "nope"})["code"] == "BAD_ARGUMENT"
+    assert run("github_delete_branch", {**args, "branch": "gone"})["code"] == "BRANCH_NOT_FOUND"
+    assert not _deleted(fake)
+
+
+def test_delete_branch_reports_github_refusal(github) -> None:
+    github(_delete_routes(delete_status=422))
+    result = run("github_delete_branch", {"repo": _FORK, "branch": "fix/x", "force": True})
+    assert result["code"] == "DELETE_REJECTED", result
+
+
+def test_delete_branch_rejects_bad_names_and_counts_against_rate_limit(github) -> None:
+    fake = github(_delete_routes())
+    assert run("github_delete_branch", {"repo": _FORK, "branch": "a..b", "force": True})["code"] == "BAD_ARGUMENT"
+    assert fake.requests == []
+    s = settings(github_write_rate_per_hour=1)
+    args = {"repo": _FORK, "branch": "fix/x", "force": True}
+    assert run("github_delete_branch", args, s)["success"] is True
+    assert run("github_delete_branch", args, s)["code"] == "RATE_LIMITED"
+
+
+def test_delete_branch_is_listed_as_destructive(app_client) -> None:
+    listed = {t["name"]: t for t in _rpc(app_client, WRITE_KEY, "tools/list").json()["result"]["tools"]}
+    assert listed["github_delete_branch"]["annotations"]["destructiveHint"] is True
+    assert listed["github_delete_branch"]["annotations"]["readOnlyHint"] is False
+    assert "github_delete_branch" not in {
+        t["name"] for t in _rpc(app_client, READ_KEY, "tools/list").json()["result"]["tools"]
+    }
+
+
 @pytest.mark.parametrize("branch", ["../x", "-x", "a..b", "x.lock", "a//b", "x/", "with space"])
 def test_create_branch_rejects_bad_names(github, branch) -> None:
     fake = github({})
