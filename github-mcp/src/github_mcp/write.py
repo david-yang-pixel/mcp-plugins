@@ -55,6 +55,7 @@ MAX_BODY_CHARS = 65_536
 MAX_TITLE_CHARS = 256
 MAX_MESSAGE_CHARS = 10_000
 MAX_LIST_ITEMS = 20
+PULLS_PAGE_SIZE = 100
 
 
 class WriteDenied(Exception):
@@ -571,6 +572,10 @@ async def _create_branch(arguments: dict[str, Any], settings: Any) -> dict[str, 
     )
 
 
+class _TooManyPulls(Exception):
+    """The PR list for a branch did not fit in one page, so it cannot be trusted."""
+
+
 async def _merged_pull(settings: Any, repo: str, info: dict[str, Any], branch: str, head_sha: str) -> tuple[str | None, str | None]:
     """Look for pull requests from ``repo``'s ``branch``.
 
@@ -593,8 +598,13 @@ async def _merged_pull(settings: Any, repo: str, info: dict[str, Any], branch: s
     open_url: str | None = None
     for target in targets:
         pulls = await _send(
-            settings, "GET", f"/repos/{target}/pulls?state=all&head={owner}:{branch}&per_page=100"
+            settings,
+            "GET",
+            f"/repos/{target}/pulls?state=all&head={owner}:{branch}&per_page={PULLS_PAGE_SIZE}",
         )
+        if isinstance(pulls, list) and len(pulls) >= PULLS_PAGE_SIZE:
+            # Only one page is read; an open PR could be on a later one. Fail closed.
+            raise _TooManyPulls(target)
         for pull in pulls if isinstance(pulls, list) else []:
             head = pull.get("head") or {}
             # ``head=owner:branch`` also matches the same branch name in the owner's other repos.
@@ -638,7 +648,15 @@ async def _delete_branch(arguments: dict[str, Any], settings: Any) -> dict[str, 
 
     merged_url: str | None = None
     if not force:
-        merged_url, open_url = await _merged_pull(settings, repo, info, branch, head_sha)
+        try:
+            merged_url, open_url = await _merged_pull(settings, repo, info, branch, head_sha)
+        except _TooManyPulls as e:
+            return failure(
+                "TOO_MANY_PULLS",
+                f"{e} has {PULLS_PAGE_SIZE} or more pull requests from {branch}, too many to "
+                "check for open ones; nothing was deleted. Pass force=true only if the user "
+                "wants to delete it anyway",
+            )
         if open_url:
             return failure(
                 "BRANCH_HAS_OPEN_PR",

@@ -522,6 +522,18 @@ def test_delete_branch_refuses_unmerged_without_force(github, pulls, code) -> No
     assert not _deleted(fake)
 
 
+def test_delete_branch_refuses_when_pull_list_may_be_incomplete(github) -> None:
+    # A full page: an open PR could be on a later page, so the merged one is not enough.
+    pulls = [_pull(merged=True)] + [_pull(merged=False, number=n) for n in range(100, 199)]
+    assert len(pulls) == write.PULLS_PAGE_SIZE
+    fake = github(_delete_routes(upstream_pulls=pulls))
+    result = run("github_delete_branch", {"repo": _FORK, "branch": "fix/x"})
+    assert result["code"] == "TOO_MANY_PULLS", result
+    assert not _deleted(fake)
+    fake = github(_delete_routes(upstream_pulls=pulls[:-1]))
+    assert run("github_delete_branch", {"repo": _FORK, "branch": "fix/x"})["success"] is True
+
+
 def test_delete_branch_force_skips_merge_check(github) -> None:
     fake = github(_delete_routes())
     result = run("github_delete_branch", {"repo": _FORK, "branch": "fix/x", "force": True})

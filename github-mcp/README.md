@@ -81,7 +81,7 @@
 唯一的删除操作是 `github_delete_branch`，限制如下：
 
 - 仓库 owner 必须在 `GITHUB_MCP_WRITE_OWNERS` 里（`GITHUB_MCP_UPSTREAM_REPOS` 和 `GITHUB_MCP_PR_FROM_OWN_FORK` 都不放开它）；默认分支永远不删，返回 `DEFAULT_BRANCH`。
-- 默认只删“已合并”的分支：在本仓库及其 fork 来源仓库里查找来自该分支的 PR，要求有一个已合并的 PR 且其 head SHA 等于分支当前 SHA，否则返回 `BRANCH_NOT_MERGED`；分支还有未关闭的 PR 时返回 `BRANCH_HAS_OPEN_PR`。
+- 默认只删“已合并”的分支：在本仓库及其 fork 来源仓库里查找来自该分支的 PR，要求有一个已合并的 PR 且其 head SHA 等于分支当前 SHA，否则返回 `BRANCH_NOT_MERGED`；分支还有未关闭的 PR 时返回 `BRANCH_HAS_OPEN_PR`。某个仓库里来自该分支的 PR 达到 100 条（一页读不完）时返回 `TOO_MANY_PULLS`，不删除。
 - `force: true` 跳过上面的合并检查，可删除未合并的分支（其未关闭的 PR 会被 GitHub 关闭）。
 - 可传 `expected_head_sha`，分支不在该 SHA 时返回 `HEAD_MOVED`；GitHub 拒绝删除（如受保护分支）时返回 `DELETE_REJECTED`。
 - 成功结果带 `deleted_sha`，在 GitHub 回收该提交前可用 `github_create_branch` 的 `from_ref` 恢复。
