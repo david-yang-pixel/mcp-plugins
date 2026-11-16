@@ -28,6 +28,7 @@
 | `github_fork_repo` | fork 仓库到自己账号或允许的组织（异步，返回 `ready: false`） | `repo`、`organization`、`name`、`default_branch_only` |
 | `github_create_repo` | 新建仓库 | `name`、`org`、`description`、`private`（默认 false）、`auto_init` |
 | `github_create_branch` | 从分支、tag 或 SHA 建分支（默认默认分支） | `repo`、`branch`、`from_ref` |
+| `github_delete_branch` | 删除分支（如 PR 合并后清理 fork）；只能删自己账号下仓库的非默认分支，默认要求已通过 PR 合并 | `repo`、`branch`、`force`、`expected_head_sha` |
 | `github_commit_files` | 一次原子提交多个文件的新增、修改、删除；从不强推 | `repo`、`branch`、`message`、`files[{path, content, encoding, executable}]`、`delete_paths`、`expected_head_sha` |
 | `github_create_pr` | 开 PR；`head` 可写 `owner:branch` 从 fork 提交 | `repo`、`title`、`head`、`base`、`body`、`draft`、`maintainer_can_modify` |
 | `github_create_issue` | 开 issue | `repo`、`title`、`body`、`labels`、`assignees` |
@@ -75,7 +76,15 @@
    - 不在名单内返回 `REPO_NOT_ALLOWED`。fork 未指定组织时会先请求 `GET /user` 确认写 token 的账号，再做白名单检查。
 4. **频率限制**：每个进程每小时最多 `GITHUB_MCP_WRITE_RATE_PER_HOUR` 次写操作（默认 30），超出返回 `RATE_LIMITED`。
 
-写请求只使用 `GITHUB_MCP_GITHUB_WRITE_TOKEN`，不会回退到只读 token；只读工具也不会使用写 token。没有删除仓库、删除分支或强推的工具，`github_commit_files` 固定 `force: false`，分支移动时返回 `HEAD_MOVED` 且不覆盖任何内容。
+写请求只使用 `GITHUB_MCP_GITHUB_WRITE_TOKEN`，不会回退到只读 token；只读工具也不会使用写 token。没有删除仓库或强推的工具，`github_commit_files` 固定 `force: false`，分支移动时返回 `HEAD_MOVED` 且不覆盖任何内容。
+
+唯一的删除操作是 `github_delete_branch`，限制如下：
+
+- 仓库 owner 必须在 `GITHUB_MCP_WRITE_OWNERS` 里（`GITHUB_MCP_UPSTREAM_REPOS` 和 `GITHUB_MCP_PR_FROM_OWN_FORK` 都不放开它）；默认分支永远不删，返回 `DEFAULT_BRANCH`。
+- 默认只删“已合并”的分支：在本仓库及其 fork 来源仓库里查找来自该分支的 PR，要求有一个已合并的 PR 且其 head SHA 等于分支当前 SHA，否则返回 `BRANCH_NOT_MERGED`；分支还有未关闭的 PR 时返回 `BRANCH_HAS_OPEN_PR`。
+- `force: true` 跳过上面的合并检查，可删除未合并的分支（其未关闭的 PR 会被 GitHub 关闭）。
+- 可传 `expected_head_sha`，分支不在该 SHA 时返回 `HEAD_MOVED`；GitHub 拒绝删除（如受保护分支）时返回 `DELETE_REJECTED`。
+- 成功结果带 `deleted_sha`，在 GitHub 回收该提交前可用 `github_create_branch` 的 `from_ref` 恢复。
 
 写 token 建议使用只勾选 `public_repo` 的经典 PAT（classic）：只有经典 token 能写不属于自己的公开仓库（给上游提 issue、PR、评论）。只在确实需要写私有仓库时才用 `repo`。
 
@@ -106,7 +115,7 @@ uv run --locked github-mcp
 
 使用 Python 3.12。单元测试用 `httpx.MockTransport` 模拟 GitHub API，不需要网络或真实凭据。
 
-只读工具在 `tools/list` 中声明 `annotations.readOnlyHint: true`、`destructiveHint: false`；写工具声明 `readOnlyHint: false`，`github_commit_files` 另声明 `destructiveHint: true`。OpenConnector 等客户端据此判断读写，写工具需要显式确认后才执行。
+只读工具在 `tools/list` 中声明 `annotations.readOnlyHint: true`、`destructiveHint: false`；写工具声明 `readOnlyHint: false`，`github_commit_files` 和 `github_delete_branch` 另声明 `destructiveHint: true`。OpenConnector 等客户端据此判断读写，写工具需要显式确认后才执行。
 
 ## 构建
 
