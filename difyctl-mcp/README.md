@@ -9,7 +9,7 @@ MCP 客户端 → Nginx (HTTPS) → difyctl-mcp 容器 (0.0.0.0:8000, bridge) �
 ```
 
 - Python 3.12 + `mcp==2.3.0`（`MCPServer`），`stateless_http=True`、`json_response=True`，路径 `/mcp`。
-- 镜像在构建时下载 `difyctl-v1.18.0-linux-x64`，按 Dockerfile 中固定的 SHA-256（来自 release 的 `difyctl-v1.18.0-checksums.txt`）校验，并执行 `difyctl install skills /opt/difyctl/skills`。容器用户为 10001，非 root。
+- 镜像在构建时下载 `difyctl-v1.19.0-linux-x64`，按 Dockerfile 中固定的 SHA-256（来自 release 的 `difyctl-v1.19.0-checksums.txt`）校验，并执行 `difyctl install skills /opt/difyctl/skills`。容器用户为 10001，非 root。
 - 部署沿用仓库部署器：bridge 网络、自动分配主机端口、只绑定 `127.0.0.1`。容器主机名固定为 `difyctl-mcp`（difyctl 用主机名作 `device_label`）。数据目录为 `@data/state` → `/var/lib/mcp/difyctl`：
 
 | 路径 | 内容 |
@@ -168,7 +168,7 @@ uv sync --locked --all-extras --all-groups
 uv run --locked pytest -q
 ```
 
-测试用 `tests/fake_difyctl.py` 模拟 difyctl 1.18 的 JSON 输出、退出码和登录状态，覆盖设计文档第 14 节的验收项。真实 difyctl 的行为以 1.18.0 二进制源码核对。
+测试用 `tests/fake_difyctl.py` 模拟 difyctl 1.19 的 JSON 输出、退出码和登录状态，覆盖设计文档第 14 节的验收项。真实 difyctl 的行为以 1.19.0 源码核对。
 
 ## 风险和未验证项
 

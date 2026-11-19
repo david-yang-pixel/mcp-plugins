@@ -208,5 +208,5 @@ def test_rate_limit_on_registration(live):
 
 def test_health_reports_configuration(live):
     health = live.http.get("/health").json()
-    assert health == {"ok": True, "service": "difyctl-mcp", "configured": True, "difyctl": "1.18.0"}
+    assert health == {"ok": True, "service": "difyctl-mcp", "configured": True, "difyctl": "1.19.0"}
     assert "client_secret" not in json.dumps(health)
