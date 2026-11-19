@@ -214,13 +214,13 @@ def test_workspace_refresh_and_logout(live):
 
 
 def test_status_warns_before_expiry_and_on_version_mismatch(live):
-    control(live.settings, server_version="1.19.0")
+    control(live.settings, server_version="1.20.0")
     import time
     control(live.settings, session_expires_at=int(time.time()) + 2 * 86400)
     _, tokens = live.tokens()
     status = live.call(tokens["access_token"], "difyctl_status")
     assert status["outcome"] == "needs_attention"
-    assert any("expires" in w for w in status["notices"]) and any("1.19.0" in w for w in status["notices"])
+    assert any("expires" in w for w in status["notices"]) and any("1.20.0" in w for w in status["notices"])
 
 
 def test_official_client_discovers_tools(live):

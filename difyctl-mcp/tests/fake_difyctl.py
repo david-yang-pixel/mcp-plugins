@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A stand-in for difyctl 1.18 with the same JSON shapes, exit codes and login states.
+"""A stand-in for difyctl 1.19 with the same JSON shapes, exit codes and login states.
 
 Tests steer it through $HOME/fake.json and read its call log from $HOME/fake-log.jsonl.
 """
@@ -94,7 +94,7 @@ def main():
         words.append(arg)
     current = state()
     if words == ["version"]:
-        out({"client": {"version": "1.18.0"}, "server": {"version": CONTROL.get("server_version", "1.18.0")}})
+        out({"client": {"version": "1.19.0"}, "server": {"version": CONTROL.get("server_version", "1.19.0")}})
     if words == ["login"] and "--resume" in args:
         if current.get("pending"):
             if CONTROL.get("deny"):
