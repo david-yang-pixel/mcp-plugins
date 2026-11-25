@@ -66,40 +66,61 @@ def test_public_works_without_credentials_and_accounts_fail(client, monkeypatch)
     assert call(client, "price", {"symbol": "BTCUSDT"})["structuredContent"]["data"]["price"] == "42"
     for tool, args in [("account", {}), ("open_orders", {"symbol": "BTCUSDT"}), ("all_orders", {"symbol": "BTCUSDT"}),
                        ("wallet_balance", {}), ("funding_assets", {}), ("my_trades", {"symbol": "BTCUSDT"}),
-                       ("position_cost", {"symbol": "BTCUSDT"})]:
+                       ("position_cost", {"symbol": "BTCUSDT"}), ("equity_quote", {"symbol": "AAPL"}),
+                       ("tokenized_assets", {}), ("equity_trades", {"symbol": "AAPL"}),
+                       ("tokenized_history", {}),
+                       ("convert_history", {"startTime": 1700000000000, "endTime": 1700000001000})]:
         result = call(client, tool, args)
         assert result["isError"] and result["structuredContent"]["code"] == "CREDENTIALS_MISSING"
     assert len(requests) == 1 and "X-MBX-APIKEY" not in requests[0].headers
     monkeypatch.setenv("BINANCE_API_KEY", "fake-key")
     assert call(client, "account")["structuredContent"]["code"] == "CREDENTIALS_MISSING"
+    assert call(client, "equity_trades", {"symbol": "AAPL"})["structuredContent"]["code"] == "CREDENTIALS_MISSING"
+    # Market-data equity tools need only the API key, not the secret.
+    assert not call(client, "equity_quote", {"symbol": "AAPL"})["isError"]
+    assert not call(client, "tokenized_assets")["isError"]
 
 
-@pytest.mark.parametrize("name,args,path,signed,method", [
-    ("exchange_info", {"symbol": "BTCUSDT"}, "/api/v3/exchangeInfo", False, "GET"),
-    ("price", {"symbol": "BTCUSDT"}, "/api/v3/ticker/price", False, "GET"),
-    ("ticker_24h", {"symbol": "BTCUSDT"}, "/api/v3/ticker/24hr", False, "GET"),
-    ("depth", {"symbol": "BTCUSDT", "limit": 5000}, "/api/v3/depth", False, "GET"),
-    ("klines", {"symbol": "BTCUSDT", "interval": "1M", "limit": 1000}, "/api/v3/klines", False, "GET"),
-    ("account", {}, "/api/v3/account", True, "GET"),
-    ("open_orders", {"symbol": "BTCUSDT"}, "/api/v3/openOrders", True, "GET"),
-    ("all_orders", {"symbol": "BTCUSDT", "limit": 1000}, "/api/v3/allOrders", True, "GET"),
-    ("wallet_balance", {"quoteAsset": "BTC"}, "/sapi/v1/asset/wallet/balance", True, "GET"),
-    ("funding_assets", {"asset": "USDT"}, "/sapi/v1/asset/get-funding-asset", True, "POST"),
-    ("my_trades", {"symbol": "BTCUSDT", "limit": 1000, "fromId": 0}, "/api/v3/myTrades", True, "GET"),
+@pytest.mark.parametrize("name,args,path,auth,method", [
+    ("exchange_info", {"symbol": "BTCUSDT"}, "/api/v3/exchangeInfo", "public", "GET"),
+    ("price", {"symbol": "BTCUSDT"}, "/api/v3/ticker/price", "public", "GET"),
+    ("ticker_24h", {"symbol": "BTCUSDT"}, "/api/v3/ticker/24hr", "public", "GET"),
+    ("depth", {"symbol": "BTCUSDT", "limit": 5000}, "/api/v3/depth", "public", "GET"),
+    ("klines", {"symbol": "BTCUSDT", "interval": "1M", "limit": 1000}, "/api/v3/klines", "public", "GET"),
+    ("account", {}, "/api/v3/account", "signed", "GET"),
+    ("open_orders", {"symbol": "BTCUSDT"}, "/api/v3/openOrders", "signed", "GET"),
+    ("all_orders", {"symbol": "BTCUSDT", "limit": 1000}, "/api/v3/allOrders", "signed", "GET"),
+    ("wallet_balance", {"quoteAsset": "BTC"}, "/sapi/v1/asset/wallet/balance", "signed", "GET"),
+    ("funding_assets", {"asset": "USDT"}, "/sapi/v1/asset/get-funding-asset", "signed", "POST"),
+    ("my_trades", {"symbol": "BTCUSDT", "limit": 1000, "fromId": 0}, "/api/v3/myTrades", "signed", "GET"),
+    ("equity_quote", {"symbol": "BRK.B"}, "/sapi/v1/equity/market/quote", "apikey", "GET"),
+    ("tokenized_assets", {}, "/sapi/v1/equity/market/tokenized-assets", "apikey", "GET"),
+    ("equity_trades", {"symbol": "AAPL", "startTime": 0, "endTime": 1700000000000, "current": 2, "size": 100},
+     "/sapi/v1/equity/trade/history", "signed", "GET"),
+    ("tokenized_history", {"startTime": 0, "endTime": 1700000000000, "size": 100},
+     "/sapi/v1/equity/tokenized/history", "signed", "GET"),
+    ("convert_history", {"startTime": 1697408000123, "endTime": 1700000000123, "limit": 1000},
+     "/sapi/v1/convert/tradeFlow", "signed", "GET"),
 ])
-def test_endpoints_methods_and_signature(client, monkeypatch, name, args, path, signed, method):
+def test_endpoints_methods_and_signature(client, monkeypatch, name, args, path, auth, method):
     monkeypatch.setenv("BINANCE_API_KEY", "synthetic-binance-key")
     monkeypatch.setenv("BINANCE_API_SECRET", "synthetic-binance-secret")
     monkeypatch.setattr(service.time, "time", lambda: 1700000000.123)
     def handler(req):
         assert req.method == method and req.url.host == "api.binance.com" and req.url.scheme == "https" and req.url.path == path
         query = req.url.query.decode()
-        if signed:
+        if auth == "signed":
             raw, sig = query.rsplit("&signature=", 1)
             assert sig == hmac.new(b"synthetic-binance-secret", raw.encode(), hashlib.sha256).hexdigest()
             parsed = parse_qs(raw)
             assert parsed["timestamp"] == ["1700000000123"] and parsed["recvWindow"] == ["5000"]
+            sent = {k: v[0] for k, v in parsed.items() if k not in ("timestamp", "recvWindow")}
+            assert sent.items() >= {k: str(v) for k, v in args.items()}.items()
             assert req.headers["X-MBX-APIKEY"] == "synthetic-binance-key" and req.content == b""
+        elif auth == "apikey":
+            assert "signature=" not in query and "timestamp=" not in query
+            assert {k: v[0] for k, v in parse_qs(query).items()} == {k: str(v) for k, v in args.items()}
+            assert req.headers["X-MBX-APIKEY"] == "synthetic-binance-key"
         else:
             assert "signature=" not in query and "X-MBX-APIKEY" not in req.headers
         return httpx.Response(200, json={"data": [1, 2]})
@@ -128,6 +149,19 @@ def test_endpoints_methods_and_signature(client, monkeypatch, name, args, path, 
     ("my_trades", {"symbol": "BTCUSDT", "fromId": "1"}), ("my_trades", {"symbol": "BTCUSDT", "fromId": True}),
     ("my_trades", {"symbol": "BTCUSDT", "limit": 1001}),
     ("position_cost", {}), ("position_cost", {"symbol": "BTCUSDT", "fromId": 0}),
+    ("equity_quote", {}), ("equity_quote", {"symbol": "aapl"}), ("equity_quote", {"symbol": "EQ_AAPL"}),
+    ("equity_quote", {"symbol": ".AAPL"}), ("equity_quote", {"symbol": "A" * 13}),
+    ("tokenized_assets", {"symbol": "AAPL"}),
+    ("equity_trades", {}), ("equity_trades", {"symbol": "AAPL", "size": 101}),
+    ("equity_trades", {"symbol": "AAPL", "size": 0}), ("equity_trades", {"symbol": "AAPL", "current": 0}),
+    ("equity_trades", {"symbol": "AAPL", "startTime": -1}), ("equity_trades", {"symbol": "AAPL", "startTime": "0"}),
+    ("equity_trades", {"symbol": "AAPL", "startTime": 2, "endTime": 1}),
+    ("tokenized_history", {"size": 101}), ("tokenized_history", {"startTime": 5, "endTime": 4}),
+    ("tokenized_history", {"asset": "AAPL"}),
+    ("convert_history", {}), ("convert_history", {"startTime": 1700000000000}),
+    ("convert_history", {"startTime": 1700000000001, "endTime": 1700000000000}),
+    ("convert_history", {"startTime": 0, "endTime": 30 * 86_400_000 + 1}),
+    ("convert_history", {"startTime": 0, "endTime": 1, "limit": 1001}),
 ])
 def test_invalid_inputs_never_reach_network(client, monkeypatch, name, args):
     mock_binance(monkeypatch, lambda request: pytest.fail("unexpected network call"))
@@ -974,3 +1008,25 @@ def test_body_size_and_batch_limits(client, monkeypatch):
     assert batch_err["error"]["code"] == -32600
     assert "Batch size exceeds limit" in batch_err["error"]["message"]
 
+
+
+def test_equity_tools_are_listed_read_only_with_defaults(client, monkeypatch):
+    tools = {t["name"]: t for t in rpc(client, "tools/list").json()["result"]["tools"]}
+    for name in ("equity_quote", "tokenized_assets", "equity_trades", "tokenized_history", "convert_history"):
+        assert tools[name]["annotations"]["readOnlyHint"] and not tools[name]["annotations"]["destructiveHint"]
+    monkeypatch.setenv("BINANCE_API_KEY", "synthetic-binance-key")
+    monkeypatch.setenv("BINANCE_API_SECRET", "synthetic-binance-secret")
+    seen = []
+    def handler(req):
+        raw = req.url.query.decode().rsplit("&signature=", 1)[0]
+        seen.append((req.url.path, {k: v for k, v in parse_qs(raw).items() if k not in ("timestamp", "recvWindow")}))
+        return httpx.Response(200, json={"rows": [], "total": 0})
+    mock_binance(monkeypatch, handler)
+    assert not call(client, "equity_trades", {"symbol": "AAPL"})["isError"]
+    assert not call(client, "tokenized_history")["isError"]
+    assert not call(client, "convert_history", {"startTime": 0, "endTime": 30 * 86_400_000})["isError"]
+    assert seen == [
+        ("/sapi/v1/equity/trade/history", {"symbol": ["AAPL"], "current": ["1"], "size": ["100"]}),
+        ("/sapi/v1/equity/tokenized/history", {"size": ["100"]}),
+        ("/sapi/v1/convert/tradeFlow", {"startTime": ["0"], "endTime": ["2592000000"], "limit": ["100"]}),
+    ]

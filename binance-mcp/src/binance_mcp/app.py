@@ -16,7 +16,7 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 # httpcore emits wire-level headers and signed targets from child loggers, too.
 for logger_name in ("httpx", "httpcore", "httpcore.http11", "httpcore.http2",
@@ -27,6 +27,11 @@ BASE_URL = "https://api.binance.com"
 Symbol = Annotated[str, Field(strict=True, min_length=2, max_length=20, pattern=r"^[A-Z0-9]+$")]
 Asset = Annotated[str, Field(strict=True, min_length=1, max_length=20, pattern=r"^[A-Z0-9]+$")]
 Limit = Annotated[int, Field(strict=True, ge=1, le=1000)]
+# US equity tickers, e.g. AAPL or BRK.B. Not the EQ_ wallet asset name.
+EquitySymbol = Annotated[str, Field(strict=True, min_length=1, max_length=12, pattern=r"^[A-Z][A-Z0-9.]*$")]
+TimestampMs = Annotated[int, Field(strict=True, ge=0)]
+PageSize = Annotated[int, Field(strict=True, ge=1, le=100)]
+THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000
 
 
 class InvalidToolArguments(Exception):
@@ -77,26 +82,76 @@ class FundingArgs(Arguments):
     needBtcValuation: Annotated[bool, Field(strict=True)] = True
 
 
+class EquitySymbolArgs(Arguments):
+    symbol: EquitySymbol
+
+
+class TimeRangeArgs(Arguments):
+    startTime: TimestampMs | None = None
+    endTime: TimestampMs | None = None
+
+    @model_validator(mode="after")
+    def ordered(self):
+        if self.startTime is not None and self.endTime is not None and self.startTime > self.endTime:
+            raise ValueError("startTime must not be after endTime")
+        return self
+
+
+class TokenizedHistoryArgs(TimeRangeArgs):
+    size: PageSize = 100
+
+
+class EquityTradesArgs(TimeRangeArgs):
+    symbol: EquitySymbol
+    current: Annotated[int, Field(strict=True, ge=1)] = 1
+    size: PageSize = 100
+
+
+class ConvertHistoryArgs(Arguments):
+    # Binance requires both bounds and serves at most 30 days per request.
+    startTime: TimestampMs
+    endTime: TimestampMs
+    limit: Limit = 100
+
+    @model_validator(mode="after")
+    def window(self):
+        if not 0 <= self.endTime - self.startTime <= THIRTY_DAYS_MS:
+            raise ValueError("endTime must be within 30 days after startTime")
+        return self
+
+
 # Every path is fixed and read-only. No generic request tool. get-funding-asset is a
 # query that Binance only serves over POST; it is the one non-GET endpoint.
 # position_cost has no path: it is computed from my_trades and price.
-TOOLS = {
-    "exchange_info": ("Get trading pair information", "/api/v3/exchangeInfo", SymbolArgs, False, "GET"),
-    "price": ("Get the latest price for a pair", "/api/v3/ticker/price", SymbolArgs, False, "GET"),
-    "ticker_24h": ("Get 24-hour statistics for a pair", "/api/v3/ticker/24hr", SymbolArgs, False, "GET"),
-    "depth": ("Get the order book for a pair", "/api/v3/depth", DepthArgs, False, "GET"),
-    "klines": ("Get candlesticks for a pair", "/api/v3/klines", KlineArgs, False, "GET"),
-    "account": ("Get Spot account information and balances", "/api/v3/account", Arguments, True, "GET"),
-    "open_orders": ("Get current orders for a pair", "/api/v3/openOrders", SymbolArgs, True, "GET"),
-    "all_orders": ("Get historical orders for a pair", "/api/v3/allOrders", OrdersArgs, True, "GET"),
+# Auth: "public" sends no key; "apikey" sends X-MBX-APIKEY unsigned; "signed" adds timestamp and HMAC signature.
+Auth = Literal["public", "apikey", "signed"]
+TOOLS: dict[str, tuple[str, str | None, type[Arguments], Auth, str]] = {
+    "exchange_info": ("Get trading pair information", "/api/v3/exchangeInfo", SymbolArgs, "public", "GET"),
+    "price": ("Get the latest price for a pair", "/api/v3/ticker/price", SymbolArgs, "public", "GET"),
+    "ticker_24h": ("Get 24-hour statistics for a pair", "/api/v3/ticker/24hr", SymbolArgs, "public", "GET"),
+    "depth": ("Get the order book for a pair", "/api/v3/depth", DepthArgs, "public", "GET"),
+    "klines": ("Get candlesticks for a pair", "/api/v3/klines", KlineArgs, "public", "GET"),
+    "account": ("Get Spot account information and balances", "/api/v3/account", Arguments, "signed", "GET"),
+    "open_orders": ("Get current orders for a pair", "/api/v3/openOrders", SymbolArgs, "signed", "GET"),
+    "all_orders": ("Get historical orders for a pair", "/api/v3/allOrders", OrdersArgs, "signed", "GET"),
     "my_trades": ("Get your trade fills for a pair, including fees; page with fromId",
-                  "/api/v3/myTrades", TradesArgs, True, "GET"),
+                  "/api/v3/myTrades", TradesArgs, "signed", "GET"),
     "position_cost": ("Compute FIFO cost basis, open lots with buy times, and realized/unrealized P&L "
-                      "for a pair from your full trade history", None, SymbolArgs, True, "GET"),
+                      "for a pair from your full trade history", None, SymbolArgs, "signed", "GET"),
     "wallet_balance": ("Get the total balance of every wallet (Spot, Funding, Earn, Futures, ...) in a quote asset",
-                       "/sapi/v1/asset/wallet/balance", WalletBalanceArgs, True, "GET"),
+                       "/sapi/v1/asset/wallet/balance", WalletBalanceArgs, "signed", "GET"),
     "funding_assets": ("Get Funding wallet balances, optionally for one asset",
-                       "/sapi/v1/asset/get-funding-asset", FundingArgs, True, "POST"),
+                       "/sapi/v1/asset/get-funding-asset", FundingArgs, "signed", "POST"),
+    "equity_quote": ("Get the bid/ask quote for a US stock on Binance (underlying ticker, e.g. AAPL)",
+                     "/sapi/v1/equity/market/quote", EquitySymbolArgs, "apikey", "GET"),
+    "tokenized_assets": ("List tokenized stocks (bStocks) with their underlying ticker and multiplier",
+                         "/sapi/v1/equity/market/tokenized-assets", Arguments, "apikey", "GET"),
+    "equity_trades": ("Get your US stock trade history for a ticker; page with current and size",
+                      "/sapi/v1/equity/trade/history", EquityTradesArgs, "signed", "GET"),
+    "tokenized_history": ("Get your conversions between tokenized stocks and stock holdings",
+                          "/sapi/v1/equity/tokenized/history", TokenizedHistoryArgs, "signed", "GET"),
+    "convert_history": ("Get your Binance Convert trades in a window of at most 30 days",
+                        "/sapi/v1/convert/tradeFlow", ConvertHistoryArgs, "signed", "GET"),
 }
 
 
@@ -334,15 +389,17 @@ def contains_sensitive(value, secrets):
 async def call_tool(name, arguments):
     if name not in TOOLS:
         return error("UNKNOWN_TOOL", "Unknown tool")
-    _, path, model, signed, method = TOOLS[name]
+    _, path, model, auth, method = TOOLS[name]
     try:
         params = model.model_validate(arguments).model_dump(exclude_none=True)
     except ValidationError:
         raise InvalidToolArguments("Invalid tool arguments; see the tool input schema")
     api_key = os.environ.get("BINANCE_API_KEY", "")
     api_secret = os.environ.get("BINANCE_API_SECRET", "")
-    if signed and (not api_key or not api_secret):
+    if auth == "signed" and (not api_key or not api_secret):
         return error("CREDENTIALS_MISSING", "Binance API key and secret are required for account tools")
+    if auth == "apikey" and not api_key:
+        return error("CREDENTIALS_MISSING", "Binance API key is required for stock market data tools")
     if path is None:
         return await position_cost(params["symbol"])
 
@@ -361,7 +418,7 @@ async def call_tool(name, arguments):
             if admit_error:
                 return admit_error
             call_params = {k: str(v).lower() if isinstance(v, bool) else v for k, v in params.items()}
-            if signed:
+            if auth == "signed":
                 call_params["timestamp"] = int(time.time() * 1000)
                 call_params["recvWindow"] = 5000
                 query = urlencode(call_params)
@@ -370,6 +427,8 @@ async def call_tool(name, arguments):
                 headers["X-MBX-APIKEY"] = api_key
             else:
                 query = urlencode(call_params)
+                if auth == "apikey":
+                    headers["X-MBX-APIKEY"] = api_key
             async with httpx.AsyncClient(timeout=10, follow_redirects=False, trust_env=False) as client:
                 async with client.stream(method, BASE_URL + path + ("?" + query if query else ""), headers=headers) as response:
                     if response.status_code in (418, 429):

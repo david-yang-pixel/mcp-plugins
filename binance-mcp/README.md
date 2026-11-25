@@ -1,6 +1,6 @@
-# Binance Spot 只读 MCP
+# Binance 只读 MCP（现货 + 美股/bStocks）
 
-独立 Python 3.12 服务，固定连接 Binance 官方 `https://api.binance.com` Spot REST API；除资金账户查询（Binance 仅提供 POST 形式的只读查询）外只使用 GET，不提供下单、撤单、转账、提现或任意 URL/凭据工具。公开行情与账户数据均有 Binance 地域限制、权重及限流，429/418 等错误不会自动重试。账户查询使用本机时钟和 5000ms recvWindow；时钟偏差可能导致签名被拒绝。账户历史受 Binance 数据保留规则约束，并非完整归档。
+独立 Python 3.12 服务，固定连接 Binance 官方 `https://api.binance.com` REST API（现货、钱包、美股与代币化股票、闪兑记录）；除资金账户查询（Binance 仅提供 POST 形式的只读查询）外只使用 GET，不提供下单、撤单、转账、提现或任意 URL/凭据工具。公开行情与账户数据均有 Binance 地域限制、权重及限流，429/418 等错误不会自动重试。账户查询使用本机时钟和 5000ms recvWindow；时钟偏差可能导致签名被拒绝。账户历史受 Binance 数据保留规则约束，并非完整归档。
 
 ## 工具
 
@@ -18,8 +18,13 @@
 | `position_cost` | `symbol` | 按 FIFO 由该交易对全部成交计算持仓：每批未卖出买入的时间、数量和单位成本，持仓均价、已实现盈亏，以及按现价计算的市值和浮动盈亏 |
 | `wallet_balance` | `quoteAsset` | 各钱包（现货、资金、理财、杠杆、合约等）总额，按 `quoteAsset` 计价，默认 `USDT` |
 | `funding_assets` | `asset`, `needBtcValuation` | 资金账户余额；`asset` 可选，只查指定币种；`needBtcValuation` 默认 `true` |
+| `equity_quote` | `symbol` | 美股买一/卖一报价；`symbol` 为正股代码（如 `AAPL`、`BRK.B`），不是钱包里的 `EQ_AAPL`；只需 API Key |
+| `tokenized_assets` | 无 | 代币化股票（bStocks）清单：代币、对应正股代码和倍数；只需 API Key |
+| `equity_trades` | `symbol`, `startTime`, `endTime`, `current`, `size` | 美股成交历史；`current` 为页码，默认 1；`size` 1–100，默认 100 |
+| `tokenized_history` | `startTime`, `endTime`, `size` | 代币化股票与美股持仓之间的转换记录；`size` 1–100，默认 100 |
+| `convert_history` | `startTime`, `endTime`, `limit` | 闪兑（Convert）成交记录；起止时间必填且跨度不超过 30 天；`limit` 1–1000，默认 100 |
 
-交易对必须是 2–20 位、币种为 1–20 位大写英文字母或数字（如 `BTCUSDT`、`USDT`）；所有参数均严格校验，不接受其他参数。返回 JSON-RPC MCP 内容，失败为 `isError` 和通用错误码；上游失败时附带 `http_status` 与 Binance 数字错误码 `binance_code`（如 `-1021` 时钟偏差、`-2015` Key/IP 白名单/权限），常见错误附带排查提示，但不返回上游错误原文、密钥或签名 URL。账户数据本身敏感，MCP 调用者应妥善保护响应。
+交易对必须是 2–20 位、币种为 1–20 位大写英文字母或数字（如 `BTCUSDT`、`USDT`）；美股代码为 1–12 位，以大写字母开头，可含数字和 `.`；时间参数为毫秒时间戳，`startTime` 不得晚于 `endTime`；所有参数均严格校验，不接受其他参数。返回 JSON-RPC MCP 内容，失败为 `isError` 和通用错误码；上游失败时附带 `http_status` 与 Binance 数字错误码 `binance_code`（如 `-1021` 时钟偏差、`-2015` Key/IP 白名单/权限），常见错误附带排查提示，但不返回上游错误原文、密钥或签名 URL。账户数据本身敏感，MCP 调用者应妥善保护响应。
 
 `position_cost` 说明：以计价币计算成本与盈亏；以基础币或计价币收取的手续费计入数量或成本，以其他币种（如 BNB）收取的手续费单独列在 `fees_in_other_assets`，不计入成本。只统计该交易对的成交，钱包间划转、闪兑和小额兑换不计入，因此 `open_quantity` 可能与钱包余额不同；卖出数量超过已记录买入的部分记为 `unmatched_sell_quantity`，不计盈亏。成交按每页 1000 笔分页拉取，超过 10,000 笔时返回 `TOO_MANY_TRADES`，不给出不完整的结果。
 
@@ -32,6 +37,6 @@ uv run --locked binance-mcp
 uv run --locked pytest -q
 ```
 
-`BINANCE_MCP_API_KEY` 为必需的 MCP Bearer 鉴权密钥；`BINANCE_API_KEY` 和 `BINANCE_API_SECRET` 均可选，但账户工具要求二者同时存在，不配置时公开行情仍可用。建议使用仅具读取权限、禁用交易和提现且有 IP 限制的 Binance API key，切勿提交凭据。`.env.example` 仅作变量说明，服务不会自动加载该文件。本地默认监听 `127.0.0.1:8124`（容器与 `deploy/runtime.json` 显式设置 `BINANCE_MCP_HOST=0.0.0.0`），可用 `BINANCE_MCP_HOST` / `BINANCE_MCP_PORT` 调整；`GET /health` 返回 JSON，`POST /mcp` 使用 `Authorization: Bearer <MCP密钥>`。应用层限制 HTTP 请求体上限（`BINANCE_MCP_MAX_BODY_BYTES`，默认 1,000,000 字节）与 JSON-RPC batch 批处理条目上限（`BINANCE_MCP_MAX_BATCH_SIZE`，默认 50 条），超限请求将被尽早拒绝。应在可信环境或 HTTPS 反向代理后使用；MCP 认证密钥不同于 Binance 凭据。
+`BINANCE_MCP_API_KEY` 为必需的 MCP Bearer 鉴权密钥；`BINANCE_API_KEY` 和 `BINANCE_API_SECRET` 均可选，但账户工具要求二者同时存在；`equity_quote` 和 `tokenized_assets` 只需 `BINANCE_API_KEY`；不配置时公开行情仍可用。美股与 bStocks 接口受账户开通情况和地域限制，未开通时会返回 Binance 错误码。建议使用仅具读取权限、禁用交易和提现且有 IP 限制的 Binance API key，切勿提交凭据。`.env.example` 仅作变量说明，服务不会自动加载该文件。本地默认监听 `127.0.0.1:8124`（容器与 `deploy/runtime.json` 显式设置 `BINANCE_MCP_HOST=0.0.0.0`），可用 `BINANCE_MCP_HOST` / `BINANCE_MCP_PORT` 调整；`GET /health` 返回 JSON，`POST /mcp` 使用 `Authorization: Bearer <MCP密钥>`。应用层限制 HTTP 请求体上限（`BINANCE_MCP_MAX_BODY_BYTES`，默认 1,000,000 字节）与 JSON-RPC batch 批处理条目上限（`BINANCE_MCP_MAX_BATCH_SIZE`，默认 50 条），超限请求将被尽早拒绝。应在可信环境或 HTTPS 反向代理后使用；MCP 认证密钥不同于 Binance 凭据。
 
 `deploy/runtime.json` 按仓库契约声明必需 MCP Secret 和两个可选 Binance Secret，固定容器端口 8124、主机端口自动分配。容器冒烟测试只需合成 MCP 密钥，不需 Binance 凭据或联网查询行情。此目录仅供本地开发，不代表已配置 Secrets 或部署。
