@@ -101,10 +101,19 @@ class TokenizedHistoryArgs(TimeRangeArgs):
     size: PageSize = 100
 
 
-class EquityTradesArgs(TimeRangeArgs):
+class EquityTradesArgs(Arguments):
+    # Binance rejects this endpoint with -1102 unless both bounds are sent; any span is accepted.
     symbol: EquitySymbol
+    startTime: TimestampMs
+    endTime: TimestampMs
     current: Annotated[int, Field(strict=True, ge=1)] = 1
     size: PageSize = 100
+
+    @model_validator(mode="after")
+    def ordered(self):
+        if self.startTime > self.endTime:
+            raise ValueError("startTime must not be after endTime")
+        return self
 
 
 class ConvertHistoryArgs(Arguments):
@@ -146,7 +155,8 @@ TOOLS: dict[str, tuple[str, str | None, type[Arguments], Auth, str]] = {
                      "/sapi/v1/equity/market/quote", EquitySymbolArgs, "apikey", "GET"),
     "tokenized_assets": ("List tokenized stocks (bStocks) with their underlying ticker and multiplier",
                          "/sapi/v1/equity/market/tokenized-assets", Arguments, "apikey", "GET"),
-    "equity_trades": ("Get your US stock trade history for a ticker; page with current and size",
+    "equity_trades": ("Get your US stock trade history for a ticker between startTime and endTime (ms, both required); "
+                      "page with current and size",
                       "/sapi/v1/equity/trade/history", EquityTradesArgs, "signed", "GET"),
     "tokenized_history": ("Get your conversions between tokenized stocks and stock holdings",
                           "/sapi/v1/equity/tokenized/history", TokenizedHistoryArgs, "signed", "GET"),

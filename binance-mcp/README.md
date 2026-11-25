@@ -20,7 +20,7 @@
 | `funding_assets` | `asset`, `needBtcValuation` | 资金账户余额；`asset` 可选，只查指定币种；`needBtcValuation` 默认 `true` |
 | `equity_quote` | `symbol` | 美股买一/卖一报价；`symbol` 为正股代码（如 `AAPL`、`BRK.B`），不是钱包里的 `EQ_AAPL`；只需 API Key |
 | `tokenized_assets` | 无 | 代币化股票（bStocks）清单：代币、对应正股代码和倍数；只需 API Key |
-| `equity_trades` | `symbol`, `startTime`, `endTime`, `current`, `size` | 美股成交历史；`current` 为页码，默认 1；`size` 1–100，默认 100 |
+| `equity_trades` | `symbol`, `startTime`, `endTime`, `current`, `size` | 美股成交历史；`startTime`、`endTime` 必填（Binance 缺任一返回 `-1102`），跨度不限，`0` 到当前时间即全部历史；`current` 为页码，默认 1；`size` 1–100，默认 100 |
 | `tokenized_history` | `startTime`, `endTime`, `size` | 代币化股票与美股持仓之间的转换记录；`size` 1–100，默认 100 |
 | `convert_history` | `startTime`, `endTime`, `limit` | 闪兑（Convert）成交记录；起止时间必填且跨度不超过 30 天；`limit` 1–1000，默认 100 |
 

@@ -67,7 +67,7 @@ def test_public_works_without_credentials_and_accounts_fail(client, monkeypatch)
     for tool, args in [("account", {}), ("open_orders", {"symbol": "BTCUSDT"}), ("all_orders", {"symbol": "BTCUSDT"}),
                        ("wallet_balance", {}), ("funding_assets", {}), ("my_trades", {"symbol": "BTCUSDT"}),
                        ("position_cost", {"symbol": "BTCUSDT"}), ("equity_quote", {"symbol": "AAPL"}),
-                       ("tokenized_assets", {}), ("equity_trades", {"symbol": "AAPL"}),
+                       ("tokenized_assets", {}), ("equity_trades", {"symbol": "AAPL", "startTime": 0, "endTime": 1}),
                        ("tokenized_history", {}),
                        ("convert_history", {"startTime": 1700000000000, "endTime": 1700000001000})]:
         result = call(client, tool, args)
@@ -75,7 +75,7 @@ def test_public_works_without_credentials_and_accounts_fail(client, monkeypatch)
     assert len(requests) == 1 and "X-MBX-APIKEY" not in requests[0].headers
     monkeypatch.setenv("BINANCE_API_KEY", "fake-key")
     assert call(client, "account")["structuredContent"]["code"] == "CREDENTIALS_MISSING"
-    assert call(client, "equity_trades", {"symbol": "AAPL"})["structuredContent"]["code"] == "CREDENTIALS_MISSING"
+    assert call(client, "equity_trades", {"symbol": "AAPL", "startTime": 0, "endTime": 1})["structuredContent"]["code"] == "CREDENTIALS_MISSING"
     # Market-data equity tools need only the API key, not the secret.
     assert not call(client, "equity_quote", {"symbol": "AAPL"})["isError"]
     assert not call(client, "tokenized_assets")["isError"]
@@ -152,9 +152,13 @@ def test_endpoints_methods_and_signature(client, monkeypatch, name, args, path, 
     ("equity_quote", {}), ("equity_quote", {"symbol": "aapl"}), ("equity_quote", {"symbol": "EQ_AAPL"}),
     ("equity_quote", {"symbol": ".AAPL"}), ("equity_quote", {"symbol": "A" * 13}),
     ("tokenized_assets", {"symbol": "AAPL"}),
-    ("equity_trades", {}), ("equity_trades", {"symbol": "AAPL", "size": 101}),
-    ("equity_trades", {"symbol": "AAPL", "size": 0}), ("equity_trades", {"symbol": "AAPL", "current": 0}),
-    ("equity_trades", {"symbol": "AAPL", "startTime": -1}), ("equity_trades", {"symbol": "AAPL", "startTime": "0"}),
+    ("equity_trades", {}), ("equity_trades", {"symbol": "AAPL"}),
+    ("equity_trades", {"symbol": "AAPL", "startTime": 0}), ("equity_trades", {"symbol": "AAPL", "endTime": 1}),
+    ("equity_trades", {"symbol": "AAPL", "startTime": 0, "endTime": 1, "size": 101}),
+    ("equity_trades", {"symbol": "AAPL", "startTime": 0, "endTime": 1, "size": 0}),
+    ("equity_trades", {"symbol": "AAPL", "startTime": 0, "endTime": 1, "current": 0}),
+    ("equity_trades", {"symbol": "AAPL", "startTime": -1, "endTime": 1}),
+    ("equity_trades", {"symbol": "AAPL", "startTime": "0", "endTime": 1}),
     ("equity_trades", {"symbol": "AAPL", "startTime": 2, "endTime": 1}),
     ("tokenized_history", {"size": 101}), ("tokenized_history", {"startTime": 5, "endTime": 4}),
     ("tokenized_history", {"asset": "AAPL"}),
@@ -1022,11 +1026,12 @@ def test_equity_tools_are_listed_read_only_with_defaults(client, monkeypatch):
         seen.append((req.url.path, {k: v for k, v in parse_qs(raw).items() if k not in ("timestamp", "recvWindow")}))
         return httpx.Response(200, json={"rows": [], "total": 0})
     mock_binance(monkeypatch, handler)
-    assert not call(client, "equity_trades", {"symbol": "AAPL"})["isError"]
+    assert not call(client, "equity_trades", {"symbol": "AAPL", "startTime": 0, "endTime": 5})["isError"]
     assert not call(client, "tokenized_history")["isError"]
     assert not call(client, "convert_history", {"startTime": 0, "endTime": 30 * 86_400_000})["isError"]
     assert seen == [
-        ("/sapi/v1/equity/trade/history", {"symbol": ["AAPL"], "current": ["1"], "size": ["100"]}),
+        ("/sapi/v1/equity/trade/history", {"symbol": ["AAPL"], "startTime": ["0"], "endTime": ["5"],
+                                           "current": ["1"], "size": ["100"]}),
         ("/sapi/v1/equity/tokenized/history", {"size": ["100"]}),
         ("/sapi/v1/convert/tradeFlow", {"startTime": ["0"], "endTime": ["2592000000"], "limit": ["100"]}),
     ]
