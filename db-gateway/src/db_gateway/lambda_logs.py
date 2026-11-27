@@ -1,14 +1,14 @@
-"""plugin_lambda_logs: CloudWatch logs of SaaS plugin Lambdas via ``tsh aws``.
+"""plugin_lambda_logs: CloudWatch logs of SaaS plugin Lambdas.
 
-Mirrors the manual procedure in the "Teleport 查询 SaaS 插件 Lambda 指南":
-``tsh aws --app aws-support-logs logs filter-log-events --region us-east-1
---log-group-name /aws/lambda/<function_name> ...``. Nothing is truncated; a
-large range is fetched over several calls with ``next_token``.
+Same query as the manual procedure in the "Teleport 查询 SaaS 插件 Lambda 指南"
+(``tsh aws --app aws-support-logs logs filter-log-events --region us-east-1
+--log-group-name /aws/lambda/<function_name> ...``), sent with botocore through a
+long-running ``tsh proxy aws`` (aws_logs.py). Nothing is truncated; a large range
+is fetched over several calls with ``next_token``.
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 import time
 import uuid
@@ -20,14 +20,14 @@ from db_gateway.core import _audit_path, _db_target, _metadata_kwargs, _query_li
 from db_gateway.log import get_logger
 from db_gateway.pg_pool import run_metadata_query
 from db_gateway.postgres import TeleportAuthExpired, audit_log
+from db_gateway.aws_logs import classify_page_error, get_logs_client, reset_proxy
 from db_gateway.teleport_cli import (
     TeleportNotAuthorized,
-    TshResult,
     TshTimeout,
     acquire_before,
-    ensure_shadow_home,
-    run_tsh_with_login,
+    classify_failure,
 )
+from db_gateway.tsh_daemons import TshDaemonError
 
 logger = get_logger(module="lambda_logs")
 
@@ -137,29 +137,37 @@ def _event(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _parse_aws_json(stdout: str) -> dict[str, Any] | None:
-    """The aws JSON document, tolerating text tsh may print before it (e.g. an app login notice)."""
-    try:
-        data = json.loads(stdout)
-    except ValueError:
-        start = stdout.find("{")
-        if start < 0:
-            return None
+async def _fetch_page(cfg: Any, params: dict[str, Any], deadline: float) -> tuple[dict | None, str, bool]:
+    """One FilterLogEvents call: (response, error message, timed_out).
+
+    A proxy failure (local 403, connection/SSL error) restarts the proxy and the
+    page is retried once within the same deadline.
+    """
+    for attempt in range(2):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None, "", True
+        client = await get_logs_client(cfg, deadline)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None, "", True
         try:
-            data, _end = json.JSONDecoder().raw_decode(stdout, start)
-        except ValueError:
-            return None
-    return data if isinstance(data, dict) else None
-
-
-def _needs_login(result: TshResult) -> bool:
-    # AWS API errors ("An error occurred (Code) ...") and aws argument errors are
-    # not credential problems. tsh 18.11 logs into the app by itself; this is a fallback.
-    return (
-        result.exit_code not in (0, None)
-        and "An error occurred (" not in result.stderr
-        and "aws: error:" not in result.stderr
-    )
+            data = await asyncio.wait_for(
+                asyncio.to_thread(client.filter_log_events, **params), timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            return None, "", True
+        except Exception as e:  # botocore errors, classified below
+            kind, message = classify_page_error(e)
+            if kind == "timeout":
+                return None, "", True
+            if kind == "proxy" and attempt == 0:
+                logger.warning("plugin_lambda_logs_proxy_retry", error=message[:300])
+                reset_proxy()
+                continue
+            return None, message, False
+        return (data if isinstance(data, dict) else None), "", False
+    raise AssertionError("unreachable")
 
 
 async def execute_plugin_lambda_logs(
@@ -315,8 +323,6 @@ async def execute_plugin_lambda_logs(
 
         # --- fetch pages ---------------------------------------------------------
         try:
-            await ensure_shadow_home(cfg)
-            login_args = ["apps", "login", "--aws-role", lc.aws_role, lc.app]
             events: list[dict[str, Any]] = []
             token = next_token
             pages = 0
@@ -327,36 +333,26 @@ async def execute_plugin_lambda_logs(
                         return fail("TSH_TIMEOUT", "开始查询前时间预算就用完了（排队或登录耗时），稍后重试")
                     warnings.append(f"第 {pages + 1} 页之前时间预算用完，已返回之前取到的事件；用 next_token 继续")
                     break
-                argv = [
-                    "aws", "--app", lc.app, "logs", "filter-log-events", "--region", lc.region,
-                    "--log-group-name", log_group,
-                    "--start-time", str(start_ms), "--end-time", str(end_ms - 1),
-                ]
-                # `=` form: a pattern such as "-DEBUG" would otherwise be parsed as an option.
+                params: dict[str, Any] = {
+                    "logGroupName": log_group,
+                    "startTime": start_ms,
+                    "endTime": end_ms - 1,
+                }
                 if filter_pattern is not None:
-                    argv.append(f"--filter-pattern={filter_pattern}")
+                    params["filterPattern"] = filter_pattern
                 if log_stream_names:
-                    argv += ["--log-stream-names", *log_stream_names]
-                argv += ["--limit", str(min(page_limit - len(events), CLOUDWATCH_MAX_PAGE)),
-                         "--no-paginate"]
+                    params["logStreamNames"] = list(log_stream_names)
+                params["limit"] = min(page_limit - len(events), CLOUDWATCH_MAX_PAGE)
                 if token:
-                    argv.append(f"--next-token={token}")
-                argv += ["--output", "json"]
-                result = await run_tsh_with_login(
-                    argv, cfg=cfg, deadline=deadline, login_args=login_args,
-                    needs_login=_needs_login,
-                )
-                data = None
-                if not result.timed_out and result.exit_code == 0:
-                    data = _parse_aws_json(result.stdout)
-                if not isinstance(data, dict):
-                    if result.timed_out:
+                    params["nextToken"] = token
+                data, error, timed_out = await _fetch_page(cfg, params, deadline)
+                if data is None:
+                    if timed_out:
                         reason, code = "时间预算用完", "LOGS_TIMEOUT"
                         error = "第一页就超过了时间预算：请缩小时间窗口或加 filter_pattern"
                     else:
-                        detail = result.stderr.strip()[:800] or result.stdout.strip()[:800]
-                        reason, code = f"aws 报错：{detail[:300]}", "AWS_ERROR"
-                        error = detail or f"tsh aws 退出码 {result.exit_code}"
+                        reason, code = f"AWS 报错：{error[:300]}", "AWS_ERROR"
+                        error = error[:800] or "CloudWatch 返回了无法解析的结果"
                     if pages == 0:
                         return fail(code, error)
                     warnings.append(f"第 {pages + 1} 页中断（{reason}），已返回之前取到的事件；用 next_token 继续")
@@ -373,6 +369,11 @@ async def execute_plugin_lambda_logs(
                 if time.monotonic() - started >= budget * PAGING_BUDGET_FRACTION:
                     warnings.append("时间预算用完，用 next_token 继续")
                     break
+        except TshDaemonError as e:
+            classified = await classify_failure(cfg, str(e)[:600])
+            if isinstance(classified, TeleportAuthExpired):
+                return fail("TELEPORT_EXPIRED", str(classified))
+            return fail("NOT_AUTHORIZED", f"{classified}；需要 Teleport 角色 support-lambda-logs")
         except TeleportAuthExpired as e:
             return fail("TELEPORT_EXPIRED", str(e))
         except TshTimeout as e:

@@ -305,7 +305,7 @@ async def run_tsh(
     )
 
 
-async def _login_failure(cfg: Any, result: TshResult) -> Exception:
+async def classify_failure(cfg: Any, detail: str) -> Exception:
     """TeleportAuthExpired when the shared session is gone, else TeleportNotAuthorized."""
     try:
         status = await asyncio.wait_for(
@@ -317,12 +317,14 @@ async def _login_failure(cfg: Any, result: TshResult) -> Exception:
         )
     except Exception:
         status = None
-    detail = (result.stderr or result.stdout).strip()[:600]
-    if not detail:
-        detail = "登录超时" if result.timed_out else f"exit {result.exit_code}"
     if status is None:
         return TeleportAuthExpired(f"Teleport 会话已过期或正在续期：{detail}")
     return TeleportNotAuthorized(f"{detail}；当前 Roles: {', '.join(status.roles)}")
+
+
+async def _login_failure(cfg: Any, result: TshResult) -> Exception:
+    detail = (result.stderr or result.stdout).strip()[:600] or f"exit {result.exit_code}"
+    return await classify_failure(cfg, detail)
 
 
 async def tsh_login(
