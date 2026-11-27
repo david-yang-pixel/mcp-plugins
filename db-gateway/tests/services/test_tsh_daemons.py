@@ -124,3 +124,16 @@ async def test_stop_all_kills_processes(cfg, fake_tsh):
     pid, child = d.pid, fake_tsh.child_pid()
     await stop_all()
     assert not alive(pid) and not alive(child)
+
+
+async def test_knowledgefs_tunnel_args_and_ready(cfg, fake_tsh):
+    from db_gateway.tsh_daemons import ensure_knowledgefs_tunnel
+
+    fake_tsh.push(stdout='Started authenticated tunnel for the PostgreSQL database '
+                         '"knowledge-fs-production-readonly" in cluster "teleport.dify.dev" '
+                         'on 127.0.0.1:56064.\n', sleep=30)
+    assert await ensure_knowledgefs_tunnel(cfg, dl(5)) == {"port": "56064"}
+    assert fake_tsh.calls[0]["argv"] == [
+        "proxy", "db", "--tunnel", "--port", "56064", "--db-user", "pro_ops_teleport_read",
+        "--db-name", "knowledgefs", "knowledge-fs-production-readonly",
+    ]

@@ -21,6 +21,8 @@ from db_gateway.postgres import (
     validate_read_only_sql,
 )
 from db_gateway.sql_text import SqlLexError, referenced_tables, tokenize
+from db_gateway.teleport_cli import classify_failure
+from db_gateway.tsh_daemons import TshDaemonError, ensure_knowledgefs_tunnel
 
 try:
     from db_gateway.log import get_logger
@@ -34,13 +36,45 @@ _DB_KEY_TO_ATTR = {
     "prod": "db_prod",
     "billing": "db_billing",
     "plugin": "db_plugin",
+    "knowledgefs": "db_knowledgefs",
 }
 
 _DB_KEY_TO_PORT_ATTR = {
     "prod": "port_prod",
     "billing": "port_billing",
     "plugin": "port_plugin",
+    "knowledgefs": "port_knowledgefs",
 }
+
+KNOWLEDGEFS_TUNNEL_TIMEOUT_SECONDS = 15.0
+
+
+def _database_disabled(cfg: Any, database_key: str) -> str | None:
+    """Error text when the key exists but is switched off (only knowledgefs can be)."""
+    if database_key != "knowledgefs":
+        return None
+    kfs = getattr(getattr(cfg, "teleport_tools", None), "knowledgefs", None)
+    if getattr(kfs, "enabled", False) is True:
+        return None
+    return "knowledgefs 未启用（teleport_tools.knowledgefs.enabled=false）"
+
+
+async def _prepare_database(cfg: Any, database_key: str) -> tuple[str, str] | None:
+    """Start the db-gateway-managed tunnel for knowledgefs; (code, error) on failure."""
+    if database_key != "knowledgefs":
+        return None
+    try:
+        await ensure_knowledgefs_tunnel(cfg, time.monotonic() + KNOWLEDGEFS_TUNNEL_TIMEOUT_SECONDS)
+    except TeleportAuthExpired as e:
+        return "TELEPORT_EXPIRED", str(e)
+    except TshDaemonError as e:
+        classified = await classify_failure(cfg, str(e)[:600])
+        if isinstance(classified, TeleportAuthExpired):
+            return "TELEPORT_EXPIRED", str(classified)
+        return "QUERY_ERROR", f"KnowledgeFS 隧道启动失败：{classified}"
+    except Exception as e:
+        return "QUERY_ERROR", f"KnowledgeFS 隧道启动失败：{e}"
+    return None
 
 _VALID_FORMATS = ("csv", "json")
 _DEFAULT_COUNT_TIMEOUT_SECONDS = 5.0
@@ -235,6 +269,9 @@ async def execute_gateway_query(
             "UNKNOWN_DATABASE",
             f"unknown database key: {database}. Must be one of {list(_DB_KEY_TO_ATTR)}",
         )
+    disabled = _database_disabled(cfg, database)
+    if disabled:
+        return fail("UNKNOWN_DATABASE", disabled)
     if fmt not in _VALID_FORMATS:
         return fail("INVALID_ARGUMENT", f"format 只支持 {list(_VALID_FORMATS)}，收到: {output_format!r}")
     try:
@@ -278,6 +315,13 @@ async def execute_gateway_query(
         _DB_KEY_TO_PORT_ATTR[database],
         cfg.postgres.port,
     )
+    prepare_error = await _prepare_database(cfg, database)
+    if prepare_error:
+        code, text = prepare_error
+        timing = elapsed_timing()
+        audit_log(log_path=audit_file, database=database, sql=sql, status=code, error=text,
+                  timing_ms=timing, **audit_extra)
+        return fail(code, text, timing_ms=timing)
 
     error_status = ""
     error_code = ""
@@ -742,6 +786,9 @@ async def execute_schema_lookup(
             f"unknown database key: {database}. Must be one of {list(_DB_KEY_TO_ATTR)}",
             audit=False,
         )
+    disabled = _database_disabled(cfg, database)
+    if disabled:
+        return fail("UNKNOWN_DATABASE", disabled, audit=False)
     try:
         refs = schema_info.parse_table_refs(tables)
     except ValueError as e:
@@ -758,6 +805,10 @@ async def execute_schema_lookup(
     attempts = max(0, int(getattr(cfg.postgres, "teleport_retry_attempts", 1) or 0)) + 1
     delay_attr = "pool_retry_delay_seconds" if kwargs["use_pool"] else "teleport_retry_delay_seconds"
     retry_delay = max(0.0, float(_cfg_number(cfg.postgres, delay_attr, 0.25)))
+
+    prepare_error = await _prepare_database(cfg, database)
+    if prepare_error:
+        return fail(*prepare_error)
 
     async def lookup() -> tuple[list[list[Any]], list[list[Any]]]:
         limiter = await _query_limiter(database, db_port, max_concurrent)

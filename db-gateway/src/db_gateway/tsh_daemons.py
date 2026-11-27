@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import os
+import re
 import signal
 import time
 import weakref
@@ -201,3 +202,35 @@ async def stop_all() -> None:
 def _reset_state() -> None:
     for daemon in list(_DAEMONS):
         daemon._reset()
+
+
+# --- KnowledgeFS production tunnel -------------------------------------------------
+
+_TUNNEL_PORT_RE = re.compile(r"127\.0\.0\.1:(\d+)")
+
+
+def _parse_tunnel(lines: list[str]) -> dict[str, str] | None:
+    for line in lines:
+        m = _TUNNEL_PORT_RE.search(line)
+        if m:
+            return {"port": m.group(1)}
+    return None
+
+
+def _knowledgefs_args(cfg: Any) -> list[str]:
+    kfs = cfg.teleport_tools.knowledgefs
+    return [
+        "proxy", "db", "--tunnel",
+        "--port", str(cfg.postgres.port_knowledgefs),
+        "--db-user", kfs.db_user or cfg.postgres.user,
+        "--db-name", cfg.postgres.db_knowledgefs,
+        kfs.teleport_db,
+    ]
+
+
+KNOWLEDGEFS_TUNNEL = TshDaemon("knowledgefs_tunnel", args=_knowledgefs_args, parse=_parse_tunnel)
+
+
+async def ensure_knowledgefs_tunnel(cfg: Any, deadline: float) -> dict[str, str]:
+    """Make sure the local tunnel to knowledge-fs-production-readonly is listening."""
+    return await KNOWLEDGEFS_TUNNEL.ensure(cfg, deadline)

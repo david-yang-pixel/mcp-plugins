@@ -79,6 +79,7 @@ async def test_mcp_tools_list(mcp_client):
         "prod",
         "billing",
         "plugin",
+        "knowledgefs",
     ]
 
 
@@ -246,7 +247,7 @@ async def test_mcp_tools_list_includes_schema_tool_read_only(mcp_client):
     assert schema_tool["annotations"] == tools["db_gateway_query"]["annotations"]
     assert schema_tool["annotations"]["readOnlyHint"] is True
     props = schema_tool["inputSchema"]["properties"]
-    assert props["database"]["enum"] == ["prod", "billing", "plugin"]
+    assert props["database"]["enum"] == ["prod", "billing", "plugin", "knowledgefs"]
     assert props["tables"]["type"] == "array"
     assert schema_tool["inputSchema"]["required"] == ["database", "tables"]
 
@@ -419,3 +420,17 @@ async def test_call_kube_read_error_sets_is_error(teleport_mcp_client):
         resp = await _post_mcp(teleport_mcp_client, call("kube_read", {"cluster": "prod", "args": ["delete"]}))
     assert (await resp.json())["result"]["isError"] is True
     assert fn.call_args.kwargs == {"cfg": ANY, "cluster": "prod", "args": ["delete"]}
+
+
+async def test_query_tool_lists_knowledgefs(mcp_client):
+    tools = {t["name"]: t for t in (await (await _post_mcp(mcp_client, LIST)).json())["result"]["tools"]}
+    assert tools["db_gateway_query"]["inputSchema"]["properties"]["database"]["enum"][-1] == "knowledgefs"
+    assert "knowledgefs" in tools["db_gateway_query"]["description"]
+
+
+async def test_app_cleanup_stops_tsh_daemons(mcp_client_factory):
+    stop = AsyncMock()
+    with patch("db_gateway.app.stop_tsh_daemons", stop):
+        async with mcp_client_factory(AppConfig().teleport_tools):
+            pass
+    assert stop.await_count == 1
