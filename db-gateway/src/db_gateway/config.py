@@ -81,12 +81,48 @@ class FeishuConfig(BaseModel):
     webhook_secret: str = ""
 
 
+class LambdaLogsConfig(BaseModel):
+    enabled: bool = True
+    app: str = "aws-support-logs"
+    aws_role: str = "SupportLambdaLogsReadOnly"
+    region: str = "us-east-1"
+    default_timezone: str = "Asia/Shanghai"
+    default_limit: int = 1000
+    max_limit: int = 10000
+
+
+class KubeReadConfig(BaseModel):
+    enabled: bool = True
+    # alias -> Teleport kube cluster name; the context is matched in the kubeconfig at runtime.
+    clusters: dict[str, str] = Field(
+        default_factory=lambda: {"prod": "lg-eks-01", "staging": "dify-plugin-1"}
+    )
+    max_output_bytes: int = 1048576
+    kubeconfig_path: str = "/tmp/db-gateway/kubeconfig"
+
+
+class TeleportToolsConfig(BaseModel):
+    """plugin_lambda_logs / kube_read: read-only tsh tools (see teleport_cli.py)."""
+
+    # tsh 18.11 bundled in the image; the host-mounted /usr/local/bin/tsh (18.0.0)
+    # fails `tsh aws` signature verification against the 18.11 proxy.
+    tsh_path: str = "/opt/teleport/bin/tsh"
+    # Container-local copy of teleport.auth_home; the tools never write the shared one.
+    shadow_home: str = "/tmp/db-gateway/tsh-home"
+    # Budget for one whole tool call (Nginx proxy_read_timeout is 60s).
+    time_budget_seconds: float = 40
+    max_concurrent: int = 3
+    lambda_logs: LambdaLogsConfig = Field(default_factory=LambdaLogsConfig)
+    kube: KubeReadConfig = Field(default_factory=KubeReadConfig)
+
+
 class AppConfig(BaseModel):
     resources: ResourcesConfig = Field(default_factory=ResourcesConfig)
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
     db_gateway: DbGatewayConfig = Field(default_factory=DbGatewayConfig)
     teleport: TeleportConfig = Field(default_factory=TeleportConfig)
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
+    teleport_tools: TeleportToolsConfig = Field(default_factory=TeleportToolsConfig)
 
 
 class EnvSettings(BaseSettings):

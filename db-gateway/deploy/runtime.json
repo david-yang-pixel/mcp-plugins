@@ -80,6 +80,14 @@
       "check_interval_seconds": 300,
       "notify_interval_seconds": 3600
     },
-    "feishu": {}
+    "feishu": {},
+    "teleport_tools": {
+      "lambda_logs": {
+        "enabled": true
+      },
+      "kube": {
+        "enabled": true
+      }
+    }
   }
 }

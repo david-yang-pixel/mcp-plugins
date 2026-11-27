@@ -1,5 +1,10 @@
 """Config defaults and new query options."""
+import json
+from pathlib import Path
+
 from db_gateway.config import AppConfig, load_config
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_new_query_options_have_backward_compatible_defaults():
@@ -73,3 +78,31 @@ def test_pool_driver_rejects_unknown_driver():
 
     with _pytest.raises(pydantic.ValidationError):
         PostgresConfig(driver="psycopg2")
+
+
+def test_teleport_tools_defaults():
+    t = AppConfig().teleport_tools
+    assert (t.tsh_path, t.shadow_home) == ("/opt/teleport/bin/tsh", "/tmp/db-gateway/tsh-home")
+    assert (t.time_budget_seconds, t.max_concurrent) == (40, 3)
+    assert t.lambda_logs.model_dump() == {
+        "enabled": True, "app": "aws-support-logs", "aws_role": "SupportLambdaLogsReadOnly",
+        "region": "us-east-1", "default_timezone": "Asia/Shanghai",
+        "default_limit": 1000, "max_limit": 10000,
+    }
+    assert t.kube.clusters == {"prod": "lg-eks-01", "staging": "dify-plugin-1"}
+    assert t.kube.max_output_bytes == 1048576
+    assert t.kube.kubeconfig_path == "/tmp/db-gateway/kubeconfig"
+
+
+def test_runtime_settings_enable_both_teleport_tools():
+    settings = json.loads((ROOT / "deploy" / "runtime.json").read_text())["settings"]
+    t = AppConfig(**settings).teleport_tools
+    assert t.lambda_logs.enabled is True and t.kube.enabled is True
+    assert "teleport_tools" in settings
+
+
+def test_dockerfile_bundles_pinned_tsh():
+    text = (ROOT / "Dockerfile").read_text()
+    assert "TELEPORT_VERSION=18.11.0" in text
+    assert "8d3dba03ea6b6e0d72c97e190da0595e8f0d70f5573c3a26b1908cf60caf6e3f" in text
+    assert AppConfig().teleport_tools.tsh_path in text      # /opt/teleport/bin/tsh

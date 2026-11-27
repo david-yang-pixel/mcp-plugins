@@ -7,10 +7,17 @@ from typing import Any
 from aiohttp import web
 
 from db_gateway.core import execute_gateway_query, execute_schema_lookup
-from db_gateway.mcp_schema import TOOLS
+from db_gateway.kube_read import execute_kube_read
+from db_gateway.lambda_logs import execute_plugin_lambda_logs
+from db_gateway.mcp_schema import tool_enabled, tools_for
 
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
+
+_LAMBDA_LOGS_ARGS = (
+    "function_name", "tenant_id", "plugin_id", "start_time", "end_time", "since_minutes",
+    "filter_pattern", "log_stream_names", "limit", "next_token",
+)
 
 def _jsonrpc_result(req_id: Any, result: dict[str, Any]) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": req_id, "result": result}
@@ -46,7 +53,7 @@ async def handle_mcp_message(message: dict[str, Any], *, cfg: Any) -> dict[str, 
         })
 
     if method == "tools/list":
-        return _jsonrpc_result(req_id, {"tools": TOOLS})
+        return _jsonrpc_result(req_id, {"tools": tools_for(cfg)})
 
     if method == "tools/call":
         params = message.get("params") or {}
@@ -71,6 +78,14 @@ async def handle_mcp_message(message: dict[str, Any], *, cfg: Any) -> dict[str, 
                 cfg=cfg,
                 database=str(args.get("database") or ""),
                 tables=args.get("tables"),
+            )
+        elif name == "plugin_lambda_logs" and tool_enabled(cfg, name):
+            payload = await execute_plugin_lambda_logs(
+                cfg=cfg, **{k: args[k] for k in _LAMBDA_LOGS_ARGS if k in args},
+            )
+        elif name == "kube_read" and tool_enabled(cfg, name):
+            payload = await execute_kube_read(
+                cfg=cfg, cluster=args.get("cluster"), args=args.get("args"),
             )
         else:
             return _jsonrpc_error(req_id, -32601, f"unknown tool: {name}")
