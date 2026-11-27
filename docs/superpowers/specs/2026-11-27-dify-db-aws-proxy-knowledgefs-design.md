@@ -36,7 +36,9 @@
      - 环境同 `run_tsh`（影子 `TELEPORT_HOME`、删除代理变量、`TELEPORT_TOOLS_VERSION=off`）；
      - `start_new_session=True`，stdout 和 stderr 合并到一个管道。
   4. 逐行读输出，直到就绪规则满足；超时为 `min(剩余时间, 15 秒)`。
-     - 失败（进程退出或超时）→ 杀掉进程组，抛 `TshDaemonError`，消息附输出末尾 600 字符。
+     - 失败 → 杀掉进程组，消息附输出末尾 600 字符。
+    - 进程退出：抛 `TshDaemonError`，按 `tsh status` 分类，未登录 → `TELEPORT_EXPIRED`，已登录 → `NOT_AUTHORIZED` / `QUERY_ERROR`。
+    - 超时：抛子类 `TshDaemonTimeout`，日志工具 → `TSH_TIMEOUT`，KnowledgeFS → `QUERY_ERROR`「隧道启动超时，稍后重试」，不查 `tsh status`（最终审查 M4：超时与角色无关）。
      - 成功 → 记录签名和解析结果，后台任务继续读完剩余输出（防止管道堵塞），只保留末尾若干行用于报错。
 - **`mark_stale()`**：调用方发现代理异常时调用，下次 `ensure` 强制重启。
 - **`stop()`**：杀进程组并回收。模块级 `stop_all()` 在 aiohttp `on_cleanup` 调用。
@@ -47,7 +49,7 @@
 | daemon | 参数 | 启动前钩子 | 就绪规则 / 解析 |
 | --- | --- | --- | --- |
 | `aws_proxy` | `proxy aws --app <lambda_logs.app>` | `tsh_login(["apps","login","--aws-role",<aws_role>,<app>])`（每次启动都做，约 2.4 秒，只在首次和续期后发生） | 四个 `export` 行齐全；解析出 `AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY`、`AWS_CA_BUNDLE`、`HTTPS_PROXY`（去引号） |
-| `knowledgefs_tunnel` | `proxy db --tunnel --port <port_knowledgefs> --db-user <user> --db-name <db_knowledgefs> <teleport_db>` | 无 | 输出出现 `127.0.0.1:<port>` |
+| `knowledgefs_tunnel` | `proxy db --tunnel --port <port_knowledgefs> --db-user <user> --db-name <db_knowledgefs> <teleport_db>` | 无 | 出现 `Started authenticated tunnel … on 127.0.0.1:<port>`，端口必须等于配置值，而且进程仍在运行。不能只匹配 `127.0.0.1:<port>`：tsh 的端口占用报错 `listen tcp 127.0.0.1:56064: bind: address already in use` 里也有这个串（最终审查 I1） |
 
 ### 3.2 `plugin_lambda_logs` 改用 botocore
 

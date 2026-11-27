@@ -137,3 +137,31 @@ async def test_knowledgefs_tunnel_args_and_ready(cfg, fake_tsh):
         "proxy", "db", "--tunnel", "--port", "56064", "--db-user", "pro_ops_teleport_read",
         "--db-name", "knowledgefs", "knowledge-fs-production-readonly",
     ]
+
+
+# --- final review fixes -----------------------------------------------------------
+
+
+async def test_tunnel_bind_error_is_not_ready(cfg, fake_tsh):
+    from db_gateway.tsh_daemons import ensure_knowledgefs_tunnel
+
+    fake_tsh.push(stderr="ERROR: listen tcp 127.0.0.1:56064: bind: address already in use\n", code=1)
+    with pytest.raises(TshDaemonError, match="address already in use"):
+        await ensure_knowledgefs_tunnel(cfg, dl(5))
+
+
+async def test_tunnel_on_unexpected_port_is_an_error(cfg, fake_tsh):
+    from db_gateway.tsh_daemons import ensure_knowledgefs_tunnel
+
+    fake_tsh.push(stdout='Started authenticated tunnel for the PostgreSQL database "x" in cluster "c" '
+                         'on 127.0.0.1:41000.\n', sleep=30)
+    with pytest.raises(TshDaemonError, match="56064"):
+        await ensure_knowledgefs_tunnel(cfg, dl(5))
+
+
+async def test_ready_timeout_raises_daemon_timeout(cfg, fake_tsh):
+    from db_gateway.tsh_daemons import TshDaemonTimeout
+
+    fake_tsh.push(stdout="still starting\n", sleep=30)
+    with pytest.raises(TshDaemonTimeout):
+        await make(start_timeout=1).ensure(cfg, dl(10))

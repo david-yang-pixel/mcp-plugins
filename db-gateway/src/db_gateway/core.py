@@ -22,7 +22,7 @@ from db_gateway.postgres import (
 )
 from db_gateway.sql_text import SqlLexError, referenced_tables, tokenize
 from db_gateway.teleport_cli import classify_failure
-from db_gateway.tsh_daemons import TshDaemonError, ensure_knowledgefs_tunnel
+from db_gateway.tsh_daemons import TshDaemonError, TshDaemonTimeout, ensure_knowledgefs_tunnel
 
 try:
     from db_gateway.log import get_logger
@@ -67,6 +67,8 @@ async def _prepare_database(cfg: Any, database_key: str) -> tuple[str, str] | No
         await ensure_knowledgefs_tunnel(cfg, time.monotonic() + KNOWLEDGEFS_TUNNEL_TIMEOUT_SECONDS)
     except TeleportAuthExpired as e:
         return "TELEPORT_EXPIRED", str(e)
+    except TshDaemonTimeout as e:
+        return "QUERY_ERROR", f"KnowledgeFS 隧道启动超时，稍后重试：{str(e)[:400]}"
     except TshDaemonError as e:
         classified = await classify_failure(cfg, str(e)[:600])
         if isinstance(classified, TeleportAuthExpired):

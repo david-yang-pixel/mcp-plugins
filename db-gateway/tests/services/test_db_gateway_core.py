@@ -1157,3 +1157,15 @@ async def test_schema_lookup_knowledgefs_starts_tunnel(tmp_path):
                                           tables=["logical_documents"])
     assert out["success"] and tunnel.await_count == 1
     assert meta.call_args.kwargs["port"] == 56064 and meta.call_args.kwargs["database"] == "knowledgefs"
+
+
+async def test_knowledgefs_tunnel_timeout_is_not_reported_as_roles(tmp_path):
+    from db_gateway.core import execute_gateway_query
+    from db_gateway.tsh_daemons import TshDaemonTimeout
+
+    with patch("db_gateway.core.ensure_knowledgefs_tunnel",
+               AsyncMock(side_effect=TshDaemonTimeout("knowledgefs_tunnel 在 15s 内没有就绪："))), \
+            patch("db_gateway.core.classify_failure", AsyncMock()) as classify, \
+            patch("db_gateway.core.run_psql", AsyncMock()):
+        result = await execute_gateway_query(cfg=_kfs_cfg(tmp_path), database="knowledgefs", sql="SELECT 1")
+    assert result.code == "QUERY_ERROR" and "超时" in result.error and classify.await_count == 0

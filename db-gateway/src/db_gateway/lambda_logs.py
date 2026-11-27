@@ -27,7 +27,7 @@ from db_gateway.teleport_cli import (
     acquire_before,
     classify_failure,
 )
-from db_gateway.tsh_daemons import TshDaemonError
+from db_gateway.tsh_daemons import TshDaemonError, TshDaemonTimeout
 
 logger = get_logger(module="lambda_logs")
 
@@ -369,6 +369,8 @@ async def execute_plugin_lambda_logs(
                 if time.monotonic() - started >= budget * PAGING_BUDGET_FRACTION:
                     warnings.append("时间预算用完，用 next_token 继续")
                     break
+        except TshDaemonTimeout as e:
+            return fail("TSH_TIMEOUT", f"AWS 代理没有在时间预算内就绪，稍后重试：{str(e)[:400]}")
         except TshDaemonError as e:
             classified = await classify_failure(cfg, str(e)[:600])
             if isinstance(classified, TeleportAuthExpired):

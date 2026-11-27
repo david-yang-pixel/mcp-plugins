@@ -208,7 +208,7 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
 | `AWS_ERROR` | 第一页 aws 报错（附 stderr） |
 | `LOGS_TIMEOUT` | 第一页就超过时间预算，一条都没取到 |
 | `KUBECTL_ERROR` | kubectl 报错（stderr 有错误行或退出码非 0） |
-| `TSH_TIMEOUT` | 时间预算在 tsh 完成前用完：等待并发槽位、登录超时、还没开始查询，或 kubectl 没有任何输出；稍后重试 |
+| `TSH_TIMEOUT` | 时间预算在 tsh 完成前用完：等待并发槽位、登录超时、常驻代理没有及时就绪、还没开始查询，或 kubectl 没有任何输出；稍后重试 |
 
 ### 配置（`settings.teleport_tools`）
 

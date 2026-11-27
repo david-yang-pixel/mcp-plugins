@@ -292,3 +292,14 @@ async def test_audit_has_no_log_content(cfg, logs):
     await execute_plugin_lambda_logs(cfg=cfg, function_name="f", since_minutes=5)
     text = (Path(cfg.db_gateway.audit_log_dir) / "db_gateway_audit.log").read_text()
     assert '"tool": "plugin_lambda_logs"' in text and "SECRET-PAYLOAD" not in text
+
+
+async def test_daemon_timeout_with_session_is_tsh_timeout(cfg, logs, monkeypatch):
+    from db_gateway.tsh_daemons import TshDaemonTimeout
+
+    status = TshStatus(user="u", cluster="c", roles=["support-lambda-logs"],
+                       valid_until=datetime.now(timezone.utc), remaining=timedelta(hours=1))
+    monkeypatch.setattr("db_gateway.teleport_cli.get_tsh_status", AsyncMock(return_value=status))
+    logs.get_error = TshDaemonTimeout("aws_proxy 在 15s 内没有就绪：")
+    out = await execute_plugin_lambda_logs(cfg=cfg, function_name="f", since_minutes=5)
+    assert out["code"] == "TSH_TIMEOUT"

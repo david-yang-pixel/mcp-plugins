@@ -38,6 +38,10 @@ class TshDaemonError(Exception):
     """The daemon exited or did not become ready; the message carries its output tail."""
 
 
+class TshDaemonTimeout(TshDaemonError):
+    """The daemon did not become ready in time (says nothing about roles)."""
+
+
 def _killpg(pid: int) -> None:
     try:
         os.killpg(pid, signal.SIGKILL)
@@ -131,12 +135,14 @@ class TshDaemon:
             info = await asyncio.wait_for(wait_ready(), timeout=timeout)
         except asyncio.TimeoutError:
             info, timed_out = None, True
+        if info is not None and proc.returncode is not None:
+            info = None   # matched, but the process is already gone: not a running daemon
         if info is None:
             tail = "\n".join(lines).strip()[-600:]
             rc = proc.returncode
             await self._stop_locked()
             if timed_out:
-                raise TshDaemonError(f"{self.name} 在 {timeout:.0f}s 内没有就绪：{tail}")
+                raise TshDaemonTimeout(f"{self.name} 在 {timeout:.0f}s 内没有就绪：{tail}")
             raise TshDaemonError(f"{self.name} 启动失败（退出码 {rc}）：{tail}")
         self._reader = asyncio.create_task(self._drain(proc))
         return info
@@ -206,12 +212,14 @@ def _reset_state() -> None:
 
 # --- KnowledgeFS production tunnel -------------------------------------------------
 
-_TUNNEL_PORT_RE = re.compile(r"127\.0\.0\.1:(\d+)")
+# Anchored on tsh's success line: a bare "127.0.0.1:<port>" also appears in
+# "ERROR: listen tcp 127.0.0.1:56064: bind: address already in use".
+_TUNNEL_READY_RE = re.compile(r"Started authenticated tunnel\b.*\b127\.0\.0\.1:(\d+)")
 
 
 def _parse_tunnel(lines: list[str]) -> dict[str, str] | None:
     for line in lines:
-        m = _TUNNEL_PORT_RE.search(line)
+        m = _TUNNEL_READY_RE.search(line)
         if m:
             return {"port": m.group(1)}
     return None
@@ -233,4 +241,11 @@ KNOWLEDGEFS_TUNNEL = TshDaemon("knowledgefs_tunnel", args=_knowledgefs_args, par
 
 async def ensure_knowledgefs_tunnel(cfg: Any, deadline: float) -> dict[str, str]:
     """Make sure the local tunnel to knowledge-fs-production-readonly is listening."""
-    return await KNOWLEDGEFS_TUNNEL.ensure(cfg, deadline)
+    info = await KNOWLEDGEFS_TUNNEL.ensure(cfg, deadline)
+    expected = str(cfg.postgres.port_knowledgefs)
+    if info.get("port") != expected:
+        await KNOWLEDGEFS_TUNNEL.stop()
+        raise TshDaemonError(
+            f"knowledgefs_tunnel 监听在 127.0.0.1:{info.get('port')}，不是配置的 {expected}"
+        )
+    return info
