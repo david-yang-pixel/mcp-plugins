@@ -130,6 +130,99 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
 
 所有工具都在 `tools/list` 中声明 `annotations.readOnlyHint: true`、`destructiveHint: false`。OpenConnector 等客户端据此判断读写，未声明时新工具会被当作 write 并要求确认。
 
+## Teleport 只读工具 `plugin_lambda_logs`、`kube_read`
+
+复用网关的 Teleport 会话，查 SaaS 插件 Lambda 的 CloudWatch 日志和只读查看 Kubernetes 集群。设计见仓库根目录 `docs/superpowers/specs/2026-11-27-dify-db-teleport-read-tools-design.md`。
+
+两个工具只走 MCP `/mcp`：没有 HTTP 端点，stdio 版本（`scripts/db_gateway_mcp.py`）也不转发，仍只列出两个数据库工具。所有访问在 Teleport 和 CloudTrail 里记在网关的 Teleport 账号名下。
+
+### 运行方式
+
+- **镜像自带 tsh 18.11.0**（`/opt/teleport/bin/tsh`），只给这两个工具用。宿主机挂载的 `/usr/local/bin/tsh` 是 18.0.0：它的 `tsh aws` 对 18.11 的 proxy 签名校验失败（403），所以不能用。现有功能（`tsh status`、手动登录）照旧用宿主机的 tsh。
+- **影子 TELEPORT_HOME**：tsh 每次 `apps login`、`aws`、`kubectl` 都会重写整个 key ring。为了不让连接池监视清空连接池、不和 `tsh-auth-watchdog` 互相覆盖，这两个工具从不写 `teleport.auth_home`。
+  - 每次调用开始时，把它（不含 `bin`、`*-app`、`*-kube`、`*-db` 目录）同步到容器内的 `teleport_tools.shadow_home`，tsh 只在这个副本里读写。
+  - 用户证书 `keys/*/*.crt` 的内容变化（即 watchdog 续期）时重新同步。
+  - 续期窗口里线上目录暂时没有证书时，继续用副本里仍在有效期内的旧证书；连副本都没有时返回 `TELEPORT_EXPIRED`。
+- **子进程**：参数列表方式执行，不经 shell。tsh 运行在独立进程组里，到截止时间整组杀掉（`tsh aws` 下面还有一个 `aws` 子进程）。环境里删除 `HTTP(S)_PROXY`、`ALL_PROXY`、`NO_PROXY`，设置 `TELEPORT_HOME=<shadow_home>`、`KUBECONFIG=<kube.kubeconfig_path>`、`TELEPORT_TOOLS_VERSION=off`（关闭 tsh 客户端自动更新）。
+- **时间预算**：整次工具调用共用一个截止时间（`time_budget_seconds`，默认 40 秒），SQL 定位、登录和每次 tsh 调用都只用剩余时间，保证低于 Nginx 的 60 秒超时。
+- **按需登录（兜底）**：tsh 18.11 的 `tsh aws` 没有 app 证书时会自动登录，kube 证书丢失时 `tsh kubectl` 会自动重签。仍失败时：
+  - 日志工具执行 `tsh apps login --aws-role <aws_role> <app>`，集群工具执行 `tsh kube login --all`，然后重试一次；并发调用共享这一次登录。
+  - 登录也失败时，用宿主机 tsh 对 `teleport.auth_home` 跑 `tsh status`：未登录返回 `TELEPORT_EXPIRED`（等 watchdog 续期后重试），已登录返回 `NOT_AUTHORIZED`，并附当前 Roles。
+- 审计日志 `db_gateway_audit.log` 记录工具名、状态、耗时、函数名/窗口/过滤条件/事件数，或集群/完整参数/退出码/输出字节数；不记录日志和 kubectl 输出内容。
+
+### `plugin_lambda_logs`
+
+执行 `tsh aws --app <app> logs filter-log-events --region <region> --log-group-name /aws/lambda/<函数名> …`，用户给的过滤式和翻页令牌以 `--filter-pattern=…`、`--next-token=…` 形式传入。
+
+| 参数 | 说明 |
+| --- | --- |
+| `function_name` | 函数名（含 `--2` 等后缀），`^[A-Za-z0-9_-]{1,64}$`。与下面两项二选一。 |
+| `tenant_id` + `plugin_id` | 工作空间 UUID 和 `publisher/name`。网关查 `plugin_installations` LEFT JOIN `serverless_runtimes` 得到函数名；安装表反映当前状态，故障后升级或重装过要按故障时的版本查。 |
+| `start_time` + `end_time` | ISO 8601 或毫秒时间戳；不带时区按 `default_timezone`（北京时间）；`end_time` 不含端点；小于 1e11 的数字视为秒级时间戳并拒绝。与 `since_minutes` 二选一。 |
+| `since_minutes` | 最近 N 分钟，无上限。 |
+| `filter_pattern` | CloudWatch 过滤语法，原样透传，例如 `"ERROR"`、`"Traceback"`、`"<RequestId>"`。 |
+| `log_stream_names` | 只查这些日志流。 |
+| `limit` | 本次最多返回的事件数，默认 1000，最大 10000。 |
+| `next_token` | 上次返回的翻页令牌。 |
+
+返回 `function_name`、`log_group`、`region`、`window`（`start_utc`、`end_utc`、`start_local`、`end_local`、`timezone`）、`events`（`timestamp`、`log_stream`、`event_id`、`message`，内容不截断）、`event_count`、`next_token`、`complete`、`warnings`；按工作空间定位时另带 `plugin_unique_identifier`。
+
+翻页规则：
+- 取完返回 `complete=true`。
+- 达到 `limit` 或用掉 60% 时间预算时返回已取到的事件和 `next_token`，用相同参数加 `next_token` 继续。
+- CloudWatch 可能连续返回空页但带令牌，网关会继续翻。
+- 后续页失败时返回已取到的部分并说明原因。
+
+### `kube_read`
+
+执行 `tsh kubectl <子命令> --context <集群 context> <其余参数>`。context 从 kubeconfig 里按 `<proxy 主机>-<集群名>` 匹配，kubeconfig 不存在时先 `tsh kube login --all` 生成。
+
+| 参数 | 说明 |
+| --- | --- |
+| `cluster` | `kube.clusters` 里的别名，默认 `prod`（`lg-eks-01`）、`staging`（`dify-plugin-1`）。 |
+| `args` | kubectl 参数数组（不含 `kubectl`），例如 `["get","deploy","-n","dify-plugin","-o","wide"]`。 |
+
+拒绝规则（防误操作和换身份，不是安全边界；能读哪些资源由 Teleport 角色决定）：
+- 第一个参数必须是 `get`、`describe`、`logs`、`top`、`explain`、`api-resources`、`api-versions`、`version` 或 `auth can-i`。
+- 拒绝 `-f`/`--filename`、`-k`/`--kustomize`、`--kubeconfig`、`--context`、`--cluster`、`--user`、`--as*`、`--token`、`--server`/`-s`、证书和 TLS 参数、`--follow`、`-w`/`--watch`/`--watch-only`、`--cache-dir`、`--profile*`。
+- 短参数连写也会检查（`-Aw` 被拒，`-nfoo`、`-owide` 放行）；第一个 `--` 之后不检查。
+
+返回 `cluster`、`context`、`output`（stdout 原文）、`stderr`、`exit_code`、`truncated`、`timed_out`、`warnings`。
+
+`tsh kubectl` 即使 kubectl 出错退出码也是 0，所以 stderr 里有以 `error:`、`Error from server`、`Error in configuration`、`Unable to connect to the server` 开头的行时，返回 `success=false`、`KUBECTL_ERROR`，`output` 照常返回；`No resources found …` 不算错误。输出超过 `kube.max_output_bytes` 时只保留开头并标 `truncated`。
+
+### 错误码
+
+| 错误码 | 含义 |
+| --- | --- |
+| `INVALID_ARGUMENT` | 参数不合法（不写审计） |
+| `TELEPORT_EXPIRED` | Teleport 会话不可用（未登录或正在续期），稍后重试 |
+| `NOT_AUTHORIZED` | 会话有效但角色不允许或看不到 app/集群，附当前 Roles |
+| `UNKNOWN_FUNCTION` | 按工作空间定位时没有安装、没有运行映射或后端不是 Lambda |
+| `QUERY_ERROR` | 查插件库失败或超时 |
+| `AWS_ERROR` | 第一页 aws 报错（附 stderr） |
+| `LOGS_TIMEOUT` | 第一页就超过时间预算，一条都没取到 |
+| `KUBECTL_ERROR` | kubectl 报错（stderr 有错误行或退出码非 0） |
+
+### 配置（`settings.teleport_tools`）
+
+| 键 | 默认 |
+| --- | --- |
+| `tsh_path` | `/opt/teleport/bin/tsh` |
+| `shadow_home` | `/tmp/db-gateway/tsh-home` |
+| `time_budget_seconds` | `40` |
+| `max_concurrent` | `3`（每个工具各自的并发上限，不占数据库查询的槽位） |
+| `lambda_logs.enabled` | `true`；`false` 时工具不出现在 `tools/list` |
+| `lambda_logs.app` / `aws_role` / `region` | `aws-support-logs` / `SupportLambdaLogsReadOnly` / `us-east-1` |
+| `lambda_logs.default_timezone` | `Asia/Shanghai` |
+| `lambda_logs.default_limit` / `max_limit` | `1000` / `10000` |
+| `kube.enabled` | `true` |
+| `kube.clusters` | `{"prod": "lg-eks-01", "staging": "dify-plugin-1"}` |
+| `kube.max_output_bytes` | `1048576` |
+| `kube.kubeconfig_path` | `/tmp/db-gateway/kubeconfig` |
+
+`shadow_home` 和 `kubeconfig_path` 在容器内，容器重启后丢失，首次调用时自动重建。
+
 ## 构建
 
 ```bash

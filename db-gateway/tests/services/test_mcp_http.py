@@ -1,10 +1,12 @@
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from contextlib import asynccontextmanager
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from db_gateway.app import create_db_gateway_app
+from db_gateway.config import AppConfig
 from db_gateway.core import GatewayQueryResult
 
 
@@ -345,3 +347,75 @@ async def test_http_query_forwards_explain_and_ignores_ticket_id(mcp_client):
     assert resp.status == 200
     assert query.await_args.kwargs["explain"] is True
     assert "ticket_id" not in query.await_args.kwargs
+
+
+# --- plugin_lambda_logs / kube_read ---------------------------------------------
+
+LIST = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+
+
+def call(name, args):
+    return {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": name, "arguments": args}}
+
+
+@pytest.fixture
+def mcp_client_factory():
+    @asynccontextmanager
+    async def factory(teleport_tools):
+        cfg = MagicMock()
+        cfg.db_gateway.api_key = "secret"
+        cfg.teleport.proxy = "teleport.example:443"
+        cfg.teleport_tools = teleport_tools
+        async with TestClient(TestServer(create_db_gateway_app(cfg))) as client:
+            yield client
+    return factory
+
+
+@pytest.fixture
+async def teleport_mcp_client(mcp_client_factory):
+    async with mcp_client_factory(AppConfig().teleport_tools) as client:
+        yield client
+
+
+async def test_tools_list_adds_teleport_tools(teleport_mcp_client):
+    data = await (await _post_mcp(teleport_mcp_client, LIST)).json()
+    tools = {t["name"]: t for t in data["result"]["tools"]}
+    assert list(tools) == ["db_gateway_query", "db_gateway_schema", "plugin_lambda_logs", "kube_read"]
+    for name in ("plugin_lambda_logs", "kube_read"):
+        assert tools[name]["annotations"] == {"readOnlyHint": True, "destructiveHint": False,
+                                              "idempotentHint": True, "openWorldHint": True}
+    assert tools["kube_read"]["inputSchema"]["properties"]["cluster"]["enum"] == ["prod", "staging"]
+
+
+async def test_tools_list_hides_disabled_tools(mcp_client_factory):
+    cfg_tools = AppConfig(teleport_tools={"lambda_logs": {"enabled": False},
+                                          "kube": {"enabled": False}}).teleport_tools
+    async with mcp_client_factory(cfg_tools) as client:
+        names = [t["name"] for t in (await (await _post_mcp(client, LIST)).json())["result"]["tools"]]
+        assert names == ["db_gateway_query", "db_gateway_schema"]
+        resp = await _post_mcp(client, call("kube_read", {"cluster": "prod", "args": ["get", "pods"]}))
+        assert (await resp.json())["error"]["code"] == -32601
+
+
+async def test_existing_mock_config_still_lists_two_tools(mcp_client):
+    names = [t["name"] for t in (await (await _post_mcp(mcp_client, LIST)).json())["result"]["tools"]]
+    assert names == ["db_gateway_query", "db_gateway_schema"]
+
+
+async def test_call_plugin_lambda_logs_passes_arguments(teleport_mcp_client):
+    payload = {"success": True, "code": "", "error": None, "events": []}
+    with patch("db_gateway.mcp.execute_plugin_lambda_logs", AsyncMock(return_value=payload)) as fn:
+        resp = await _post_mcp(teleport_mcp_client, call("plugin_lambda_logs",
+            {"function_name": "f", "since_minutes": 10, "filter_pattern": '"ERROR"', "ticket_id": "1"}))
+    result = (await resp.json())["result"]
+    assert result["isError"] is False and json.loads(result["content"][0]["text"]) == payload
+    assert fn.call_args.kwargs["function_name"] == "f" and "ticket_id" not in fn.call_args.kwargs
+
+
+async def test_call_kube_read_error_sets_is_error(teleport_mcp_client):
+    payload = {"success": False, "code": "INVALID_ARGUMENT", "error": "x"}
+    with patch("db_gateway.mcp.execute_kube_read", AsyncMock(return_value=payload)) as fn:
+        resp = await _post_mcp(teleport_mcp_client, call("kube_read", {"cluster": "prod", "args": ["delete"]}))
+    assert (await resp.json())["result"]["isError"] is True
+    assert fn.call_args.kwargs == {"cfg": ANY, "cluster": "prod", "args": ["delete"]}
