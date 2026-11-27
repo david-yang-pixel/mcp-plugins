@@ -10,8 +10,10 @@ import pytest
 
 from db_gateway.postgres import TeleportAuthExpired
 from db_gateway.teleport import TshStatus
+from db_gateway import teleport_cli
 from db_gateway.teleport_cli import (
     TeleportNotAuthorized,
+    TshTimeout,
     ensure_shadow_home,
     run_tsh,
     run_tsh_with_login,
@@ -170,7 +172,7 @@ async def test_concurrent_calls_login_once(cfg, fake_tsh):
 async def test_login_timeout_uses_remaining_time(cfg, fake_tsh):
     fake_tsh.push(code=1); fake_tsh.push(sleep=30)          # 登录卡住
     t0 = time.monotonic()
-    with pytest.raises(TeleportAuthExpired):                 # get_tsh_status 默认被 mock 成 None
+    with pytest.raises(TshTimeout):
         await run_tsh_with_login(["aws"], cfg=cfg, deadline=dl(2),
                                  login_args=["apps", "login", "a"], needs_login=lambda r: True)
     assert time.monotonic() - t0 < 4
@@ -194,3 +196,52 @@ async def test_login_failure_with_session_is_not_authorized(cfg, fake_tsh, monke
         await run_tsh_with_login(["aws"], cfg=cfg, deadline=dl(10),
                                  login_args=["apps", "login", "a"], needs_login=lambda r: True)
     assert get_status.call_args.kwargs["auth_home"] == cfg.teleport.auth_home
+
+
+# --- final review fixes -----------------------------------------------------------
+
+
+async def test_shadow_heals_when_old_cert_is_written_back(cfg):
+    shadow = Path(await ensure_shadow_home(cfg))
+    write_tsh_src(Path(cfg.teleport.auth_home), cert="cert-2")
+    await ensure_shadow_home(cfg)
+    crt = shadow / "keys/teleport.dify.dev/u.crt"
+    crt.write_text("cert-1")            # 续期前启动的 tsh 把旧 key ring 写回了新副本
+    await ensure_shadow_home(cfg)
+    assert crt.read_text() == "cert-2"
+
+
+async def test_shadow_copy_retries_when_source_changes_midway(cfg, monkeypatch):
+    src_key = Path(cfg.teleport.auth_home) / "keys/teleport.dify.dev/u.key"
+    real_copytree = shutil.copytree
+    calls = []
+
+    def copytree(src, *a, **kw):
+        result = real_copytree(src, *a, **kw)
+        if str(src) == cfg.teleport.auth_home:      # 只看顶层调用（copytree 会递归调用自己）
+            if not calls:
+                src_key.write_text("key-2")        # watchdog/tsh 在复制过程中改写了私钥
+            calls.append(1)
+        return result
+
+    monkeypatch.setattr(teleport_cli.shutil, "copytree", copytree)
+    shadow = Path(await ensure_shadow_home(cfg))
+    assert (shadow / "keys/teleport.dify.dev/u.key").read_text() == "key-2" and len(calls) == 2
+
+
+def test_swap_failure_keeps_previous_shadow(tmp_path):
+    shadow = tmp_path / "shadow"
+    (shadow / "keys").mkdir(parents=True)
+    (shadow / "keys" / "u.crt").write_text("old")
+    ok = teleport_cli._swap_in(tmp_path / "missing-tmp", shadow, tmp_path / "shadow.old")
+    assert ok is False and (shadow / "keys" / "u.crt").read_text() == "old"
+
+
+async def test_login_timeout_with_valid_session_is_timeout(cfg, fake_tsh, monkeypatch):
+    status = TshStatus(user="u", cluster="c", roles=["support-lambda-logs"],
+                       valid_until=datetime.now(timezone.utc), remaining=timedelta(hours=1))
+    monkeypatch.setattr("db_gateway.teleport_cli.get_tsh_status", AsyncMock(return_value=status))
+    fake_tsh.push(code=1); fake_tsh.push(sleep=30)
+    with pytest.raises(TshTimeout):
+        await run_tsh_with_login(["aws"], cfg=cfg, deadline=dl(1),
+                                 login_args=["apps", "login", "a"], needs_login=lambda r: True)

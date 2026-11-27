@@ -1,4 +1,5 @@
 """plugin_lambda_logs: CloudWatch logs of SaaS plugin Lambdas through tsh aws."""
+import asyncio
 import json
 import shutil
 import time
@@ -55,8 +56,8 @@ async def test_single_page_by_function_name(cfg, fake_tsh):
 
 async def test_dash_filter_and_token_use_equals_form(cfg, fake_tsh):
     fake_tsh.push(stdout=page([EV]))
-    await execute_plugin_lambda_logs(cfg=cfg, function_name="f", since_minutes=5,
-                                     filter_pattern="-DEBUG", next_token="T0")
+    await execute_plugin_lambda_logs(cfg=cfg, function_name="f", start_time=1795775460000,
+                                     end_time=1795775520000, filter_pattern="-DEBUG", next_token="T0")
     argv = fake_tsh.calls[0]["argv"]
     assert "--filter-pattern=-DEBUG" in argv and "--next-token=T0" in argv
 
@@ -187,3 +188,46 @@ async def test_audit_has_no_log_content(cfg, fake_tsh, tmp_path):
     await execute_plugin_lambda_logs(cfg=cfg, function_name="f", since_minutes=5)
     text = (Path(cfg.db_gateway.audit_log_dir) / "db_gateway_audit.log").read_text()
     assert '"tool": "plugin_lambda_logs"' in text and "SECRET-PAYLOAD" not in text
+
+
+# --- final review fixes -----------------------------------------------------------
+
+
+async def test_queued_call_past_deadline_is_tsh_timeout(cfg, fake_tsh):
+    cfg.teleport_tools.max_concurrent = 1
+    cfg.teleport_tools.time_budget_seconds = 1
+    fake_tsh.push(sleep=30)
+    first, second = await asyncio.gather(
+        execute_plugin_lambda_logs(cfg=cfg, function_name="f", since_minutes=5),
+        execute_plugin_lambda_logs(cfg=cfg, function_name="g", since_minutes=5),
+    )
+    assert first["code"] == "LOGS_TIMEOUT" and second["code"] == "TSH_TIMEOUT"
+    assert len(fake_tsh.calls) == 1
+
+
+async def test_login_timeout_is_tsh_timeout(cfg, fake_tsh):
+    cfg.teleport_tools.time_budget_seconds = 2
+    fake_tsh.push(code=1, stderr="ERROR: some tsh error"); fake_tsh.push(sleep=30)
+    out = await execute_plugin_lambda_logs(cfg=cfg, function_name="f", since_minutes=5)
+    assert out["code"] == "TSH_TIMEOUT"
+
+
+async def test_since_minutes_with_next_token_is_rejected(cfg, fake_tsh):
+    out = await execute_plugin_lambda_logs(cfg=cfg, function_name="f", since_minutes=5, next_token="T1")
+    assert out["code"] == "INVALID_ARGUMENT" and "start_ms" in out["error"] and fake_tsh.calls == []
+
+
+async def test_window_has_absolute_ms_and_continue_hint(cfg, fake_tsh):
+    fake_tsh.push(stdout=page([EV], token="T1"))
+    out = await execute_plugin_lambda_logs(cfg=cfg, function_name="f", since_minutes=10, limit=1)
+    w = out["window"]
+    assert w["end_ms"] - w["start_ms"] == 600_000 and out["next_token"] == "T1"
+    argv = fake_tsh.calls[0]["argv"]
+    assert argv[argv.index("--start-time") + 1] == str(w["start_ms"])
+    assert any("start_ms" in x for x in out["warnings"])
+
+
+async def test_json_after_login_banner_is_parsed(cfg, fake_tsh):
+    fake_tsh.push(stdout='Logged into AWS app "aws-support-logs".\n\n' + page([EV]))
+    out = await execute_plugin_lambda_logs(cfg=cfg, function_name="f", since_minutes=5)
+    assert out["success"] and out["event_count"] == 1

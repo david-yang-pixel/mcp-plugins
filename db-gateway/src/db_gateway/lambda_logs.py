@@ -23,6 +23,8 @@ from db_gateway.postgres import TeleportAuthExpired, audit_log
 from db_gateway.teleport_cli import (
     TeleportNotAuthorized,
     TshResult,
+    TshTimeout,
+    acquire_before,
     ensure_shadow_home,
     run_tsh_with_login,
 )
@@ -135,6 +137,21 @@ def _event(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _parse_aws_json(stdout: str) -> dict[str, Any] | None:
+    """The aws JSON document, tolerating text tsh may print before it (e.g. an app login notice)."""
+    try:
+        data = json.loads(stdout)
+    except ValueError:
+        start = stdout.find("{")
+        if start < 0:
+            return None
+        try:
+            data, _end = json.JSONDecoder().raw_decode(stdout, start)
+        except ValueError:
+            return None
+    return data if isinstance(data, dict) else None
+
+
 def _needs_login(result: TshResult) -> bool:
     # AWS API errors ("An error occurred (Code) ...") and aws argument errors are
     # not credential problems. tsh 18.11 logs into the app by itself; this is a fallback.
@@ -238,12 +255,22 @@ async def execute_plugin_lambda_logs(
             next_token = None
         elif not isinstance(next_token, str):
             raise _InvalidArgument("next_token 必须是字符串")
+        elif has_since:
+            # since_minutes is relative to now: a token replayed against a shifted
+            # window could skip events.
+            raise _InvalidArgument(
+                "带 next_token 续页时不要用 since_minutes：把上次返回的 window.start_ms、"
+                "window.end_ms 作为 start_time、end_time，再带上 next_token"
+            )
     except _InvalidArgument as e:
         return fail("INVALID_ARGUMENT", str(e), record=False)
 
     audit.update(start_ms=start_ms, end_ms=end_ms, filter_pattern=filter_pattern, limit=page_limit)
 
-    async with _limiter(max(1, int(tools.max_concurrent))):
+    slot = _limiter(max(1, int(tools.max_concurrent)))
+    if not await acquire_before(slot, deadline):
+        return fail("TSH_TIMEOUT", "等待并发槽位超过了时间预算（网关繁忙），稍后重试")
+    try:
         # --- locate the function -------------------------------------------------
         plugin_unique_identifier = None
         if not has_fn:
@@ -251,19 +278,24 @@ async def execute_plugin_lambda_logs(
             db_name, db_port = _db_target(cfg, "plugin")
             kwargs = _metadata_kwargs(cfg, db_name=db_name, db_port=db_port)
             max_queries = max(1, int(getattr(cfg.postgres, "max_concurrent_queries", 3) or 3))
-            try:
+
+            async def resolve() -> list[list[Any]]:
                 query_limiter = await _query_limiter("plugin", db_port, max_queries)
-                async with query_limiter:
-                    rows = await asyncio.wait_for(
-                        run_metadata_query(**kwargs, sql=RESOLVE_SQL, params=(tenant_id, plugin_id),
-                                           timeout=RESOLVE_QUERY_TIMEOUT_SECONDS),
-                        timeout=max(0.1, min(RESOLVE_TOTAL_TIMEOUT_SECONDS,
-                                             deadline - time.monotonic())),
+                async with query_limiter:   # shared with db_gateway_query: wait inside the bound
+                    return await run_metadata_query(
+                        **kwargs, sql=RESOLVE_SQL, params=(tenant_id, plugin_id),
+                        timeout=RESOLVE_QUERY_TIMEOUT_SECONDS,
                     )
+
+            try:
+                rows = await asyncio.wait_for(
+                    resolve(),
+                    timeout=max(0.1, min(RESOLVE_TOTAL_TIMEOUT_SECONDS, deadline - time.monotonic())),
+                )
             except TeleportAuthExpired as e:
                 return fail("TELEPORT_EXPIRED", str(e))
             except asyncio.TimeoutError:
-                return fail("QUERY_ERROR", "查询插件安装记录超时")
+                return fail("QUERY_ERROR", "查询插件安装记录超时（含排队等待）")
             except Exception as e:
                 return fail("QUERY_ERROR", f"查询插件安装记录失败：{e}")
             if not rows:
@@ -290,6 +322,11 @@ async def execute_plugin_lambda_logs(
             pages = 0
             complete = False
             while True:
+                if time.monotonic() >= deadline:
+                    if pages == 0:
+                        return fail("TSH_TIMEOUT", "开始查询前时间预算就用完了（排队或登录耗时），稍后重试")
+                    warnings.append(f"第 {pages + 1} 页之前时间预算用完，已返回之前取到的事件；用 next_token 继续")
+                    break
                 argv = [
                     "aws", "--app", lc.app, "logs", "filter-log-events", "--region", lc.region,
                     "--log-group-name", log_group,
@@ -311,10 +348,7 @@ async def execute_plugin_lambda_logs(
                 )
                 data = None
                 if not result.timed_out and result.exit_code == 0:
-                    try:
-                        data = json.loads(result.stdout)
-                    except ValueError:
-                        data = None
+                    data = _parse_aws_json(result.stdout)
                 if not isinstance(data, dict):
                     if result.timed_out:
                         reason, code = "时间预算用完", "LOGS_TIMEOUT"
@@ -341,11 +375,20 @@ async def execute_plugin_lambda_logs(
                     break
         except TeleportAuthExpired as e:
             return fail("TELEPORT_EXPIRED", str(e))
+        except TshTimeout as e:
+            return fail("TSH_TIMEOUT", str(e))
         except TeleportNotAuthorized as e:
             return fail("NOT_AUTHORIZED", f"{e}；需要 Teleport 角色 support-lambda-logs")
+    finally:
+        slot.release()
 
     if complete and not events:
         warnings.append(EMPTY_WARNING)
+    if not complete:
+        warnings.append(
+            f"续页：start_time={start_ms}、end_time={end_ms}（即 window.start_ms / window.end_ms），"
+            "其他参数不变，再带上 next_token"
+        )
     tz = ZoneInfo(lc.default_timezone)
     payload: dict[str, Any] = {
         "success": True,
@@ -355,6 +398,8 @@ async def execute_plugin_lambda_logs(
         "log_group": log_group,
         "region": lc.region,
         "window": {
+            "start_ms": start_ms,
+            "end_ms": end_ms,
             "start_utc": _iso(start_ms),
             "end_utc": _iso(end_ms),
             "start_local": _iso(start_ms, tz),

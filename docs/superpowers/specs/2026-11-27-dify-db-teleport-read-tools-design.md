@@ -106,8 +106,8 @@ Task 0 之后在 A 之内新增的两个决定：
 **影子 TELEPORT_HOME**（`ensure_shadow_home(cfg)`，每次工具调用开始时调用一次）
 - 源目录 `teleport.auth_home`，副本 `teleport_tools.shadow_home`。
 - 源签名：`keys/*/*.crt`（只看 proxy 目录下一层的文件，即用户 TLS 证书）的相对路径和 sha256。续期时证书内容变化，tsh 重写时内容不变，所以签名只随续期变化。
-- 签名与副本里记录的相同 → 直接用副本。
-- 不同 → 在进程内锁下复制到临时目录，忽略名称为 `bin` 或以 `-app`、`-kube`、`-db` 结尾的目录；复制后再算一次源签名，一致才写入签名文件并整体替换副本（rename），否则重试一次。
+- 签名与**副本里实际的** `keys/*/*.crt` 相同 → 直接用副本。不只看记录的签名：续期前启动的 tsh 可能把旧 key ring 写回新副本，下次调用要能发现并重新同步（最终审查 I1）。
+- 不同 → 在进程内锁下复制到临时目录，忽略名称为 `bin` 或以 `-app`、`-kube`、`-db` 结尾的目录；复制前后源目录的（路径、大小、mtime）快照和源签名都一致，才写入完成标记并整体替换副本（rename，失败时保留旧副本），否则重试一次。
 - 源目录没有证书（续期窗口）或复制失败 → 副本存在就继续用副本，不存在就抛 `TeleportAuthExpired`。
 - 副本里没有 app/kube 证书时，tsh 18.11 自动签发，不需要额外处理。
 
@@ -128,7 +128,9 @@ Task 0 之后在 A 之内新增的两个决定：
 **按需登录**（`run_tsh_with_login`、`tsh_login`）
 - 命令失败且 `needs_login(result)` 为真时，在进程内锁下执行一次登录：日志用 `tsh apps login --aws-role <角色> <app>`，集群用 `tsh kube login --all`。成功后用剩余时间重试一次。
 - 有 `not_before`：同参数的登录在本次调用开始后已经成功过，就不再登录。并发调用共享一次登录。
-- 登录失败时用宿主机 tsh 对**源目录**跑 `tsh status`：未登录 → `TELEPORT_EXPIRED`（等 watchdog 续期，调用方重试）；已登录 → `NOT_AUTHORIZED`，附 stderr 和当前 Roles。
+- 登录超时（时间预算用完）→ `TSH_TIMEOUT`，不查 `tsh status`（最终审查 I3：超时与角色无关）。
+- 登录失败（非零退出）时用宿主机 tsh 对**源目录**跑 `tsh status`：未登录 → `TELEPORT_EXPIRED`（等 watchdog 续期，调用方重试）；已登录 → `NOT_AUTHORIZED`，附 stderr 和当前 Roles。
+- 每个工具的并发槽位和插件库查询槽位的等待也受同一截止时间约束，超时返回 `TSH_TIMEOUT` / `QUERY_ERROR`（最终审查 I2）。
 - 18.11 下 tsh aws 会自动登录 app，kube 证书也会自动重签，所以这条路径只是兜底。
 
 ### 5.2 连接池监视
@@ -147,7 +149,7 @@ Task 0 之后在 A 之内新增的两个决定：
 - `filter_pattern`（可选）：CloudWatch 过滤语法原样透传。
 - `log_stream_names`（可选）。
 - `limit`：默认 1000，最大 10000。
-- `next_token`：翻页令牌。
+- `next_token`：翻页令牌。续页时用上次返回的 `window.start_ms`、`window.end_ms` 作为 `start_time`、`end_time`；与 `since_minutes` 同时给 → `INVALID_ARGUMENT`（相对窗口每次都变，令牌会对上不同的窗口，最终审查 I4）。
 
 执行
 - `tsh aws --app aws-support-logs logs filter-log-events --region us-east-1 --log-group-name /aws/lambda/<fn> …`，按页取。`--filter-pattern=`、`--next-token=` 用等号写法。
@@ -156,7 +158,8 @@ Task 0 之后在 A 之内新增的两个决定：
 
 输出
 - `function_name`、`log_group`；按 `tenant_id + plugin_id` 定位时另带 `plugin_unique_identifier`，并提示「安装表反映当前状态，故障后升级或重装过要按故障时的版本查」。
-- 实际窗口（UTC 和北京时间各一份）。
+- 实际窗口：毫秒（`start_ms`、`end_ms`），以及 UTC 和北京时间各一份。
+- aws 输出前如有 tsh 打印的提示文字，跳过它再解析 JSON。
 - `events[]`：`timestamp`、`log_stream`、`event_id`、`message`（原样，不截断）。
 - `event_count`、`next_token`、`complete`（是否已取全）、`warnings`（含空结果时的排查提示）。
 
@@ -188,6 +191,7 @@ Task 0 之后在 A 之内新增的两个决定：
 结果判定（`tsh kubectl` 退出码永远是 0）
 - stderr 里有以 `error:`、`Error from server`、`Error in configuration`、`Unable to connect to the server` 开头的行，或退出码非 0 → `success=false`、`KUBECTL_ERROR`，`output` 照常返回。
 - `No resources found …` 之类的提示不算错误。
+- 到时间预算且没有任何输出（包括排队或登录用完预算、根本没运行）→ `success=false`、`TSH_TIMEOUT`；有部分输出时仍返回成功并标 `timed_out`。
 
 输出
 - `output`（kubectl 标准输出原文）、`stderr`、`exit_code`。
@@ -214,7 +218,7 @@ Task 0 之后在 A 之内新增的两个决定：
 
 - 两个工具的 schema 写在 `mcp_schema.py`，`readOnlyHint=true`、`destructiveHint=false`（OpenConnector 据此判定为 read，不要求确认）。`mcp.py` 增加分发。
 - 审计写 `db_gateway_audit.log`：工具名、状态、耗时；日志工具记函数名、窗口、过滤条件、返回事件数、`complete`；`kube_read` 记集群、完整参数、退出码、输出字节数。**不记录日志和输出内容**。
-- 错误码：沿用 `INVALID_ARGUMENT`、`TELEPORT_EXPIRED`、`QUERY_ERROR`；新增 `UNKNOWN_FUNCTION`、`NOT_AUTHORIZED`、`AWS_ERROR`、`KUBECTL_ERROR`（stderr 有错误行或非零退出，附 stderr）、`LOGS_TIMEOUT`（第一页就超过时间预算，一条都没取到时）。
+- 错误码：沿用 `INVALID_ARGUMENT`、`TELEPORT_EXPIRED`、`QUERY_ERROR`；新增 `UNKNOWN_FUNCTION`、`NOT_AUTHORIZED`、`AWS_ERROR`、`KUBECTL_ERROR`（stderr 有错误行或非零退出，附 stderr）、`LOGS_TIMEOUT`（第一页就超过时间预算，一条都没取到时）、`TSH_TIMEOUT`（预算在 tsh 完成前用完：排队、登录或 kubectl 无输出）。
 
 ## 6. 改动清单
 

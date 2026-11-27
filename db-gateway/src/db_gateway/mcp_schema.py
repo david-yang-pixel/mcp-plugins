@@ -140,8 +140,9 @@ LAMBDA_LOGS_TOOL_SCHEMA: dict[str, Any] = {
         "was upgraded or reinstalled since). Window: exactly one of `since_minutes` or "
         "`start_time` + `end_time` (end exclusive; ISO 8601 or millisecond timestamps; times "
         "without a zone are Asia/Shanghai; second-precision numbers are rejected). Messages are "
-        "never truncated. When `complete` is false, call again with the returned `next_token` "
-        "and the same other arguments. Many or long events use a lot of context: lower `limit` "
+        "never truncated. When `complete` is false, call again with the returned `next_token`, "
+        "start_time=window.start_ms, end_time=window.end_ms and the same other arguments "
+        "(since_minutes cannot be combined with next_token). Many or long events use a lot of context: lower `limit` "
         "or add `filter_pattern` (CloudWatch syntax). REPORT lines are invocation stats only; "
         "for errors filter on '\"ERROR\"' or '\"Traceback\"', or on '\"<RequestId>\"' when known. "
         "One function is shared by every workspace using that plugin version. To list all "
@@ -178,7 +179,10 @@ LAMBDA_LOGS_TOOL_SCHEMA: dict[str, Any] = {
             },
             "log_stream_names": {"type": "array", "items": {"type": "string"}, "description": "Only these log streams."},
             "limit": {"type": "integer", "minimum": 1, "description": "Max events for this call (default 1000, max 10000)."},
-            "next_token": {"type": "string", "description": "next_token from the previous call."},
+            "next_token": {
+                "type": "string",
+                "description": "next_token from the previous call; pass window.start_ms/end_ms as start_time/end_time with it.",
+            },
         },
         "required": [],
     },

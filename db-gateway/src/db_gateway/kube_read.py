@@ -21,6 +21,8 @@ from db_gateway.postgres import TeleportAuthExpired, audit_log
 from db_gateway.teleport_cli import (
     TeleportNotAuthorized,
     TshResult,
+    TshTimeout,
+    acquire_before,
     ensure_shadow_home,
     run_tsh_with_login,
     tsh_login,
@@ -172,7 +174,10 @@ async def execute_kube_read(*, cfg: Any, cluster: Any, args: Any) -> dict[str, A
         return fail("INVALID_ARGUMENT", str(e), record=False)
     cluster_name = clusters[cluster]
 
-    async with _limiter(max(1, int(tools.max_concurrent))):
+    slot = _limiter(max(1, int(tools.max_concurrent)))
+    if not await acquire_before(slot, deadline):
+        return fail("TSH_TIMEOUT", "等待并发槽位超过了时间预算（网关繁忙），稍后重试")
+    try:
         try:
             await ensure_shadow_home(cfg)
             context = resolve_context(kube.kubeconfig_path, proxy=cfg.teleport.proxy,
@@ -192,10 +197,17 @@ async def execute_kube_read(*, cfg: Any, cluster: Any, args: Any) -> dict[str, A
             )
         except TeleportAuthExpired as e:
             return fail("TELEPORT_EXPIRED", str(e))
+        except TshTimeout as e:
+            return fail("TSH_TIMEOUT", str(e))
         except TeleportNotAuthorized as e:
             return fail("NOT_AUTHORIZED", str(e))
+    finally:
+        slot.release()
 
     failed = kubectl_failed(result)
+    if result.timed_out and not failed and not result.stdout:
+        # Nothing ran or nothing came back before the deadline: not a success.
+        return fail("TSH_TIMEOUT", "到时间预算 kubectl 还没有任何输出，稍后重试，或用 --tail、--since、-l 缩小范围")
     warnings: list[str] = []
     if result.truncated:
         warnings.append(

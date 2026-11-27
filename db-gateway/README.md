@@ -139,7 +139,7 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
 ### 运行方式
 
 - **镜像自带 tsh 18.11.0**（`/opt/teleport/bin/tsh`），只给这两个工具用。宿主机挂载的 `/usr/local/bin/tsh` 是 18.0.0：它的 `tsh aws` 对 18.11 的 proxy 签名校验失败（403），所以不能用。现有功能（`tsh status`、手动登录）照旧用宿主机的 tsh。
-- **影子 TELEPORT_HOME**：tsh 每次 `apps login`、`aws`、`kubectl` 都会重写整个 key ring。为了不让连接池监视清空连接池、不和 `tsh-auth-watchdog` 互相覆盖，这两个工具从不写 `teleport.auth_home`。
+- **影子 TELEPORT_HOME**（每次调用比较副本里实际的证书与线上证书，不一致就重新同步；复制前后线上目录有任何文件变化就重来，避免复制到续期中途的半套文件）：tsh 每次 `apps login`、`aws`、`kubectl` 都会重写整个 key ring。为了不让连接池监视清空连接池、不和 `tsh-auth-watchdog` 互相覆盖，这两个工具从不写 `teleport.auth_home`。
   - 每次调用开始时，把它（不含 `bin`、`*-app`、`*-kube`、`*-db` 目录）同步到容器内的 `teleport_tools.shadow_home`，tsh 只在这个副本里读写。
   - 用户证书 `keys/*/*.crt` 的内容变化（即 watchdog 续期）时重新同步。
   - 续期窗口里线上目录暂时没有证书时，继续用副本里仍在有效期内的旧证书；连副本都没有时返回 `TELEPORT_EXPIRED`。
@@ -163,9 +163,9 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
 | `filter_pattern` | CloudWatch 过滤语法，原样透传，例如 `"ERROR"`、`"Traceback"`、`"<RequestId>"`。 |
 | `log_stream_names` | 只查这些日志流。 |
 | `limit` | 本次最多返回的事件数，默认 1000，最大 10000。 |
-| `next_token` | 上次返回的翻页令牌。 |
+| `next_token` | 上次返回的翻页令牌。续页时用上次返回的 `window.start_ms`、`window.end_ms` 作为 `start_time`、`end_time`；不能与 `since_minutes` 同时使用（相对时间每次都会变，令牌会对上不同的窗口）。 |
 
-返回 `function_name`、`log_group`、`region`、`window`（`start_utc`、`end_utc`、`start_local`、`end_local`、`timezone`）、`events`（`timestamp`、`log_stream`、`event_id`、`message`，内容不截断）、`event_count`、`next_token`、`complete`、`warnings`；按工作空间定位时另带 `plugin_unique_identifier`。
+返回 `function_name`、`log_group`、`region`、`window`（`start_ms`、`end_ms`、`start_utc`、`end_utc`、`start_local`、`end_local`、`timezone`）、`events`（`timestamp`、`log_stream`、`event_id`、`message`，内容不截断）、`event_count`、`next_token`、`complete`、`warnings`；按工作空间定位时另带 `plugin_unique_identifier`。
 
 翻页规则：
 - 取完返回 `complete=true`。
@@ -187,7 +187,7 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
 - 拒绝 `-f`/`--filename`、`-k`/`--kustomize`、`--kubeconfig`、`--context`、`--cluster`、`--user`、`--as*`、`--token`、`--server`/`-s`、证书和 TLS 参数、`--follow`、`-w`/`--watch`/`--watch-only`、`--cache-dir`、`--profile*`。
 - 短参数连写也会检查（`-Aw` 被拒，`-nfoo`、`-owide` 放行）；第一个 `--` 之后不检查。
 
-返回 `cluster`、`context`、`output`（stdout 原文）、`stderr`、`exit_code`、`truncated`、`timed_out`、`warnings`。
+返回 `cluster`、`context`、`output`（stdout 原文）、`stderr`、`exit_code`、`truncated`、`timed_out`、`warnings`。到时间预算时：有部分输出就返回成功并标 `timed_out`；一点输出都没有则返回 `TSH_TIMEOUT`。
 
 `tsh kubectl` 即使 kubectl 出错退出码也是 0，所以 stderr 里有以 `error:`、`Error from server`、`Error in configuration`、`Unable to connect to the server` 开头的行时，返回 `success=false`、`KUBECTL_ERROR`，`output` 照常返回；`No resources found …` 不算错误。输出超过 `kube.max_output_bytes` 时只保留开头并标 `truncated`。
 
@@ -203,6 +203,7 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
 | `AWS_ERROR` | 第一页 aws 报错（附 stderr） |
 | `LOGS_TIMEOUT` | 第一页就超过时间预算，一条都没取到 |
 | `KUBECTL_ERROR` | kubectl 报错（stderr 有错误行或退出码非 0） |
+| `TSH_TIMEOUT` | 时间预算在 tsh 完成前用完：等待并发槽位、登录超时、还没开始查询，或 kubectl 没有任何输出；稍后重试 |
 
 ### 配置（`settings.teleport_tools`）
 

@@ -106,7 +106,7 @@ async def test_kube_login_shares_deadline(cfg, fake_tsh):
     fake_tsh.push(sleep=30)                                   # kube login 卡住
     t0 = time.monotonic()
     out = await execute_kube_read(cfg=cfg, cluster="prod", args=["get", "pods"])
-    assert out["code"] in ("TELEPORT_EXPIRED", "NOT_AUTHORIZED") and time.monotonic() - t0 < 4
+    assert out["code"] == "TSH_TIMEOUT" and time.monotonic() - t0 < 4
 
 
 async def test_kube_read_relogs_in_on_credential_error(cfg, fake_tsh, kubeconfig):
@@ -165,3 +165,25 @@ async def test_kube_read_audit_has_args_but_no_output(cfg, fake_tsh, kubeconfig)
     await execute_kube_read(cfg=cfg, cluster="prod", args=["logs", "p", "-n", "dify-plugin"])
     text = (Path(cfg.db_gateway.audit_log_dir) / "db_gateway_audit.log").read_text()
     assert '"tool": "kube_read"' in text and '"dify-plugin"' in text and "CUSTOMER-DATA" not in text
+
+
+# --- final review fixes -----------------------------------------------------------
+
+
+async def test_kube_timeout_without_output_is_tsh_timeout(cfg, fake_tsh, kubeconfig):
+    cfg.teleport_tools.time_budget_seconds = 1
+    fake_tsh.push(sleep=30)
+    out = await execute_kube_read(cfg=cfg, cluster="prod", args=["logs", "p"])
+    assert (out["success"], out["code"]) == (False, "TSH_TIMEOUT")
+
+
+async def test_kube_queued_call_past_deadline_never_runs(cfg, fake_tsh, kubeconfig):
+    cfg.teleport_tools.max_concurrent = 1
+    cfg.teleport_tools.time_budget_seconds = 1
+    fake_tsh.push(stdout="line1\n", sleep=30)
+    first, second = await asyncio.gather(
+        execute_kube_read(cfg=cfg, cluster="prod", args=["logs", "a"]),
+        execute_kube_read(cfg=cfg, cluster="prod", args=["logs", "b"]),
+    )
+    assert first["success"] and first["timed_out"]
+    assert (second["success"], second["code"]) == (False, "TSH_TIMEOUT") and len(fake_tsh.calls) == 1

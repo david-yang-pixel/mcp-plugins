@@ -72,6 +72,10 @@ class TeleportNotAuthorized(Exception):
     """tsh login failed although the Teleport session itself is valid (role/app missing)."""
 
 
+class TshTimeout(Exception):
+    """The call's time budget ran out before tsh could finish (e.g. during login)."""
+
+
 def strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
@@ -97,46 +101,80 @@ def source_signature(auth_home: str) -> list[list[str]] | None:
     return entries or None
 
 
-def _read_shadow_signature(shadow: Path) -> list[list[str]] | None:
-    try:
-        return json.loads((shadow / SHADOW_SIGNATURE_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+def _shadow_complete(shadow: Path) -> bool:
+    """The marker is written last, so a shadow without it is a partial copy."""
+    return (shadow / SHADOW_SIGNATURE_FILE).is_file()
 
 
 def _ignore(_dir: str, names: list[str]) -> set[str]:
     return {n for n in names if n == "bin" or n.endswith(SHADOW_IGNORE_SUFFIXES)}
 
 
+def _source_snapshot(source: str) -> dict[str, tuple[int, int]] | None:
+    """{path: (size, mtime_ns)} of the files the shadow copies; None on error."""
+    out: dict[str, tuple[int, int]] = {}
+    try:
+        for root, dirs, files in os.walk(source):
+            dirs[:] = [d for d in dirs if d not in _ignore(root, dirs)]
+            for name in files:
+                st = os.stat(os.path.join(root, name))
+                out[os.path.relpath(os.path.join(root, name), source)] = (st.st_size, st.st_mtime_ns)
+    except OSError:
+        return None
+    return out
+
+
+def _swap_in(tmp: Path, shadow: Path, old: Path) -> bool:
+    """Replace ``shadow`` with ``tmp``; keep the previous shadow if that fails."""
+    shadow.parent.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(old, ignore_errors=True)
+    try:
+        if shadow.exists():
+            shadow.rename(old)
+        try:
+            tmp.rename(shadow)
+        except OSError:
+            # An in-flight tsh may have recreated part of the path in between.
+            shutil.rmtree(shadow, ignore_errors=True)
+            tmp.rename(shadow)
+    except OSError as e:
+        logger.warning("teleport_shadow_swap_failed", error=str(e))
+        if not shadow.exists() and old.exists():
+            old.rename(shadow)
+        shutil.rmtree(tmp, ignore_errors=True)
+        return False
+    finally:
+        shutil.rmtree(old, ignore_errors=True)
+    return True
+
+
 def _sync_shadow(source: str, shadow: Path, sig: list[list[str]]) -> bool:
-    """Copy ``source`` into ``shadow`` atomically; False if the source moved under us."""
+    """Copy ``source`` into ``shadow``; False if the source kept changing under us."""
     tmp = shadow.with_name(f"{shadow.name}.tmp-{os.getpid()}")
     old = shadow.with_name(f"{shadow.name}.old-{os.getpid()}")
     for _attempt in range(2):
         shutil.rmtree(tmp, ignore_errors=True)
+        before = _source_snapshot(source)
         try:
             shutil.copytree(source, tmp, ignore=_ignore, symlinks=True)
         except (OSError, shutil.Error):
             continue
-        if source_signature(source) != sig:
-            continue  # tsh-auth-watchdog renewed while we copied
+        # A renewal (or any rewrite) during the copy could leave a torn key ring.
+        if before is None or _source_snapshot(source) != before or source_signature(source) != sig:
+            continue
         (tmp / SHADOW_SIGNATURE_FILE).write_text(json.dumps(sig), encoding="utf-8")
-        shadow.parent.mkdir(parents=True, exist_ok=True)
-        shutil.rmtree(old, ignore_errors=True)
-        if shadow.exists():
-            shadow.rename(old)
-        tmp.rename(shadow)
-        shutil.rmtree(old, ignore_errors=True)
-        return True
+        return _swap_in(tmp, shadow, old)
     shutil.rmtree(tmp, ignore_errors=True)
     return False
 
 
 async def ensure_shadow_home(cfg: Any) -> str:
-    """Return the shadow TELEPORT_HOME, re-syncing it after a renewal.
+    """Return the shadow TELEPORT_HOME, re-syncing it whenever its certs differ.
 
-    Raises TeleportAuthExpired when neither the shared home nor an earlier copy
-    is usable.
+    The shadow's own certs are compared (not a stored signature): a tsh process
+    started before a renewal can write the old key ring back into a fresh copy,
+    and the next call must notice. Raises TeleportAuthExpired when neither the
+    shared home nor an earlier complete copy is usable.
     """
     global _shadow_lock
     if _shadow_lock is None:
@@ -145,13 +183,13 @@ async def ensure_shadow_home(cfg: Any) -> str:
     shadow = Path(cfg.teleport_tools.shadow_home)
     async with _shadow_lock:
         sig = source_signature(source)
-        current = _read_shadow_signature(shadow)
-        if sig is not None and sig == current:
+        complete = _shadow_complete(shadow)
+        if sig is not None and complete and source_signature(str(shadow)) == sig:
             return str(shadow)
         if sig is not None and await asyncio.to_thread(_sync_shadow, source, shadow, sig):
             logger.info("teleport_shadow_synced", shadow=str(shadow))
             return str(shadow)
-        if current is not None:
+        if _shadow_complete(shadow):
             # Renewal window (or a copy that raced it): the old certificate is
             # still within its validity, keep using it.
             return str(shadow)
@@ -197,6 +235,18 @@ def _killpg(pid: int) -> None:
         os.killpg(pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
+
+
+async def acquire_before(semaphore: asyncio.Semaphore, deadline: float) -> bool:
+    """Acquire ``semaphore`` unless ``deadline`` (monotonic) passes first."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return False
+    try:
+        await asyncio.wait_for(semaphore.acquire(), timeout=remaining)
+    except asyncio.TimeoutError:
+        return False
+    return True
 
 
 async def run_tsh(
@@ -298,6 +348,9 @@ async def tsh_login(
             return
     logger.warning("tsh_login_failed", args=login_args, exit_code=result.exit_code,
                    timed_out=result.timed_out)
+    if result.timed_out:
+        # Out of time says nothing about roles; do not report NOT_AUTHORIZED.
+        raise TshTimeout("tsh 登录没有在时间预算内完成，稍后重试")
     raise await _login_failure(cfg, result)
 
 
