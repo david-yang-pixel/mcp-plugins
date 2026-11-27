@@ -4,8 +4,8 @@ Two facts measured on the server shape this module:
 
 * tsh rewrites the whole key ring (user cert, key, CAs, SSH cert) on every
   ``tsh apps login`` / ``tsh aws`` / ``tsh kubectl``. Running it against the
-  shared ``teleport.auth_home`` would make ``pg_pool.keys_signature`` flush the
-  connection pools and could race tsh-auth-watchdog's renewal. The tools
+  shared ``teleport.auth_home`` could race tsh-auth-watchdog's renewal and
+  disturb the tunnels that read it. The tools
   therefore run tsh against a container-local copy (the *shadow* home) and only
   ever read the shared directory.
 * The host-mounted tsh 18.0.0 fails ``tsh aws`` signature verification against

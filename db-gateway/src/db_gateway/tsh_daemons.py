@@ -218,6 +218,23 @@ async def stop_all() -> None:
         await daemon.stop()
 
 
+async def refresh_running(cfg: Any, deadline: float) -> None:
+    """After a Teleport renewal: restart the running daemons now (background).
+
+    ``ensure`` restarts a daemon whose shadow certificate changed, so the next
+    tool call finds it ready instead of paying the restart. Daemons that are
+    not running stay lazy; a failed restart is logged and left to that call.
+    """
+    for daemon in list(_DAEMONS):
+        if not daemon._alive():
+            continue
+        try:
+            await daemon.ensure(cfg, deadline)
+        except Exception as e:  # noqa: BLE001 - background work must not raise
+            logger.warning("tsh_daemon_refresh_failed", daemon=daemon.name,
+                           error=redact(f"{type(e).__name__}: {e}")[:300])
+
+
 def _reset_state() -> None:
     for daemon in list(_DAEMONS):
         daemon._reset()

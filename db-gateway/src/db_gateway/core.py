@@ -617,10 +617,7 @@ async def _run_psql_with_retries(
     if explain:
         query_kwargs["explain"] = True
     if use_pool:
-        teleport = getattr(cfg, "teleport", None)
-        watch = bool(getattr(cfg.postgres, "pool_watch_teleport_keys", True))
         query_kwargs["settings"] = pool_settings_from_config(cfg)
-        query_kwargs["auth_home"] = getattr(teleport, "auth_home", None) if watch else None
     for attempt in range(attempts):
         attempt_started = time.perf_counter()
         try:
@@ -662,10 +659,7 @@ def _metadata_kwargs(cfg: Any, *, db_name: str, db_port: int) -> dict[str, Any]:
         "use_pool": use_pool,
     }
     if use_pool:
-        teleport = getattr(cfg, "teleport", None)
-        watch = bool(getattr(cfg.postgres, "pool_watch_teleport_keys", True))
         kwargs["settings"] = pool_settings_from_config(cfg)
-        kwargs["auth_home"] = getattr(teleport, "auth_home", None) if watch else None
     return kwargs
 
 

@@ -5,17 +5,19 @@ Every psql invocation opens a new connection through the local
 DB agent, Postgres auth) costs about two seconds per query. A pool keeps the
 connections open, so a query only pays its own round trips.
 
-Teleport certificates are renewed outside this service: tsh-auth-watchdog runs
-``tsh logout --all`` + ``tsh login`` and the tsh-cert.path unit then restarts
-the tsh-proxy-db* tunnels, which drops every connection made through them.
-The pool therefore:
+Teleport certificates are renewed outside this service (tsh-auth-watchdog, about
+every 35 minutes). Connections must not be handed out dead, so:
 
-* watches ``<teleport.auth_home>/keys`` and drains all pools when anything in
-  it changes, so the first query after a renewal does not hit a dead socket;
-* treats connection-level failures as ``TeleportAuthExpired`` and drains the
+* ``maintenance.py`` verifies idle connections in the background
+  (``PoolManager.keepalive``) and right after a renewal, replacing dead ones
+  before a query needs them; nothing is drained just because certificates changed;
+* a connection failure right after checkout (dropped while idle) is retried at
+  once on a fresh connection;
+* other connection-level failures are ``TeleportAuthExpired`` and drain the
   affected pool, letting the existing retry loop reconnect after a short delay;
-* recycles idle connections (``pool_max_idle_seconds``) and probes ones that
-  sat idle longer than ``pool_check_idle_seconds`` before handing them out.
+* idle connections above ``pool_min_size`` are recycled (``pool_max_idle_seconds``)
+  and ones not used or verified for ``pool_check_idle_seconds`` are probed at
+  checkout (a safety net while the keepalive runs).
 
 Read-only guarantees match the psql path: the validated SQL runs inside a
 ``READ ONLY`` transaction with ``SET LOCAL statement_timeout`` and is always
@@ -24,7 +26,6 @@ rolled back, so no session state survives between queries.
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 import weakref
 from dataclasses import dataclass
@@ -109,31 +110,6 @@ def pool_settings_from_config(cfg: Any) -> PoolSettings:
     )
 
 
-def keys_signature(auth_home: str) -> Optional[tuple[int, float]]:
-    """(file count, newest mtime) of ``<auth_home>/keys``; None if absent.
-
-    The whole directory is watched instead of one certificate file because the
-    file names depend on the tsh version, cluster and user.
-    """
-    keys_dir = os.path.join(auth_home, "keys")
-    count = 0
-    newest = 0.0
-    try:
-        for root, _dirs, files in os.walk(keys_dir):
-            for name in files:
-                try:
-                    mtime = os.stat(os.path.join(root, name)).st_mtime
-                except OSError:
-                    continue
-                count += 1
-                newest = max(newest, mtime)
-    except OSError:
-        return None
-    if count == 0 and not os.path.isdir(keys_dir):
-        return None
-    return count, newest
-
-
 class PoolManager:
     """One psycopg pool per (host, port, user, database)."""
 
@@ -143,7 +119,6 @@ class PoolManager:
         # slow tunnel for one database does not block queries to the others.
         self._opening: dict[PoolKey, asyncio.Task] = {}
         self._lock = asyncio.Lock()
-        self._keys_signature: Optional[tuple[int, float]] = None
         self._last_used: "weakref.WeakKeyDictionary[Any, float]" = weakref.WeakKeyDictionary()
         self._type_names: dict[tuple[int, int], str] = {}
         self._connections_seen: dict[PoolKey, int] = {}
@@ -154,15 +129,8 @@ class PoolManager:
         *,
         password: str,
         settings: PoolSettings,
-        auth_home: Optional[str],
     ) -> AsyncConnectionPool:
-        to_close: list[tuple[PoolKey, AsyncConnectionPool]] = []
         async with self._lock:
-            if auth_home:
-                signature = keys_signature(auth_home)
-                if self._keys_signature is not None and signature != self._keys_signature:
-                    to_close = self._detach_all_locked()
-                self._keys_signature = signature
             pool = self._pools.get(key)
             if pool is None:
                 pool = self._new_pool(key, password=password, settings=settings)
@@ -179,8 +147,6 @@ class PoolManager:
                     min_size=settings.min_size, max_size=settings.max_size,
                 )
             opening = self._opening.get(key)
-        # Closing waits for in-use connections; never do it while holding the lock.
-        await _close_pools(to_close, "teleport keys changed")
         if opening is not None:
             try:
                 await asyncio.shield(opening)
@@ -471,7 +437,6 @@ async def run_pool_query(
     describe: bool = False,
     explain: bool = False,
     settings: PoolSettings | None = None,
-    auth_home: str | None = None,
     manager: PoolManager | None = None,
 ) -> PsqlResult:
     """Execute one read-only query page on a pooled connection.
@@ -509,7 +474,7 @@ async def run_pool_query(
     # back to the pool in a non-idle state and psycopg_pool discards it alone.
     return await asyncio.wait_for(
         _run(
-            manager, key, password=password, settings=settings, auth_home=auth_home,
+            manager, key, password=password, settings=settings,
             body=body, wrapped=wrapped, timeout=float(timeout), page_limit=page_limit,
             offset=offset, count_timeout=count_timeout, describe=describe,
             explain=explain, started=started,
@@ -524,7 +489,6 @@ async def _run(
     *,
     password: str,
     settings: PoolSettings,
-    auth_home: str | None,
     body: str,
     wrapped: str,
     timeout: float,
@@ -539,7 +503,7 @@ async def _run(
     for attempt in range(2):
         try:
             result = await _run_once(
-                manager, key, password=password, settings=settings, auth_home=auth_home,
+                manager, key, password=password, settings=settings,
                 body=body, wrapped=wrapped, timeout=timeout, page_limit=page_limit,
                 offset=offset, count_timeout=count_timeout, describe=describe,
                 explain=explain, started=started, allow_stale_retry=attempt == 0,
@@ -565,7 +529,6 @@ async def _run_once(
     *,
     password: str,
     settings: PoolSettings,
-    auth_home: str | None,
     body: str,
     wrapped: str,
     timeout: float,
@@ -582,7 +545,7 @@ async def _run_once(
     acquired: Optional[float] = None
     timing: dict[str, float] = {}
     try:
-        pool = await manager.pool_for(key, password=password, settings=settings, auth_home=auth_home)
+        pool = await manager.pool_for(key, password=password, settings=settings)
         async with pool.connection() as conn:
             acquired = time.perf_counter()
             timing["pool_acquire_ms"] = _ms(acquired - started)
@@ -883,7 +846,6 @@ async def run_metadata_queries(
     timeout: float = 5.0,
     use_pool: bool = True,
     settings: PoolSettings | None = None,
-    auth_home: str | None = None,
     manager: PoolManager | None = None,
 ) -> list[list[list[Any]]]:
     """Run trusted, parameterized catalog queries (READ ONLY, statement_timeout).
@@ -911,7 +873,7 @@ async def run_metadata_queries(
             acquired: Optional[float] = None
             try:
                 pool = await manager.pool_for(
-                    key, password=password, settings=settings, auth_home=auth_home,
+                    key, password=password, settings=settings,
                 )
                 async with pool.connection() as conn:
                     acquired = time.perf_counter()

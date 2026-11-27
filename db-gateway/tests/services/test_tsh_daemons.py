@@ -206,3 +206,35 @@ async def test_knowledgefs_tunnel_uses_postgres_user(cfg, fake_tsh):
     await ensure_knowledgefs_tunnel(cfg, dl(5))
     argv = fake_tsh.calls[0]["argv"]
     assert argv[argv.index("--db-user") + 1] == "other_reader"
+
+
+async def test_refresh_running_restarts_only_running_daemons_after_renewal(cfg, fake_tsh):
+    """Background renewal handling: restart now, not on the user's next tool call."""
+    from db_gateway.tsh_daemons import refresh_running
+
+    fake_tsh.push(stdout=READY.format(port=5555), sleep=30)
+    fake_tsh.push(stdout=READY.format(port=6666), sleep=30)
+    running, idle = make(), make()
+    await running.ensure(cfg, dl(5))
+    old = running.pid
+    write_tsh_src(Path(cfg.teleport.auth_home), cert="cert-2")      # watchdog 续期
+
+    await refresh_running(cfg, dl(5))
+
+    assert running.pid != old and alive(running.pid) and not alive(old)
+    assert idle.pid is None                       # never started: still lazy
+    assert len(fake_tsh.calls) == 2
+
+
+async def test_refresh_running_survives_a_failed_restart(cfg, fake_tsh):
+    from db_gateway.tsh_daemons import refresh_running
+
+    fake_tsh.push(stdout=READY.format(port=5555), sleep=30)
+    fake_tsh.push(stdout="ERROR: access denied\n", code=1)
+    d = make()
+    await d.ensure(cfg, dl(5))
+    write_tsh_src(Path(cfg.teleport.auth_home), cert="cert-2")
+
+    await refresh_running(cfg, dl(5))             # logs, does not raise
+
+    assert d.pid is None                          # the next ensure() starts it again
