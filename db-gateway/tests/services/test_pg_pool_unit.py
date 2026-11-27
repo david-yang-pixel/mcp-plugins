@@ -1,7 +1,4 @@
 """Pool manager behaviour that needs no database."""
-import os
-import time
-
 from db_gateway.pg_pool import pool_settings_from_config
 
 
@@ -120,3 +117,20 @@ def test_error_text_without_diag_falls_back_to_message():
     from db_gateway.pg_pool import _error_text
 
     assert _error_text(RuntimeError("boom")) == "ERROR:  boom"  # type: ignore[arg-type]
+
+
+
+async def test_drain_port_closes_only_the_pools_on_that_port():
+    from db_gateway.pg_pool import PoolKey, PoolManager, PoolSettings
+
+    settings = PoolSettings(min_size=0)  # opening makes no connection
+    manager = PoolManager()
+    kfs = PoolKey("127.0.0.1", 56064, "u", "knowledgefs")
+    prod = PoolKey("127.0.0.1", 56061, "u", "langgenius")
+    await manager.pool_for(kfs, password="", settings=settings)
+    await manager.pool_for(prod, password="", settings=settings)
+
+    await manager.drain_port(56064, "tunnel restarted")
+
+    assert manager.open_pools() == [prod]
+    await manager.close_all()

@@ -24,6 +24,12 @@ logger = get_logger(module="maintenance")
 
 # Budget for restarting the daemons after a renewal (tsh startup + ready line).
 _DAEMON_REFRESH_BUDGET_SECONDS = 40.0
+# After a renewal, verify every idle connection on each tick for this long:
+# tunnels outside this process (tsh-proxy-db*) may restart later than we notice.
+_RENEWAL_GRACE_SECONDS = 90.0
+# Floors: never a busy loop, never a probe shorter than a few round trips.
+_MIN_INTERVAL_SECONDS = 1.0
+_MIN_PROBE_TIMEOUT_SECONDS = 1.0
 
 
 def _number(obj: Any, name: str, default: float) -> float:
@@ -49,14 +55,15 @@ class Maintenance:
         self.cfg = cfg
         self.manager = manager
         self.refresh_daemons = refresh_daemons
-        self.interval = max(0.01, _number(pg, "pool_maintenance_interval_seconds", 10.0))
+        self.interval = max(_MIN_INTERVAL_SECONDS, _number(pg, "pool_maintenance_interval_seconds", 10.0))
         self.keepalive_seconds = max(0.0, _number(pg, "pool_keepalive_seconds", 30.0))
-        self.probe_timeout = max(0.1, _number(pg, "pool_probe_timeout_seconds", 5.0))
+        self.probe_timeout = max(_MIN_PROBE_TIMEOUT_SECONDS, _number(pg, "pool_probe_timeout_seconds", 5.0))
         watch = getattr(pg, "pool_watch_teleport_keys", True)
         auth_home = getattr(getattr(cfg, "teleport", None), "auth_home", None)
         self.auth_home = auth_home if watch is not False and isinstance(auth_home, str) else None
         self._signature: Optional[list[list[str]]] = None
         self._last_keepalive = -math.inf
+        self._grace_until = -math.inf
 
     async def run(self) -> None:
         while True:
@@ -80,6 +87,10 @@ class Maintenance:
                 if renewed:
                     await self._on_renewal(now)
                     return
+        if now <= self._grace_until:
+            self._last_keepalive = now
+            await self.manager.keepalive(older_than=0.0, probe_timeout=self.probe_timeout)
+            return
         if self.keepalive_seconds > 0 and now - self._last_keepalive >= self.keepalive_seconds:
             self._last_keepalive = now
             # A connection verified just after a pass is probed at the next one,
@@ -89,8 +100,11 @@ class Maintenance:
 
     async def _on_renewal(self, now: float) -> None:
         logger.info("teleport_renewal_detected")
-        # Daemons first: a restarted KnowledgeFS tunnel drops its pooled connections,
-        # which the verification below then replaces.
-        await self.refresh_daemons(self.cfg, time.monotonic() + _DAEMON_REFRESH_BUDGET_SECONDS)
         self._last_keepalive = now
+        self._grace_until = now + _RENEWAL_GRACE_SECONDS
+        # Pools first, so their check does not wait behind the AWS proxy restart
+        # (apps login + start); then the daemons; then the pools again, because a
+        # restarted KnowledgeFS tunnel dropped the connections made through it.
+        await self.manager.keepalive(older_than=0.0, probe_timeout=self.probe_timeout)
+        await self.refresh_daemons(self.cfg, time.monotonic() + _DAEMON_REFRESH_BUDGET_SECONDS)
         await self.manager.keepalive(older_than=0.0, probe_timeout=self.probe_timeout)

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from db_gateway import schema_info
+from db_gateway import pg_pool, schema_info
 from db_gateway.pg_pool import (
     pool_settings_from_config,
     run_metadata_queries,
@@ -27,7 +27,12 @@ from db_gateway.postgres import (
 )
 from db_gateway.sql_text import SqlLexError, referenced_tables, tokenize
 from db_gateway.teleport_cli import classify_failure
-from db_gateway.tsh_daemons import TshDaemonError, TshDaemonTimeout, ensure_knowledgefs_tunnel
+from db_gateway.tsh_daemons import (
+    KNOWLEDGEFS_TUNNEL,
+    TshDaemonError,
+    TshDaemonTimeout,
+    ensure_knowledgefs_tunnel,
+)
 
 try:
     from db_gateway.log import get_logger
@@ -68,8 +73,16 @@ async def _prepare_database(cfg: Any, database_key: str) -> tuple[str, str] | No
     """Start the db-gateway-managed tunnel for knowledgefs; (code, error) on failure."""
     if database_key != "knowledgefs":
         return None
+    starts = KNOWLEDGEFS_TUNNEL.starts
     try:
         await ensure_knowledgefs_tunnel(cfg, time.monotonic() + KNOWLEDGEFS_TUNNEL_TIMEOUT_SECONDS)
+        if starts and KNOWLEDGEFS_TUNNEL.starts != starts:
+            # Restarted on this request (exited, marked stale or renewed before the
+            # background task noticed): every pooled connection went through the old
+            # process, so drop them instead of failing on them one by one.
+            await pg_pool.MANAGER.drain_port(
+                int(getattr(cfg.postgres, "port_knowledgefs", 56064)), "knowledgefs tunnel restarted",
+            )
     except TeleportAuthExpired as e:
         return "TELEPORT_EXPIRED", str(e)
     except TshDaemonTimeout as e:
@@ -634,7 +647,8 @@ async def _run_psql_with_retries(
             return result
         except TeleportAuthExpired as e:
             last_error = e
-            if attempt >= attempts - 1:
+            # The pool already retried this statement on a fresh connection.
+            if attempt >= attempts - 1 or getattr(e, "retryable", True) is False:
                 raise
             if retry_delay:
                 await asyncio.sleep(retry_delay)

@@ -661,6 +661,7 @@ class LatencyProxy:
         self._writers: set[asyncio.StreamWriter] = set()
         self._flowing = asyncio.Event()
         self._flowing.set()
+        self.client_bytes = bytearray()  # everything clients sent, to count statements
 
     async def start(self) -> "LatencyProxy":
         self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
@@ -697,6 +698,7 @@ class LatencyProxy:
         async def forward(reader, writer):
             try:
                 while data := await reader.read(65536):
+                    self.client_bytes += data
                     writer.write(data)
                     await writer.drain()
             except (ConnectionError, asyncio.CancelledError):
@@ -865,3 +867,101 @@ async def test_metadata_deadline_covers_every_batched_statement(database, manage
         queries=[("SELECT 1", None), ("SELECT 2", None), ("SELECT 3", None)],
     )
     assert len(seen) == 1 and seen[0] >= 3 * 3.0 + settings.acquire_timeout_seconds
+
+
+
+# ---------------------------------------------------------------------------
+# Code review of the keepalive / stale-retry changes
+# ---------------------------------------------------------------------------
+
+
+def _pending_executes() -> list[asyncio.Task]:
+    return [t for t in asyncio.all_tasks()
+            if not t.done() and "execute" in getattr(t.get_coro(), "__qualname__", "")]
+
+
+async def test_cancelled_probe_leaves_no_query_running(slow_link, latency_proxy, manager):
+    """A probe cancelled from outside must not leave its execute() task reading a
+    socket whose fd the pool is about to close (and the loop to reuse)."""
+    await run_pool_query(manager=manager, **_kwargs(slow_link, sql="SELECT 1"))
+    latency_proxy.pause()
+    keepalive = asyncio.create_task(manager.keepalive(older_than=0, probe_timeout=5))
+    await asyncio.sleep(0.3)  # the probe is waiting for an answer that never comes
+    keepalive.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await keepalive
+    await asyncio.sleep(0)
+
+    assert _pending_executes() == []
+    latency_proxy.resume()
+    after = await run_pool_query(manager=manager, **_kwargs(slow_link, sql="SELECT 10"))
+    assert after.rows == [["10"]]
+
+
+async def test_timed_out_probe_leaves_no_query_running(slow_link, latency_proxy, manager):
+    await run_pool_query(manager=manager, **_kwargs(slow_link, sql="SELECT 1"))
+    latency_proxy.pause()
+    await manager.keepalive(older_than=0, probe_timeout=0.3)
+    assert _pending_executes() == []
+    latency_proxy.resume()
+
+
+async def test_statement_that_kills_its_connection_runs_at_most_twice(slow_link, latency_proxy, manager, tmp_path, monkeypatch):
+    """Code review: the stale retry must not multiply a statement that breaks its
+    own connection (base behaviour: one run + the core retry)."""
+    from db_gateway import core, pg_pool
+    from db_gateway.config import AppConfig
+
+    monkeypatch.setattr(pg_pool, "MANAGER", manager)
+    cfg = AppConfig()
+    cfg.resources.base_dir = str(tmp_path)
+    cfg.postgres.host = slow_link["host"]
+    cfg.postgres.user = slow_link["user"]
+    cfg.postgres.db_prod = slow_link["database"]
+    cfg.postgres.port_prod = slow_link["port"]
+    cfg.postgres.driver = "pool"
+    cfg.postgres.pool_retry_delay_seconds = 0
+    await core.execute_gateway_query(cfg=cfg, database="prod", sql="SELECT 1")  # reused connection
+
+    marker = b"pg_terminate_backend"
+    before = latency_proxy.client_bytes.count(marker)
+    result = await core.execute_gateway_query(
+        cfg=cfg, database="prod", sql="SELECT pg_terminate_backend(pg_backend_pid())",
+    )
+
+    assert result.success is False
+    assert latency_proxy.client_bytes.count(marker) - before <= 2
+
+
+async def test_keepalive_does_not_run_the_checkout_probe(slow_link, manager):
+    """Taking a connection for keepalive must not trigger the pool's check callback
+    (it would probe, and a dead connection would make the pool grow)."""
+    settings = PoolSettings(check_idle_seconds=0)  # the check callback probes on every checkout
+    await run_pool_query(manager=manager, settings=settings, **_kwargs(slow_link, sql="SELECT 1"))
+
+    elapsed, _ = await _elapsed(manager.keepalive(older_than=3600, probe_timeout=2))
+    assert elapsed < LINK_DELAY / 2, f"{elapsed:.3f}s: keepalive probed through the check callback"
+
+
+async def test_keepalive_skips_pools_that_may_shrink_to_zero(slow_link, manager):
+    settings = PoolSettings(min_size=0, max_size=2)
+    await run_pool_query(manager=manager, settings=settings, **_kwargs(slow_link, sql="SELECT 1"))
+
+    elapsed, _ = await _elapsed(manager.keepalive(older_than=0, probe_timeout=2))
+    assert elapsed < LINK_DELAY / 2  # left alone: keepalive would stop max_idle shrinking it
+
+
+async def test_lost_tunnel_fails_fast_after_a_stale_connection(slow_link, latency_proxy, manager, monkeypatch):
+    """Code review: the immediate retry must not wait the full acquire timeout on a
+    tunnel that is gone, on top of the core's own retry."""
+    from db_gateway import pg_pool
+
+    monkeypatch.setattr(pg_pool, "_STALE_RETRY_ACQUIRE_SECONDS", 0.5)
+    settings = PoolSettings(acquire_timeout_seconds=4, connect_timeout_seconds=1)
+    await run_pool_query(manager=manager, settings=settings, **_kwargs(slow_link, sql="SELECT 1"))
+    await latency_proxy.close()
+
+    started = time.monotonic()
+    with pytest.raises(TeleportAuthExpired):
+        await run_pool_query(manager=manager, settings=settings, **_kwargs(slow_link, sql="SELECT 1"))
+    assert time.monotonic() - started < 2.5

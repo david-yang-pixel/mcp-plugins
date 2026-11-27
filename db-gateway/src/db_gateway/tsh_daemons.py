@@ -81,6 +81,9 @@ class TshDaemon:
         self._sig: list[list[str]] | None = None
         self._stale = False
         self._lock: asyncio.Lock | None = None
+        # Successful starts so far: a change means connections made through the
+        # previous process (e.g. the KnowledgeFS tunnel) are gone.
+        self.starts = 0
         self.output: collections.deque[str] = collections.deque(maxlen=OUTPUT_TAIL_LINES)
         _DAEMONS.add(self)
 
@@ -112,6 +115,7 @@ class TshDaemon:
             self._info = await self._start(cfg, deadline)
             self._sig = sig
             self._stale = False
+            self.starts += 1
             logger.info("tsh_daemon_started", daemon=self.name, pid=self.pid)
             return dict(self._info)
 

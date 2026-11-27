@@ -238,3 +238,17 @@ async def test_refresh_running_survives_a_failed_restart(cfg, fake_tsh):
     await refresh_running(cfg, dl(5))             # logs, does not raise
 
     assert d.pid is None                          # the next ensure() starts it again
+
+
+
+async def test_starts_counts_every_start(cfg, fake_tsh):
+    fake_tsh.push(stdout=READY.format(port=5555), sleep=30)
+    fake_tsh.push(stdout=READY.format(port=6666), sleep=30)
+    d = make()
+    assert d.starts == 0
+    await d.ensure(cfg, dl(5))
+    await d.ensure(cfg, dl(5))                    # reused: no new start
+    assert d.starts == 1
+    write_tsh_src(Path(cfg.teleport.auth_home), cert="cert-2")
+    await d.ensure(cfg, dl(5))
+    assert d.starts == 2

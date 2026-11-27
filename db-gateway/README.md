@@ -81,15 +81,15 @@ SQL 先按原规则通过只读校验（调用方自己写 `EXPLAIN ...` 仍会�
 
 pool 模式与 Teleport 续签的配合：
 - 证书由 `tsh-auth-watchdog` 自动续签（约每 35 分钟）：`tsh logout --all` 后用密码和 TOTP 重新 `tsh login`。连接池不接触证书，只连接本机隧道端口；续签后经隧道的已有连接可能断开，也可能继续可用，网关不依赖任何一种情况。
-- 后台维护任务（`maintenance.py`，随网关启动）每 `pool_maintenance_interval_seconds`（10）秒检查一次用户证书 `keys/*/*.crt` 的内容（`pool_watch_teleport_keys`）。隧道自己写入的数据库证书不算续签；续签窗口里证书暂时消失时等新证书出现再处理。检测到续签后，先重启正在运行的 tsh 常驻进程（KnowledgeFS 隧道、AWS 代理），再逐条验证连接池里的空闲连接，失效的在后台换新。连接池不会因为续签被清空。
-- 后台保活：每 `pool_keepalive_seconds`（30）秒逐条探测一段时间没用过的空闲连接（空查询，超时 `pool_probe_timeout_seconds` 即 5 秒，超时直接关闭连接而不是等服务端取消）。探测成功即记为已验证，查询取连接时不再探测；保活每次只取一条、只在有空闲连接时取，不会让连接池变大。
-- 取连接后 2 秒内出现连接级错误（连接在空闲时已被断开）：立即换新连接重试一次，不清空连接池；`timing_ms.pool_reconnects` 为 1。
+- 后台维护任务（`maintenance.py`，随网关启动）每 `pool_maintenance_interval_seconds`（10）秒检查一次用户证书 `keys/*/*.crt` 的内容（`pool_watch_teleport_keys`）。隧道自己写入的数据库证书不算续签；续签窗口里证书暂时消失时等新证书出现再处理。检测到续签后：先逐条验证连接池里的空闲连接；再重启正在运行的 tsh 常驻进程（KnowledgeFS 隧道、AWS 代理），重启会打断经过它们的进行中请求，这是为了让下一次调用不必等重启；然后再验证一遍连接。之后 90 秒内每次检查都验证全部空闲连接，以覆盖宿主机上的隧道晚一步重启的情况。失效的连接在后台换新，连接池不会因为续签被清空。KnowledgeFS 隧道若在某次请求中被重启（进程退出、被标记失效，或请求比后台任务先发现续签），该端口的连接池会被清空。
+- 后台保活：每 `pool_keepalive_seconds`（30）秒逐条探测一段时间没用过的空闲连接（空查询，超时 `pool_probe_timeout_seconds` 即 5 秒，超时直接关闭连接而不是等服务端取消）。探测成功即记为已验证，查询取连接时不再探测。保活每次只取一条、只在有空闲连接时取，取连接时不触发取连接探测，一般不会让连接池变大（查询恰好在探测期间到来时，连接池可能多建一条，空闲 240 秒后回收）。`pool_min_size=0` 的连接池不做保活，以免妨碍它缩到 0。要让“保活正常运行时取连接不探测”成立，`pool_check_idle_seconds` 需大于 `pool_keepalive_seconds` 与 `pool_maintenance_interval_seconds` 之和（默认 60 > 30 + 10）。
+- 从池里复用的连接在取出后 2 秒内出现连接级错误（连接在空闲时已被断开）：立即换新连接重试一次，不清空连接池；`timing_ms.pool_reconnects` 为 1。新建的连接出错不做立即重试（多半是语句或服务端把连接弄断了）；立即重试等新连接最多 5 秒，重试仍因连接断开失败时，核心的重试循环不再执行第三次，一条会弄断自身连接的语句每个请求最多执行两次。
 - 其他连接级错误（隧道拒绝连接、`pool_acquire_timeout_seconds` 内拿不到连接、重试仍失败等）：清空该库的连接池并返回 `TELEPORT_EXPIRED`。核心的重试循环会间隔 `pool_retry_delay_seconds`（默认 1.5 秒，覆盖隧道重启时间）用新连接重试 `teleport_retry_attempts` 次。
 - 空闲超过 `pool_max_idle_seconds`（240）的多余连接会被回收，常驻 `pool_min_size`（1）条；连接最长存活 `pool_max_lifetime_seconds`（1800）。超过 `pool_check_idle_seconds`（60）秒既没用过也没验证过的连接，在交给查询前先探测一次（保活正常运行时不会触发）。
 - 连接数上限沿用 `max_concurrent_queries`；单飞（singleflight）和每库并发限制不变。
 - 会话隔离：每次查询都在事务内执行并强制回滚，事务内做的会话级 `SET` / `set_config(..., false)` / `SET ROLE` 会随回滚撤销，不会被下一条查询继承。会话级 advisory lock 回滚后仍会保留，而且只读校验看不到所有取锁方式（例如 Unicode 转义标识符、`query_to_xml('...')`），所以每次查询的最后一个批次都会执行 `pg_advisory_unlock_all()`。查询中途出错时，先补发 `ROLLBACK` 和解锁再归还连接；如果清理也失败，就直接关闭这条连接。校验器拒绝 `pg_advisory_*` 只是第一道防线。
 
-`timing_ms` 在 pool 模式下的字段：`pool_acquire_ms`（取得连接，含新建连接耗时）、`pool_new_connections`（本次新建的连接数，0 表示复用）、`query_ms`（第一个往返；不计数时就是整页唯一的往返）、`count_ms` 或 `finish_ms`（仅 `count_total=true` 时的第二个往返，执行了计数时为前者）、`describe_ms`（列类型首次出现时多一次往返，之后走缓存）、`parse_ms`、`pool_reconnects`（取到的连接已失效、换新连接重试的次数，0 或 1）。
+`timing_ms` 在 pool 模式下的字段：`pool_acquire_ms`（取得连接，含新建连接耗时）、`pool_new_connections`（本次新建的连接数，0 表示复用）、`query_ms`（第一个往返；不计数时就是整页唯一的往返）、`count_ms` 或 `finish_ms`（仅 `count_total=true` 时的第二个往返，执行了计数时为前者）、`describe_ms`（列类型首次出现时多一次往返，之后走缓存）、`parse_ms`、`pool_reconnects`（取到的连接已失效、换新连接重试的次数，0 或 1）。`pool_new_connections` 统计自该库上一次查询以来连接池新建的连接数，包括后台保活补建的连接。
 
 切换方法：把 `deploy/runtime.json` 中 `settings.postgres.driver` 改为 `pool` 并部署 db-gateway；回退时改回 `psql`。
 
@@ -111,9 +111,9 @@ pool 模式与 Teleport 续签的配合：
 | --- | --- | --- |
 | `postgres.max_rows` | 1000 | 单页上限。 |
 | `postgres.query_timeout_seconds` | 30 | 主查询 `statement_timeout`。客户端总超时为该值，`count_total=true` 时再加 `count_timeout_seconds`（pool 模式另加 15 秒余量）。 |
-| `postgres.pool_keepalive_seconds` | 30 | 后台保活间隔，`0` 关闭（关闭后取连接时按 `pool_check_idle_seconds` 探测）。 |
-| `postgres.pool_probe_timeout_seconds` | 5 | 存活探测超时，超时的连接直接关闭。 |
-| `postgres.pool_maintenance_interval_seconds` | 10 | 后台维护任务的检查间隔（续签检测）。 |
+| `postgres.pool_keepalive_seconds` | 30 | 后台保活间隔，`0` 关闭（关闭后取连接时按 `pool_check_idle_seconds` 探测；续签后的验证不受影响）。 |
+| `postgres.pool_probe_timeout_seconds` | 5 | 存活探测超时（最小 1 秒），超时的连接直接关闭。 |
+| `postgres.pool_maintenance_interval_seconds` | 10 | 后台维护任务的检查间隔（续签检测，最小 1 秒）。 |
 | `postgres.count_timeout_seconds` | 5 | `count_total=true` 时的计数预算；设为 `0` 时关闭计数，`count_total` 不生效并给出 warning（仍会通过 `has_more` 判断是否有下一页）。 |
 | `db_gateway.audit_log_dir` | 空 | 审计日志目录，文件名固定为 `db_gateway_audit.log`，目录不存在时自动创建；相对路径相对 `config.yaml` 所在目录。为空时使用 `<resources.base_dir>/<resources.state_dir>/logs`。生产配置为 `/var/lib/mcp/logs`（挂载 `@data/logs`，持久化）。 |
 

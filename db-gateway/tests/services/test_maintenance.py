@@ -52,10 +52,19 @@ async def test_renewal_restarts_daemons_then_verifies_every_pooled_connection(tm
     await m.tick(now=0)                 # first look: remember the cert
     _profile(tmp_path, "cert-2")        # watchdog renewed the session
     await m.tick(now=10)
-    await m.tick(now=20)                # same cert: nothing more to do
 
-    # Tunnels first (a restarted tunnel drops its connections), then the pools.
-    assert events == ["refresh_daemons", "keepalive:0:5"]
+    # Pools at once (not behind a slow AWS proxy restart), then the daemons, then
+    # the pools again (a restarted tunnel drops its connections).
+    assert events == ["keepalive:0:5", "refresh_daemons", "keepalive:0:5"]
+
+    events.clear()
+    for now in (20, 50, 90, 100, 110):  # 90 s grace: tunnels outside this process may restart late
+        await m.tick(now=now)
+    assert events == ["keepalive:0:5"] * 4   # 20, 50, 90, 100 are inside the grace window
+
+    events.clear()
+    await m.tick(now=130)               # same cert, grace over, keepalive disabled
+    assert events == []
 
 
 async def test_db_cert_written_by_a_tunnel_is_not_a_renewal(tmp_path):
@@ -84,7 +93,7 @@ async def test_renewal_window_is_ignored_until_the_new_cert_appears(tmp_path):
 
     _profile(tmp_path, "cert-2")
     await m.tick(now=20)
-    assert events == ["refresh_daemons", "keepalive:0:5"]
+    assert events == ["keepalive:0:5", "refresh_daemons", "keepalive:0:5"]
 
 
 async def test_keepalive_runs_every_keepalive_seconds(tmp_path):
@@ -112,8 +121,9 @@ async def test_keepalive_and_key_watching_can_be_disabled(tmp_path):
 
 async def test_run_keeps_going_after_an_error(tmp_path):
     events: list[str] = []
-    cfg = _cfg(tmp_path, pool_keepalive_seconds=0.01, pool_maintenance_interval_seconds=0.01)
+    cfg = _cfg(tmp_path, pool_keepalive_seconds=0.01)
     m = Maintenance(cfg, manager=FakeManager(events, fail_first=True))
+    m.interval = 0.01   # below the configurable floor, to keep the test fast
 
     task = asyncio.create_task(m.run())
     await asyncio.sleep(0.2)
@@ -130,3 +140,10 @@ async def test_bad_settings_fall_back_to_defaults():
     m = Maintenance(MagicMock(), manager=FakeManager([]))
     assert m.interval == 10 and m.keepalive_seconds == 30 and m.probe_timeout == 5
     await m.tick(now=0)                 # no usable auth_home: no key watching, no crash
+
+
+def test_settings_have_safe_floors(tmp_path):
+    m = Maintenance(_cfg(tmp_path, pool_maintenance_interval_seconds=0, pool_probe_timeout_seconds=0.05),
+                    manager=FakeManager([]))
+    assert m.interval == 1.0         # never a busy loop
+    assert m.probe_timeout == 1.0    # above the ~0.2 s RTT

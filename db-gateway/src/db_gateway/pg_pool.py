@@ -26,6 +26,9 @@ rolled back, so no session state survives between queries.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import os
+import socket
 import time
 import weakref
 from dataclasses import dataclass
@@ -65,6 +68,17 @@ _CLIENT_TIMEOUT_MARGIN_SECONDS = 15.0
 # already dead (dropped while idle): retry once on a fresh connection right away,
 # without draining the pool. Later failures keep the drain + delayed retry path.
 _STALE_RETRY_WINDOW_SECONDS = 2.0
+# How long that retry waits for a connection: a tunnel that is gone must fail
+# fast here, the core retry loop still gets its own full attempt.
+_STALE_RETRY_ACQUIRE_SECONDS = 5.0
+# Floor for the liveness probe timeout (the RTT to the databases is ~0.2 s).
+_MIN_PROBE_TIMEOUT_SECONDS = 1.0
+
+# Set while keepalive takes a connection, so the pool's checkout check does not
+# probe it as well (a dead connection there would make the pool grow).
+_IN_KEEPALIVE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "db_gateway_pool_keepalive", default=False,
+)
 
 
 class StatementTimeout(TimeoutError):
@@ -106,7 +120,9 @@ def pool_settings_from_config(cfg: Any) -> PoolSettings:
         max_lifetime_seconds=float(getattr(pg, "pool_max_lifetime_seconds", 1800.0)),
         check_idle_seconds=float(getattr(pg, "pool_check_idle_seconds", 60.0)),
         acquire_timeout_seconds=float(getattr(pg, "pool_acquire_timeout_seconds", 15.0)),
-        probe_timeout_seconds=float(getattr(pg, "pool_probe_timeout_seconds", 5.0)),
+        probe_timeout_seconds=max(
+            _MIN_PROBE_TIMEOUT_SECONDS, float(getattr(pg, "pool_probe_timeout_seconds", 5.0)),
+        ),
     )
 
 
@@ -120,6 +136,7 @@ class PoolManager:
         self._opening: dict[PoolKey, asyncio.Task] = {}
         self._lock = asyncio.Lock()
         self._last_used: "weakref.WeakKeyDictionary[Any, float]" = weakref.WeakKeyDictionary()
+        self._created: "weakref.WeakKeyDictionary[Any, float]" = weakref.WeakKeyDictionary()
         self._type_names: dict[tuple[int, int], str] = {}
         self._connections_seen: dict[PoolKey, int] = {}
 
@@ -171,6 +188,15 @@ class PoolManager:
             self._pools.pop(key, None)
             self._opening.pop(key, None)
         await _close_pools([(key, current)], reason)
+
+    async def drain_port(self, port: int, reason: str) -> None:
+        """Close every pool on ``port`` (its tunnel restarted: their connections are gone)."""
+        async with self._lock:
+            to_close = [(key, pool) for key, pool in self._pools.items() if key.port == int(port)]
+            for key, _pool in to_close:
+                self._pools.pop(key, None)
+                self._opening.pop(key, None)
+        await _close_pools(to_close, reason)
 
     async def close_all(self, reason: str = "shutdown") -> None:
         async with self._lock:
@@ -234,13 +260,21 @@ class PoolManager:
             array_oid = getattr(info, "array_oid", 0)
             if array_oid:
                 conn.adapters.register_loader(array_oid, TextLoader)
-        self._last_used[conn] = time.monotonic()
+        now = time.monotonic()
+        self._created[conn] = now
+        self._last_used[conn] = now
+
+    def reused(self, conn: Optional[psycopg.AsyncConnection], since: float) -> bool:
+        """True if ``conn`` already existed before ``since`` (taken from the pool, not new)."""
+        return conn is not None and self._created.get(conn, since) < since
 
     def _make_check(self, check_idle_seconds: float, probe_timeout: float):
         async def check(conn: psycopg.AsyncConnection) -> None:
             # Probing every checkout would cost a round trip per query; only
             # connections not used or verified for a while are probed. With the
             # background keepalive running this is a safety net that rarely fires.
+            if _IN_KEEPALIVE.get():
+                return  # keepalive probes the connection itself
             idle = time.monotonic() - self._last_used.get(conn, 0.0)
             if idle >= check_idle_seconds:
                 await self._probe(conn, probe_timeout)
@@ -255,11 +289,13 @@ class PoolManager:
         5 s) for a reply that a black-holed link never delivers.
         """
         task = asyncio.ensure_future(conn.execute(""))
-        done, _ = await asyncio.wait({task}, timeout=timeout)
+        try:
+            done, _ = await asyncio.wait({task}, timeout=timeout)
+        except BaseException:  # cancelled from outside: never leave the query running
+            await _abandon(conn, task)
+            raise
         if not done:
-            await conn.close()
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            await _abandon(conn, task)
             raise TimeoutError(f"liveness probe exceeded {timeout:g}s")
         task.result()
         self.touch(conn)
@@ -274,6 +310,8 @@ class PoolManager:
         A connection that fails or stalls is closed; the pool replaces it.
         """
         for key, pool in list(self._pools.items()):
+            if pool.min_size == 0:
+                continue  # taking its last connection would stop max_idle shrinking it to 0
             try:
                 available = int(pool.get_stats().get("pool_available", 0))
             except Exception:  # noqa: BLE001 - a closing pool
@@ -281,10 +319,13 @@ class PoolManager:
             for _ in range(available):
                 if int(pool.get_stats().get("pool_available", 0)) <= 0:
                     break  # a query took the rest: never wait (or grow the pool) here
+                token = _IN_KEEPALIVE.set(True)
                 try:
                     conn = await pool.getconn(timeout=probe_timeout)
                 except (PoolTimeout, PoolClosed):
                     break
+                finally:
+                    _IN_KEEPALIVE.reset(token)
                 try:
                     if time.monotonic() - self._last_used.get(conn, 0.0) >= older_than:
                         await self._probe(conn, probe_timeout)
@@ -319,6 +360,37 @@ async def _close_quietly(pool: AsyncConnectionPool) -> None:
 
 
 MANAGER = PoolManager()
+
+
+def _shutdown_socket(conn: psycopg.AsyncConnection) -> None:
+    """Shut the connection's socket down without closing its fd.
+
+    A pending read then sees EOF and fails at once (no server-side cancel, which
+    would wait on a dead link), and the fd cannot be reused by another socket
+    while that read is still registered with the event loop.
+    """
+    try:
+        dup = socket.socket(fileno=os.dup(conn.pgconn.socket))
+    except Exception:  # noqa: BLE001 - already closed or broken
+        return
+    try:
+        dup.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    finally:
+        dup.close()
+
+
+async def _abandon(conn: psycopg.AsyncConnection, task: asyncio.Future) -> None:
+    """Give up on ``conn`` with ``task`` (a query on it) still pending, then close it."""
+    _shutdown_socket(conn)
+    done, _ = await asyncio.wait({task}, timeout=1.0)
+    if not done:  # should not happen after the shutdown; never hang here
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    elif not task.cancelled():
+        task.exception()  # retrieved: no "exception was never retrieved" warning
+    await conn.close()
 
 
 def _ms(seconds: float) -> float:
@@ -507,6 +579,7 @@ async def _run(
                 body=body, wrapped=wrapped, timeout=timeout, page_limit=page_limit,
                 offset=offset, count_timeout=count_timeout, describe=describe,
                 explain=explain, started=started, allow_stale_retry=attempt == 0,
+                after_stale_retry=reconnects > 0,
             )
             result.timing_ms["pool_reconnects"] = float(reconnects)
             return result
@@ -539,14 +612,19 @@ async def _run_once(
     explain: bool,
     started: float,
     allow_stale_retry: bool = False,
+    after_stale_retry: bool = False,
 ) -> PsqlResult:
     conn: Optional[psycopg.AsyncConnection] = None
     pool: Optional[AsyncConnectionPool] = None
     acquired: Optional[float] = None
+    attempt_started = time.monotonic()
     timing: dict[str, float] = {}
+    acquire_timeout = (
+        min(settings.acquire_timeout_seconds, _STALE_RETRY_ACQUIRE_SECONDS) if after_stale_retry else None
+    )
     try:
         pool = await manager.pool_for(key, password=password, settings=settings)
-        async with pool.connection() as conn:
+        async with pool.connection(timeout=acquire_timeout) as conn:
             acquired = time.perf_counter()
             timing["pool_acquire_ms"] = _ms(acquired - started)
             timing["pool_new_connections"] = float(manager.new_connections(key, pool))
@@ -584,13 +662,20 @@ async def _run_once(
         raise StatementTimeout(_error_text(e)) from e
     except psycopg.Error as e:
         if _is_connection_failure(e, conn):
-            if allow_stale_retry and _stale(acquired):
+            # Only a connection taken from the pool can have died while idle; one
+            # opened for this attempt was broken by the statement or the server.
+            if allow_stale_retry and _stale(acquired) and manager.reused(conn, attempt_started):
                 logger.info("pg_pool_stale_connection_retry", database=key.database, port=key.port,
                             error=str(e).strip()[:200])
                 raise _StaleConnection() from e
             if pool is not None:
                 await manager.drain(key, f"connection failure: {str(e).strip()[:200]}", pool=pool)
-            raise TeleportAuthExpired(f"connection reset: {str(e).strip()}") from e
+            error = TeleportAuthExpired(f"connection reset: {str(e).strip()}")
+            if after_stale_retry and acquired is not None:
+                # The statement already ran twice and broke both connections: do
+                # not let the core retry loop run it a third time.
+                error.retryable = False  # type: ignore[attr-defined]
+            raise error from e
         raise RuntimeError(_error_text(e)) from e
     except OSError as e:
         if pool is not None:
@@ -867,15 +952,20 @@ async def run_metadata_queries(
     deadline = float(timeout) * max(1, len(queries)) + settings.acquire_timeout_seconds + 5
 
     async def pooled() -> list[list[list[Any]]]:
+        stale_retried = False
         for attempt in range(2):
             pool: Optional[AsyncConnectionPool] = None
             conn: Optional[psycopg.AsyncConnection] = None
             acquired: Optional[float] = None
+            attempt_started = time.monotonic()
+            acquire_timeout = (
+                min(settings.acquire_timeout_seconds, _STALE_RETRY_ACQUIRE_SECONDS) if stale_retried else None
+            )
             try:
                 pool = await manager.pool_for(
                     key, password=password, settings=settings,
                 )
-                async with pool.connection() as conn:
+                async with pool.connection(timeout=acquire_timeout) as conn:
                     acquired = time.perf_counter()
                     try:
                         return await _metadata_rows(conn, queries, timeout)
@@ -899,10 +989,11 @@ async def run_metadata_queries(
                 raise StatementTimeout(_error_text(e)) from e
             except psycopg.Error as e:
                 if _is_connection_failure(e, conn):
-                    if attempt == 0 and _stale(acquired):
+                    if attempt == 0 and _stale(acquired) and manager.reused(conn, attempt_started):
                         # Dead at checkout: the pool discarded it; retry on a fresh one.
                         logger.info("pg_pool_stale_connection_retry", database=key.database,
                                     port=key.port, error=str(e).strip()[:200])
+                        stale_retried = True
                         continue
                     if pool is not None:
                         await manager.drain(key, f"connection failure: {str(e).strip()[:200]}", pool=pool)
