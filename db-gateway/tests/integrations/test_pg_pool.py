@@ -965,3 +965,33 @@ async def test_lost_tunnel_fails_fast_after_a_stale_connection(slow_link, latenc
     with pytest.raises(TeleportAuthExpired):
         await run_pool_query(manager=manager, settings=settings, **_kwargs(slow_link, sql="SELECT 1"))
     assert time.monotonic() - started < 2.5
+
+
+async def test_several_dead_connections_recover_in_one_request(slow_link, latency_proxy, manager):
+    """Re-review: with two idle connections dead (tunnel restart), the immediate
+    retry must not land on the second dead one and give up."""
+    settings = PoolSettings(min_size=1, max_size=3)
+    kwargs = _kwargs(slow_link, sql="SELECT pg_sleep(0.3)")
+    await asyncio.gather(*(run_pool_query(manager=manager, settings=settings, **kwargs) for _ in range(2)))
+    (key,) = manager.open_pools()
+    assert manager._pools[key].get_stats()["pool_available"] >= 2
+    await latency_proxy.drop_all()  # every pooled connection is now dead
+
+    after = await run_pool_query(manager=manager, settings=settings, **_kwargs(slow_link, sql="SELECT 11"))
+    assert after.rows == [["11"]]
+    assert after.timing_ms["pool_reconnects"] == 1
+
+
+async def test_several_dead_connections_recover_for_catalog_queries(slow_link, latency_proxy, manager):
+    from db_gateway.pg_pool import run_metadata_query
+
+    settings = PoolSettings(min_size=1, max_size=3)
+    await asyncio.gather(*(run_pool_query(manager=manager, settings=settings,
+                                          **_kwargs(slow_link, sql="SELECT pg_sleep(0.3)")) for _ in range(2)))
+    await latency_proxy.drop_all()
+
+    rows = await run_metadata_query(
+        host=slow_link["host"], port=slow_link["port"], user=slow_link["user"], password="",
+        database=slow_link["database"], manager=manager, settings=settings, sql="SELECT 12", params=None,
+    )
+    assert rows == [["12"]]

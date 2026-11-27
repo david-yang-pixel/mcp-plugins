@@ -79,6 +79,12 @@ _MIN_PROBE_TIMEOUT_SECONDS = 1.0
 _IN_KEEPALIVE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "db_gateway_pool_keepalive", default=False,
 )
+# Set while the immediate retry takes a connection: probe it whatever its idle
+# time, so the retry never runs on another connection that died with the first
+# (psycopg_pool discards a connection that fails the check and takes the next).
+_FORCE_CHECK: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "db_gateway_pool_force_check", default=False,
+)
 
 
 class StatementTimeout(TimeoutError):
@@ -276,7 +282,7 @@ class PoolManager:
             if _IN_KEEPALIVE.get():
                 return  # keepalive probes the connection itself
             idle = time.monotonic() - self._last_used.get(conn, 0.0)
-            if idle >= check_idle_seconds:
+            if idle >= check_idle_seconds or _FORCE_CHECK.get():
                 await self._probe(conn, probe_timeout)
 
         return check
@@ -622,9 +628,14 @@ async def _run_once(
     acquire_timeout = (
         min(settings.acquire_timeout_seconds, _STALE_RETRY_ACQUIRE_SECONDS) if after_stale_retry else None
     )
+    # The retry runs on a connection that was just verified (or is new), so a
+    # connection failure there means the statement itself broke it.
+    force_check = _FORCE_CHECK.set(after_stale_retry)
     try:
         pool = await manager.pool_for(key, password=password, settings=settings)
         async with pool.connection(timeout=acquire_timeout) as conn:
+            _FORCE_CHECK.reset(force_check)
+            force_check = None
             acquired = time.perf_counter()
             timing["pool_acquire_ms"] = _ms(acquired - started)
             timing["pool_new_connections"] = float(manager.new_connections(key, pool))
@@ -656,7 +667,7 @@ async def _run_once(
             await manager.drain(key, "no connection within acquire timeout", pool=pool)
         raise TeleportAuthExpired(
             f"could not connect to server: no PostgreSQL connection to {key.host}:{key.port} "
-            f"within {settings.acquire_timeout_seconds:g}s ({e})"
+            f"within {acquire_timeout or settings.acquire_timeout_seconds:g}s ({e})"
         ) from e
     except psycopg.errors.QueryCanceled as e:
         raise StatementTimeout(_error_text(e)) from e
@@ -681,6 +692,9 @@ async def _run_once(
         if pool is not None:
             await manager.drain(key, f"connection failure: {e}", pool=pool)
         raise TeleportAuthExpired(f"Connection refused: {e}") from e
+    finally:
+        if force_check is not None:  # checkout failed before the block reset it
+            _FORCE_CHECK.reset(force_check)
 
 
 # Releases session-level advisory locks. ROLLBACK undoes session GUCs and SET
@@ -961,11 +975,14 @@ async def run_metadata_queries(
             acquire_timeout = (
                 min(settings.acquire_timeout_seconds, _STALE_RETRY_ACQUIRE_SECONDS) if stale_retried else None
             )
+            force_check = _FORCE_CHECK.set(stale_retried)
             try:
                 pool = await manager.pool_for(
                     key, password=password, settings=settings,
                 )
                 async with pool.connection(timeout=acquire_timeout) as conn:
+                    _FORCE_CHECK.reset(force_check)
+                    force_check = None
                     acquired = time.perf_counter()
                     try:
                         return await _metadata_rows(conn, queries, timeout)
@@ -1003,6 +1020,9 @@ async def run_metadata_queries(
                 if pool is not None:
                     await manager.drain(key, f"connection failure: {e}", pool=pool)
                 raise TeleportAuthExpired(f"Connection refused: {e}") from e
+            finally:
+                if force_check is not None:
+                    _FORCE_CHECK.reset(force_check)
         raise AssertionError("unreachable")
 
     async def one_off() -> list[list[list[Any]]]:
