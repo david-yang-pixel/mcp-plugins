@@ -1,6 +1,6 @@
 """Read-only tsh layer for plugin_lambda_logs and kube_read.
 
-Two facts measured on the server (spec §9.2) shape this module:
+Two facts measured on the server shape this module:
 
 * tsh rewrites the whole key ring (user cert, key, CAs, SSH cert) on every
   ``tsh apps login`` / ``tsh aws`` / ``tsh kubectl``. Running it against the

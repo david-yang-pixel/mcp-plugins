@@ -1,8 +1,7 @@
 """CloudWatch Logs access for plugin_lambda_logs through a long-running `tsh proxy aws`.
 
-Measured on the server (spec 2026-11-27-dify-db-aws-proxy-knowledgefs §2): one
-page costs ~0.75 s through a warm proxy + botocore, against 1.4–1.9 s for a
-fresh `tsh aws` + aws CLI process per page.
+Measured on the server: one page costs ~0.75 s through a warm proxy + botocore,
+against 1.4–1.9 s for a fresh `tsh aws` + aws CLI process per page.
 """
 from __future__ import annotations
 
