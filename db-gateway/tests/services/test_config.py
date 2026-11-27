@@ -99,3 +99,10 @@ def test_runtime_settings_enable_both_teleport_tools():
     t = AppConfig(**settings).teleport_tools
     assert t.lambda_logs.enabled is True and t.kube.enabled is True
     assert "teleport_tools" in settings
+
+
+def test_dockerfile_bundles_pinned_tsh():
+    text = (ROOT / "Dockerfile").read_text()
+    assert "TELEPORT_VERSION=18.11.0" in text
+    assert "8d3dba03ea6b6e0d72c97e190da0595e8f0d70f5573c3a26b1908cf60caf6e3f" in text
+    assert AppConfig().teleport_tools.tsh_path in text      # /opt/teleport/bin/tsh
