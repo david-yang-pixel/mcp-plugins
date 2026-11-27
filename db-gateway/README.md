@@ -127,7 +127,7 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
 
 返回 `tables`：每张表一项，含 `schema`、`table`、`columns`（`name`、`type`、`nullable`，有默认值时带 `default`）和 `indexes`（`name`、`definition`，即 `pg_indexes.indexdef`，主键索引名通常以 `_pkey` 结尾）。找不到的表放在 `not_found`，并在 `warnings` 中说明。失败时 `success=false`，`code` 为 `UNKNOWN_DATABASE`、`INVALID_ARGUMENT`、`TELEPORT_EXPIRED`、`QUERY_TIMEOUT` 或 `QUERY_ERROR`。
 
-列来自 `information_schema.columns`，索引来自 `pg_indexes`。两条查询都是网关内置的只读 SQL，表名只作为绑定参数传入（`table_name = ANY(%s)`），在 `READ ONLY` 事务中以 `statement_timeout`（`query_timeout_seconds` 与 15 秒取小）执行后回滚。pool 模式复用连接池；psql 模式用 psycopg 临时建一条连接，用完关闭。类型名缩写（`varchar`、`timestamptz` 等）与 `scripts/dump_db_schema.py` 共用 `db_gateway.schema_info`。
+列来自 `information_schema.columns`，索引来自 `pg_indexes`。两条查询都是网关内置的只读 SQL，表名只作为绑定参数传入（`table_name = ANY(%s)`），在同一个 `READ ONLY` 事务中以 `statement_timeout`（`query_timeout_seconds` 与 15 秒取小）执行后回滚；`BEGIN`、两条查询和 `ROLLBACK` 用 psycopg pipeline 一次发出，只有一个往返（超时时附带索引的目录查询同样如此）。pool 模式复用连接池；psql 模式用 psycopg 临时建一条连接，用完关闭。类型名缩写（`varchar`、`timestamptz` 等）与 `scripts/dump_db_schema.py` 共用 `db_gateway.schema_info`。
 
 所有工具都在 `tools/list` 中声明 `annotations.readOnlyHint: true`、`destructiveHint: false`。OpenConnector 等客户端据此判断读写，未声明时新工具会被当作 write 并要求确认。
 

@@ -578,3 +578,143 @@ async def test_timeout_error_lists_indexes_from_the_database(workflow_db, manage
         core._INDEX_CACHE.clear()
     assert result.code == "QUERY_TIMEOUT"
     assert "workflow_run_tenant_idx ON public.workflow_runs USING btree (tenant_id, created_at)" in result.error
+
+
+# ---------------------------------------------------------------------------
+# Round trips on a slow link: elapsed time ~= round trips x latency
+# ---------------------------------------------------------------------------
+
+LINK_DELAY = 0.15  # seconds added to every server -> client chunk
+
+
+@pytest.fixture
+async def slow_link(database):
+    """TCP proxy to the test server that delays server responses by LINK_DELAY.
+
+    Chunks keep their order and are delivered LINK_DELAY after they arrive (pure
+    latency, not per-chunk delay), so a request/response costs one LINK_DELAY.
+    """
+    tasks: set[asyncio.Task] = set()
+
+    async def handle(client_reader, client_writer):
+        server_reader, server_writer = await asyncio.open_connection(database["host"], database["port"])
+
+        async def forward(reader, writer):
+            try:
+                while data := await reader.read(65536):
+                    writer.write(data)
+                    await writer.drain()
+            except (ConnectionError, asyncio.CancelledError):
+                pass
+            finally:
+                writer.close()
+
+        async def delayed(reader, writer):
+            queue: asyncio.Queue = asyncio.Queue()
+
+            async def deliver():
+                while True:
+                    due, data = await queue.get()
+                    if data is None:
+                        break
+                    await asyncio.sleep(max(0.0, due - time.monotonic()))
+                    writer.write(data)
+                    await writer.drain()
+
+            sender = asyncio.create_task(deliver())
+            try:
+                while data := await reader.read(65536):
+                    await queue.put((time.monotonic() + LINK_DELAY, data))
+            except (ConnectionError, asyncio.CancelledError):
+                pass
+            finally:
+                await queue.put((0.0, None))
+                try:
+                    await sender
+                except (ConnectionError, asyncio.CancelledError):
+                    pass
+                writer.close()
+
+        pumps = [asyncio.create_task(forward(client_reader, server_writer)),
+                 asyncio.create_task(delayed(server_reader, client_writer))]
+        tasks.update(pumps)
+        await asyncio.gather(*pumps, return_exceptions=True)
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    yield {**database, "port": port}
+    server.close()
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _elapsed(coro) -> tuple[float, object]:
+    started = time.monotonic()
+    result = await coro
+    return time.monotonic() - started, result
+
+
+async def test_query_page_is_one_round_trip_on_a_slow_link(slow_link, manager):
+    kwargs = _kwargs(slow_link, sql="SELECT id FROM t ORDER BY id", limit=5, count_timeout=0)
+    await run_pool_query(manager=manager, **kwargs)  # opens the connection
+    elapsed, page = await _elapsed(run_pool_query(manager=manager, **kwargs))
+    assert page.has_more is True and page.timing_ms["pool_new_connections"] == 0
+    assert elapsed < LINK_DELAY * 1.8, f"{elapsed:.3f}s: more than one round trip"
+
+
+async def test_metadata_query_is_one_round_trip(slow_link, manager):
+    from db_gateway.pg_pool import run_metadata_query
+
+    kwargs = dict(host=slow_link["host"], port=slow_link["port"], user=slow_link["user"], password="",
+                  database=slow_link["database"], manager=manager)
+    await run_metadata_query(**kwargs, sql="SELECT 1", params=None)  # opens the connection
+    elapsed, rows = await _elapsed(run_metadata_query(**kwargs, sql="SELECT %s::int + 1", params=(1,)))
+    assert rows == [['2']]  # pool connections load every value as text
+    assert elapsed < LINK_DELAY * 1.8, f"{elapsed:.3f}s: more than one round trip"
+
+
+async def test_schema_lookup_is_one_round_trip(slow_link, workflow_db, manager, tmp_path, monkeypatch):
+    from db_gateway import pg_pool
+    from db_gateway.config import AppConfig
+    from db_gateway.core import execute_schema_lookup
+
+    monkeypatch.setattr(pg_pool, "MANAGER", manager)
+    cfg = AppConfig()
+    cfg.resources.base_dir = str(tmp_path)
+    cfg.postgres.host = slow_link["host"]
+    cfg.postgres.user = slow_link["user"]
+    cfg.postgres.db_prod = slow_link["database"]
+    cfg.postgres.port_prod = slow_link["port"]
+    cfg.postgres.driver = "pool"
+    cfg.postgres.pool_watch_teleport_keys = False
+
+    await execute_schema_lookup(cfg=cfg, database="prod", tables=["workflow_runs"])  # opens the connection
+    elapsed, data = await _elapsed(execute_schema_lookup(cfg=cfg, database="prod", tables=["workflow_runs"]))
+    assert data["success"] is True and data["tables"][0]["indexes"]
+    assert elapsed < LINK_DELAY * 1.8, f"{elapsed:.3f}s: columns and indexes not fetched in one round trip"
+
+
+async def test_metadata_query_error_leaves_the_connection_clean(database, manager):
+    from db_gateway.pg_pool import run_metadata_query
+
+    kwargs = dict(host=database["host"], port=database["port"], user=database["user"], password="",
+                  database=database["database"], manager=manager,
+                  settings=PoolSettings(min_size=1, max_size=1))
+    with pytest.raises(RuntimeError, match="does not exist"):
+        await run_metadata_query(**kwargs, sql="SELECT * FROM missing_table", params=None)
+    rows = await run_metadata_query(
+        **kwargs, sql="SELECT current_setting('transaction_read_only'), pg_backend_pid() > 0", params=None,
+    )
+    assert rows == [["on", "t"]]
+
+
+async def test_metadata_statement_timeout_is_reported_and_recovers(database, manager):
+    from db_gateway.pg_pool import StatementTimeout, run_metadata_query
+
+    kwargs = dict(host=database["host"], port=database["port"], user=database["user"], password="",
+                  database=database["database"], manager=manager,
+                  settings=PoolSettings(min_size=1, max_size=1))
+    with pytest.raises(StatementTimeout):
+        await run_metadata_query(**kwargs, sql="SELECT pg_sleep(3)", params=None, timeout=0.5)
+    assert await run_metadata_query(**kwargs, sql="SELECT 1", params=None) == [["1"]]

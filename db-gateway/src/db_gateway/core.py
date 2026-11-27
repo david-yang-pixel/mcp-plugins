@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from db_gateway import schema_info
-from db_gateway.pg_pool import pool_settings_from_config, run_metadata_query, run_pool_query
+from db_gateway.pg_pool import (
+    pool_settings_from_config,
+    run_metadata_queries,
+    run_metadata_query,
+    run_pool_query,
+)
 from db_gateway.postgres import (
     PsqlResult,
     PsqlSafetyError,
@@ -831,11 +836,11 @@ async def execute_schema_lookup(
         async with limiter:
             for attempt in range(attempts):
                 try:
-                    columns = await run_metadata_query(
-                        **kwargs, sql=schema_info.COLUMNS_SQL, params=(names,), timeout=timeout,
-                    )
-                    indexes = await run_metadata_query(
-                        **kwargs, sql=schema_info.INDEXES_SQL, params=(names,), timeout=timeout,
+                    # Both catalog queries in one transaction and one round trip.
+                    columns, indexes = await run_metadata_queries(
+                        **kwargs,
+                        queries=[(schema_info.COLUMNS_SQL, (names,)), (schema_info.INDEXES_SQL, (names,))],
+                        timeout=timeout,
                     )
                     return columns, indexes
                 except TeleportAuthExpired:

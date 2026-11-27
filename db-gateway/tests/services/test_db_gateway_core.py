@@ -1003,14 +1003,19 @@ _COLUMN_ROWS = [
 
 
 def _fake_catalog(columns=_COLUMN_ROWS, indexes=_INDEX_ROWS[:2]):
+    """Stands in for run_metadata_queries (one round trip for every catalog query)."""
     from db_gateway import schema_info
 
     async def fake(**kwargs):
-        if kwargs["sql"] == schema_info.COLUMNS_SQL:
-            return columns
-        if kwargs["sql"] == schema_info.INDEXES_SQL:
-            return indexes
-        raise AssertionError(kwargs["sql"])
+        out = []
+        for sql, _params in kwargs["queries"]:
+            if sql == schema_info.COLUMNS_SQL:
+                out.append(columns)
+            elif sql == schema_info.INDEXES_SQL:
+                out.append(indexes)
+            else:
+                raise AssertionError(sql)
+        return out
 
     return AsyncMock(side_effect=fake)
 
@@ -1020,7 +1025,7 @@ async def test_schema_lookup_returns_columns_and_indexes(tmp_path):
     from db_gateway.core import execute_schema_lookup
 
     meta = _fake_catalog()
-    with patch("db_gateway.core.run_metadata_query", meta):
+    with patch("db_gateway.core.run_metadata_queries", meta):
         data = await execute_schema_lookup(
             cfg=_cfg(tmp_path), database="prod", tables=["workflow_runs"],
         )
@@ -1034,11 +1039,13 @@ async def test_schema_lookup_returns_columns_and_indexes(tmp_path):
     assert table["columns"][2]["type"] == "varchar(255)"
     assert table["columns"][3]["type"] == "timestamp"
     assert [i["name"] for i in table["indexes"]] == ["workflow_runs_pkey", "workflow_run_tenant_idx"]
-    # Table names travel only as bind parameters.
-    for call in meta.await_args_list:
-        assert call.kwargs["params"] == (["workflow_runs"],)
-        assert call.kwargs["database"] == "langgenius"
-        assert "workflow_runs" not in call.kwargs["sql"]
+    # One batched call; table names travel only as bind parameters.
+    (call,) = meta.await_args_list
+    assert call.kwargs["database"] == "langgenius"
+    assert len(call.kwargs["queries"]) == 2
+    for sql, params in call.kwargs["queries"]:
+        assert params == (["workflow_runs"],)
+        assert "workflow_runs" not in sql
     entry = _audit_entries(tmp_path)[-1]
     assert entry["tool"] == "db_gateway_schema" and entry["tables"] == ["workflow_runs"]
 
@@ -1047,7 +1054,7 @@ async def test_schema_lookup_returns_columns_and_indexes(tmp_path):
 async def test_schema_lookup_reports_missing_tables(tmp_path):
     from db_gateway.core import execute_schema_lookup
 
-    with patch("db_gateway.core.run_metadata_query", _fake_catalog()):
+    with patch("db_gateway.core.run_metadata_queries", _fake_catalog()):
         data = await execute_schema_lookup(
             cfg=_cfg(tmp_path), database="plugin", tables=["workflow_runs", "public.nope"],
         )
@@ -1072,7 +1079,7 @@ async def test_schema_lookup_rejects_bad_arguments(tmp_path, database, tables, c
     from db_gateway.core import execute_schema_lookup
 
     meta = _fake_catalog()
-    with patch("db_gateway.core.run_metadata_query", meta):
+    with patch("db_gateway.core.run_metadata_queries", meta):
         data = await execute_schema_lookup(cfg=_cfg(tmp_path), database=database, tables=tables)
 
     assert data["success"] is False and data["code"] == code
@@ -1084,7 +1091,7 @@ async def test_schema_lookup_retries_connection_loss_then_reports_teleport(tmp_p
     from db_gateway.core import execute_schema_lookup
 
     meta = AsyncMock(side_effect=TeleportAuthExpired("connection reset"))
-    with patch("db_gateway.core.run_metadata_query", meta):
+    with patch("db_gateway.core.run_metadata_queries", meta):
         data = await execute_schema_lookup(cfg=_cfg(tmp_path), database="prod", tables=["t"])
 
     assert data["code"] == "TELEPORT_EXPIRED"
@@ -1198,12 +1205,12 @@ async def test_schema_lookup_knowledgefs_starts_tunnel(tmp_path):
     from db_gateway.core import execute_schema_lookup
 
     tunnel = AsyncMock()
-    meta = AsyncMock(side_effect=[
+    meta = AsyncMock(return_value=[
         [["public", "logical_documents", "id", "uuid", "NO", None, 1]],
         [],
     ])
     with patch("db_gateway.core.ensure_knowledgefs_tunnel", tunnel), \
-            patch("db_gateway.core.run_metadata_query", meta):
+            patch("db_gateway.core.run_metadata_queries", meta):
         out = await execute_schema_lookup(cfg=_kfs_cfg(tmp_path), database="knowledgefs",
                                           tables=["logical_documents"])
     assert out["success"] and tunnel.await_count == 1

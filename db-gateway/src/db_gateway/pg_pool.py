@@ -28,7 +28,7 @@ import os
 import time
 import weakref
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import psycopg
 from psycopg import postgres
@@ -768,47 +768,60 @@ async def _explain_page(
 
 
 async def _metadata_rows(
-    conn: psycopg.AsyncConnection, sql: str, params: Any, timeout: float,
-) -> list[list[Any]]:
-    await conn.execute(
-        f"BEGIN TRANSACTION READ ONLY; SET LOCAL statement_timeout = {int(timeout * 1000)}"
-    )
-    cur = await conn.execute(sql, params)
-    rows = [list(row) for row in await cur.fetchall()]
-    await conn.execute("ROLLBACK")
+    conn: psycopg.AsyncConnection, queries: Sequence[tuple[str, Any]], timeout: float,
+) -> list[list[list[Any]]]:
+    """All queries in one READ ONLY transaction, sent as one pipeline (one round trip).
+
+    If a statement fails, the server skips the rest of the pipeline (ROLLBACK
+    included) and psycopg raises on leaving the block; callers then run
+    ``_cleanup_after_error`` (pool) or close the connection (one-off).
+    """
+    async with conn.pipeline():
+        await conn.execute("BEGIN TRANSACTION READ ONLY")
+        await conn.execute(f"SET LOCAL statement_timeout = {int(timeout * 1000)}")
+        cursors = [await conn.execute(sql, params) for sql, params in queries]
+        await conn.execute("ROLLBACK")
+    return [[list(row) for row in await cur.fetchall()] for cur in cursors]
+
+
+async def run_metadata_query(*, sql: str, params: Any = None, **kwargs: Any) -> list[list[Any]]:
+    """One catalog query; see ``run_metadata_queries``."""
+    (rows,) = await run_metadata_queries(queries=[(sql, params)], **kwargs)
     return rows
 
 
-async def run_metadata_query(
+async def run_metadata_queries(
     *,
     host: str,
     port: int,
     user: str,
     password: str,
     database: str,
-    sql: str,
-    params: Any = None,
+    queries: Sequence[tuple[str, Any]],
     timeout: float = 5.0,
     use_pool: bool = True,
     settings: PoolSettings | None = None,
     auth_home: str | None = None,
     manager: PoolManager | None = None,
-) -> list[list[Any]]:
-    """Run one trusted, parameterized catalog query (READ ONLY, statement_timeout).
+) -> list[list[list[Any]]]:
+    """Run trusted, parameterized catalog queries (READ ONLY, statement_timeout).
 
-    ``sql`` must be gateway-owned text (e.g. ``schema_info.COLUMNS_SQL``); caller
-    input only ever travels in ``params`` as bind parameters. With
-    ``use_pool=False`` (psql driver) a one-off connection is opened and closed.
+    Every ``(sql, params)`` runs in one transaction and one round trip; the
+    result is one row list per query, in order. ``sql`` must be gateway-owned
+    text (e.g. ``schema_info.COLUMNS_SQL``); caller input only ever travels in
+    ``params`` as bind parameters. With ``use_pool=False`` (psql driver) a
+    one-off connection is opened and closed.
 
     Raises TeleportAuthExpired for connection failures, StatementTimeout /
     asyncio.TimeoutError for timeouts and RuntimeError for other errors.
     """
+    queries = list(queries)
     settings = settings or PoolSettings()
     key = PoolKey(host=host, port=int(port), user=user, database=database)
     manager = manager or MANAGER
     deadline = float(timeout) + settings.acquire_timeout_seconds + 5
 
-    async def pooled() -> list[list[Any]]:
+    async def pooled() -> list[list[list[Any]]]:
         for attempt in range(2):
             pool: Optional[AsyncConnectionPool] = None
             conn: Optional[psycopg.AsyncConnection] = None
@@ -818,7 +831,7 @@ async def run_metadata_query(
                 )
                 async with pool.connection() as conn:
                     try:
-                        return await _metadata_rows(conn, sql, params, timeout)
+                        return await _metadata_rows(conn, queries, timeout)
                     except Exception:
                         await _cleanup_after_error(conn)
                         raise
@@ -849,7 +862,7 @@ async def run_metadata_query(
                 raise TeleportAuthExpired(f"Connection refused: {e}") from e
         raise AssertionError("unreachable")
 
-    async def one_off() -> list[list[Any]]:
+    async def one_off() -> list[list[list[Any]]]:
         try:
             conn = await psycopg.AsyncConnection.connect(
                 make_conninfo(
@@ -863,7 +876,7 @@ async def run_metadata_query(
         except (psycopg.OperationalError, OSError) as e:
             raise TeleportAuthExpired(f"could not connect to server: {str(e).strip()}") from e
         try:
-            return await _metadata_rows(conn, sql, params, timeout)
+            return await _metadata_rows(conn, queries, timeout)
         except psycopg.errors.QueryCanceled as e:
             raise StatementTimeout(_error_text(e)) from e
         except psycopg.Error as e:
