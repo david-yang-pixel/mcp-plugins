@@ -1,0 +1,142 @@
+"""Helpers shared by the teleport tool tests (fixtures live in conftest.py)."""
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+_SRC_FILES = {
+    "current-profile": "teleport.dify.dev",
+    "teleport.dify.dev.yaml": "web_proxy_addr: teleport.dify.dev:443\nuser: u\n",
+    "bin/.config.json": "{}",
+    "keys/teleport.dify.dev/u.key": "key",
+    "keys/teleport.dify.dev/u": "ssh-key",
+    "keys/teleport.dify.dev/certs.pem": "ca",
+    "keys/teleport.dify.dev/cas/teleport.dify.dev.pem": "ca",
+    "keys/teleport.dify.dev/u-ssh/teleport.dify.dev-cert.pub": "ssh-cert",
+    "keys/teleport.dify.dev/u-app/teleport.dify.dev/x.crt": "app",
+    "keys/teleport.dify.dev/u-kube/teleport.dify.dev/c.cred": "kube",
+    "keys/teleport.dify.dev/u-db/teleport.dify.dev/d.crt": "db",
+}
+
+
+def write_tsh_src(root: Path, cert: str = "cert-1") -> Path:
+    """A minimal TELEPORT_HOME like the one tsh-auth-watchdog maintains."""
+    files = dict(_SRC_FILES)
+    files["keys/teleport.dify.dev/u.crt"] = cert
+    for rel, text in files.items():
+        path = Path(root) / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    return Path(root)
+
+
+def snapshot(path: str | Path) -> dict[str, tuple[int, int, str]]:
+    """{relative path: (size, mtime_ns, sha256)} of every file under ``path``."""
+    out: dict[str, tuple[int, int, str]] = {}
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            full = os.path.join(root, name)
+            st = os.stat(full)
+            digest = hashlib.sha256(Path(full).read_bytes()).hexdigest()
+            out[os.path.relpath(full, path)] = (st.st_size, st.st_mtime_ns, digest)
+    return out
+
+
+_FAKE_TSH = r'''#!{python}
+import base64, fcntl, json, os, subprocess, sys, time
+D = {dir!r}
+argv = sys.argv[1:]
+env = {{k: v for k, v in os.environ.items()
+        if k in ("TELEPORT_HOME", "KUBECONFIG", "TELEPORT_TOOLS_VERSION") or "proxy" in k.lower()}}
+is_login = argv[:2] in (["apps", "login"], ["kube", "login"])
+
+def _write(path, content):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(content)
+
+with open(os.path.join(D, "lock"), "a+") as lk:
+    fcntl.flock(lk, fcntl.LOCK_EX)
+    with open(os.path.join(D, "calls.jsonl"), "a") as f:
+        f.write(json.dumps({{"argv": argv, "env": env}}) + "\n")
+    resp = None
+    mode_path = os.path.join(D, "mode.json")
+    marker = os.path.join(D, "logged_in")
+    if os.path.exists(mode_path) and not os.path.exists(marker):
+        mode = json.load(open(mode_path))
+        if is_login:
+            open(marker, "w").close()
+            if mode.get("on_login"):
+                _write(*mode["on_login"])
+            resp = {{}}
+        else:
+            resp = {{"code": mode["code"], "stderr": mode["stderr"]}}
+    if resp is None:
+        qpath, ipath = os.path.join(D, "queue.jsonl"), os.path.join(D, "index")
+        lines = open(qpath).read().splitlines() if os.path.exists(qpath) else []
+        idx = int(open(ipath).read() or 0) if os.path.exists(ipath) else 0
+        if idx < len(lines):
+            resp = json.loads(lines[idx])
+            with open(ipath, "w") as f:
+                f.write(str(idx + 1))
+        else:
+            resp = {{}}
+    fcntl.flock(lk, fcntl.LOCK_UN)
+
+if resp.get("write_file"):
+    _write(*resp["write_file"])
+out = base64.b64decode(resp["stdout_b64"]) if resp.get("stdout_b64") else resp.get("stdout", "").encode()
+sys.stdout.buffer.write(out)
+sys.stdout.flush()
+sys.stderr.write(resp.get("stderr", ""))
+sys.stderr.flush()
+if resp.get("child_sleep"):
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(%s)" % resp["child_sleep"]])
+    _write(os.path.join(D, "child.pid"), str(child.pid))
+time.sleep(resp.get("sleep", 0))
+sys.exit(resp.get("code", 0))
+'''
+
+
+class FakeTsh:
+    """Scriptable stand-in for the tsh binary (see the plan's fixture notes)."""
+
+    def __init__(self, directory: Path) -> None:
+        self.dir = Path(directory)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.path = str(self.dir / "tsh")
+        Path(self.path).write_text(_FAKE_TSH.format(python=sys.executable, dir=str(self.dir)))
+        os.chmod(self.path, 0o755)
+
+    def push(self, stdout: str = "", stdout_bytes: bytes | None = None, stderr: str = "",
+             code: int = 0, sleep: float = 0, child_sleep: float | None = None,
+             write_file: list[str] | None = None) -> None:
+        resp: dict = {"stdout": stdout, "stderr": stderr, "code": code, "sleep": sleep}
+        if stdout_bytes is not None:
+            resp["stdout_b64"] = base64.b64encode(stdout_bytes).decode()
+        if child_sleep is not None:
+            resp["child_sleep"] = child_sleep
+        if write_file is not None:
+            resp["write_file"] = list(write_file)
+        with open(self.dir / "queue.jsonl", "a") as f:
+            f.write(json.dumps(resp) + "\n")
+
+    def until_login(self, code: int = 1, stderr: str = "no creds",
+                    on_login: tuple[str, str] | None = None) -> None:
+        (self.dir / "mode.json").write_text(json.dumps(
+            {"code": code, "stderr": stderr, "on_login": list(on_login) if on_login else None}
+        ))
+
+    @property
+    def calls(self) -> list[dict]:
+        path = self.dir / "calls.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+    def child_pid(self) -> int:
+        return int((self.dir / "child.pid").read_text())
