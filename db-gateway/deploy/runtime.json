@@ -60,7 +60,7 @@
       "port_knowledgefs": 56064,
       "query_timeout_seconds": 30,
       "max_rows": 1000,
-      "max_concurrent_queries": 3,
+      "max_concurrent_queries": 5,
       "teleport_retry_attempts": 1,
       "teleport_retry_delay_seconds": 0.25,
       "singleflight_enabled": true,

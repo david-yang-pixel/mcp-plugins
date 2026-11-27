@@ -23,3 +23,7 @@
 
 # Machine-local recovery information
 .baseline/local-backup.json
+
+# Local design notes / plans (not part of the repository)
+docs/superpowers/
+.superpowers/
