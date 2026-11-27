@@ -30,7 +30,8 @@ def cfg(tmp_path, fake_tsh):
 @pytest.fixture(autouse=True)
 def _reset_teleport_state(monkeypatch):
     """Fresh module state per test; never run the real tsh for `tsh status`."""
-    for name in ("db_gateway.teleport_cli", "db_gateway.lambda_logs", "db_gateway.kube_read"):
+    for name in ("db_gateway.teleport_cli", "db_gateway.lambda_logs", "db_gateway.kube_read",
+                 "db_gateway.tsh_daemons", "db_gateway.aws_logs"):
         mod = sys.modules.get(name)
         if mod is not None and hasattr(mod, "_reset_state"):
             mod._reset_state()

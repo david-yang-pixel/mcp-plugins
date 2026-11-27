@@ -140,3 +140,12 @@ class FakeTsh:
 
     def child_pid(self) -> int:
         return int((self.dir / "child.pid").read_text())
+
+
+def alive(pid: int) -> bool:
+    """False when the process is gone or a zombie (Linux /proc)."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return stat.rsplit(")", 1)[1].split()[0] != "Z"

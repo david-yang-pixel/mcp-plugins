@@ -26,6 +26,10 @@ class PostgresConfig(BaseModel):
     port_prod: int = 56061
     port_billing: int = 56062
     port_plugin: int = 56063
+    # KnowledgeFS production (Teleport db knowledge-fs-production-readonly). Its tunnel
+    # is run by db-gateway itself (tsh_daemons.KNOWLEDGEFS_TUNNEL), not a tsh-proxy container.
+    db_knowledgefs: str = "knowledgefs"
+    port_knowledgefs: int = 56064
     query_timeout_seconds: int = 30
     max_rows: int = 1000
     max_concurrent_queries: int = 3
@@ -101,6 +105,12 @@ class KubeReadConfig(BaseModel):
     kubeconfig_path: str = "/tmp/db-gateway/kubeconfig"
 
 
+class KnowledgeFsConfig(BaseModel):
+    enabled: bool = True
+    teleport_db: str = "knowledge-fs-production-readonly"
+    # The tunnel and the queries both log in as postgres.user.
+
+
 class TeleportToolsConfig(BaseModel):
     """plugin_lambda_logs / kube_read: read-only tsh tools (see teleport_cli.py)."""
 
@@ -114,6 +124,7 @@ class TeleportToolsConfig(BaseModel):
     max_concurrent: int = 3
     lambda_logs: LambdaLogsConfig = Field(default_factory=LambdaLogsConfig)
     kube: KubeReadConfig = Field(default_factory=KubeReadConfig)
+    knowledgefs: KnowledgeFsConfig = Field(default_factory=KnowledgeFsConfig)
 
 
 class AppConfig(BaseModel):

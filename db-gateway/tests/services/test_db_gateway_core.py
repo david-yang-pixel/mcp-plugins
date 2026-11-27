@@ -1072,3 +1072,100 @@ def test_audit_path_defaults_to_state_logs_dir(tmp_path):
     assert _audit_path(cfg) == tmp_path / ".state" / "logs" / "db_gateway_audit.log"
     cfg.db_gateway.audit_log_dir = "/var/lib/mcp/logs"
     assert str(_audit_path(cfg)) == "/var/lib/mcp/logs/db_gateway_audit.log"
+
+
+# --- knowledgefs (tunnel run by db-gateway) ---------------------------------------
+
+
+def _kfs_cfg(tmp_path, enabled=True):
+    cfg = _cfg(tmp_path)
+    cfg.postgres.db_knowledgefs = "knowledgefs"
+    cfg.postgres.port_knowledgefs = 56064
+    cfg.teleport_tools.knowledgefs.enabled = enabled
+    return cfg
+
+
+async def test_knowledgefs_query_starts_tunnel_first(tmp_path):
+    from db_gateway.core import execute_gateway_query
+
+    order = []
+    tunnel = AsyncMock(side_effect=lambda *a, **k: order.append("tunnel"))
+    run = AsyncMock(side_effect=lambda **k: order.append("query") or _page_result())
+    with patch("db_gateway.core.ensure_knowledgefs_tunnel", tunnel), patch("db_gateway.core.run_psql", run):
+        result = await execute_gateway_query(cfg=_kfs_cfg(tmp_path), database="knowledgefs",
+                                             sql="SELECT 1 ORDER BY 1")
+    assert result.success and order == ["tunnel", "query"]
+    assert (run.call_args.kwargs["port"], run.call_args.kwargs["database"]) == (56064, "knowledgefs")
+
+
+async def test_other_databases_do_not_start_tunnel(tmp_path):
+    from db_gateway.core import execute_gateway_query
+
+    tunnel = AsyncMock()
+    with patch("db_gateway.core.ensure_knowledgefs_tunnel", tunnel), \
+            patch("db_gateway.core.run_psql", AsyncMock(return_value=_page_result())):
+        result = await execute_gateway_query(cfg=_kfs_cfg(tmp_path), database="prod", sql="SELECT 1 ORDER BY 1")
+    assert result.success and tunnel.await_count == 0
+
+
+async def test_knowledgefs_disabled_is_unknown_database(tmp_path):
+    from db_gateway.core import execute_gateway_query
+
+    tunnel, run = AsyncMock(), AsyncMock()
+    with patch("db_gateway.core.ensure_knowledgefs_tunnel", tunnel), patch("db_gateway.core.run_psql", run):
+        result = await execute_gateway_query(cfg=_kfs_cfg(tmp_path, enabled=False), database="knowledgefs",
+                                             sql="SELECT 1")
+    assert result.code == "UNKNOWN_DATABASE" and "knowledgefs" in result.error
+    assert tunnel.await_count == 0 and run.await_count == 0
+
+
+async def test_unsafe_sql_does_not_start_tunnel(tmp_path):
+    from db_gateway.core import execute_gateway_query
+
+    tunnel = AsyncMock()
+    with patch("db_gateway.core.ensure_knowledgefs_tunnel", tunnel), patch("db_gateway.core.run_psql", AsyncMock()):
+        result = await execute_gateway_query(cfg=_kfs_cfg(tmp_path), database="knowledgefs",
+                                             sql="DELETE FROM logical_documents")
+    assert result.code == "SQL_SAFETY_ERROR" and tunnel.await_count == 0
+
+
+@pytest.mark.parametrize("error,code,needle", [
+    (TeleportAuthExpired("expired"), "TELEPORT_EXPIRED", "expired"),
+    (RuntimeError("port in use"), "QUERY_ERROR", "KnowledgeFS 隧道启动失败"),
+])
+async def test_knowledgefs_tunnel_failure_codes(tmp_path, error, code, needle):
+    from db_gateway.core import execute_gateway_query
+
+    run = AsyncMock()
+    with patch("db_gateway.core.ensure_knowledgefs_tunnel", AsyncMock(side_effect=error)), \
+            patch("db_gateway.core.run_psql", run):
+        result = await execute_gateway_query(cfg=_kfs_cfg(tmp_path), database="knowledgefs", sql="SELECT 1")
+    assert result.code == code and needle in result.error and run.await_count == 0
+
+
+async def test_schema_lookup_knowledgefs_starts_tunnel(tmp_path):
+    from db_gateway.core import execute_schema_lookup
+
+    tunnel = AsyncMock()
+    meta = AsyncMock(side_effect=[
+        [["public", "logical_documents", "id", "uuid", "NO", None, 1]],
+        [],
+    ])
+    with patch("db_gateway.core.ensure_knowledgefs_tunnel", tunnel), \
+            patch("db_gateway.core.run_metadata_query", meta):
+        out = await execute_schema_lookup(cfg=_kfs_cfg(tmp_path), database="knowledgefs",
+                                          tables=["logical_documents"])
+    assert out["success"] and tunnel.await_count == 1
+    assert meta.call_args.kwargs["port"] == 56064 and meta.call_args.kwargs["database"] == "knowledgefs"
+
+
+async def test_knowledgefs_tunnel_timeout_is_not_reported_as_roles(tmp_path):
+    from db_gateway.core import execute_gateway_query
+    from db_gateway.tsh_daemons import TshDaemonTimeout
+
+    with patch("db_gateway.core.ensure_knowledgefs_tunnel",
+               AsyncMock(side_effect=TshDaemonTimeout("knowledgefs_tunnel 在 15s 内没有就绪："))), \
+            patch("db_gateway.core.classify_failure", AsyncMock()) as classify, \
+            patch("db_gateway.core.run_psql", AsyncMock()):
+        result = await execute_gateway_query(cfg=_kfs_cfg(tmp_path), database="knowledgefs", sql="SELECT 1")
+    assert result.code == "QUERY_ERROR" and "超时" in result.error and classify.await_count == 0

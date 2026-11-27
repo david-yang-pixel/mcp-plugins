@@ -56,6 +56,8 @@
       "port_prod": 56061,
       "port_billing": 56062,
       "port_plugin": 56063,
+      "db_knowledgefs": "knowledgefs",
+      "port_knowledgefs": 56064,
       "query_timeout_seconds": 30,
       "max_rows": 1000,
       "max_concurrent_queries": 3,
@@ -86,6 +88,9 @@
         "enabled": true
       },
       "kube": {
+        "enabled": true
+      },
+      "knowledgefs": {
         "enabled": true
       }
     }

@@ -22,7 +22,7 @@ HTTP `POST /query` 与 MCP `tools/call`（`/mcp`，以及 `scripts/db_gateway_mc
 
 | 参数 | 必填 | 说明 |
 | --- | --- | --- |
-| `database` | 是 | `prod` / `billing` / `plugin` |
+| `database` | 是 | `prod` / `billing` / `plugin` / `knowledgefs`（见下文「KnowledgeFS 库」） |
 | `sql` | 是 | 单条只读查询，必须以 `SELECT` 或 `WITH` 开头，可带前置括号，例如 `(SELECT 1) UNION ALL (SELECT 2)`。末尾分号和注释会被去掉。 |
 | `offset` | 否 | 跳过的行数，默认 `0`。翻页时传上一页的 `next_offset`。 |
 | `limit` | 否 | 每页行数，默认且最大为 `postgres.max_rows`（默认 1000），超过时按上限返回并给出 warning。 |
@@ -121,7 +121,7 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
 
 | 参数 | 必填 | 说明 |
 | --- | --- | --- |
-| `database` | 是 | `prod` / `billing` / `plugin`（与 `db_gateway_query` 相同） |
+| `database` | 是 | `prod` / `billing` / `plugin` / `knowledgefs`（与 `db_gateway_query` 相同） |
 | `tables` | 是 | 表名数组，最多 20 个，例如 `["workflow_runs"]`。可写 `schema.table`；未写 schema 时匹配所有非系统 schema（`public` 排在前面）；区分大小写的表名用双引号，例如 `"\"MyTable\""`。 |
 
 返回 `tables`：每张表一项，含 `schema`、`table`、`columns`（`name`、`type`、`nullable`，有默认值时带 `default`）和 `indexes`（`name`、`definition`，即 `pg_indexes.indexdef`，主键索引名通常以 `_pkey` 结尾）。找不到的表放在 `not_found`，并在 `warnings` 中说明。失败时 `success=false`，`code` 为 `UNKNOWN_DATABASE`、`INVALID_ARGUMENT`、`TELEPORT_EXPIRED`、`QUERY_TIMEOUT` 或 `QUERY_ERROR`。
@@ -143,16 +143,21 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
   - 每次调用开始时，把它（不含 `bin`、`*-app`、`*-kube`、`*-db` 目录）同步到容器内的 `teleport_tools.shadow_home`，tsh 只在这个副本里读写。
   - 用户证书 `keys/*/*.crt` 的内容变化（即 watchdog 续期）时重新同步。
   - 续期窗口里线上目录暂时没有证书时，继续用副本里仍在有效期内的旧证书；连副本都没有时返回 `TELEPORT_EXPIRED`。
-- **子进程**：参数列表方式执行，不经 shell。tsh 运行在独立进程组里，到截止时间整组杀掉（`tsh aws` 下面还有一个 `aws` 子进程）。环境里删除 `HTTP(S)_PROXY`、`ALL_PROXY`、`NO_PROXY`，设置 `TELEPORT_HOME=<shadow_home>`、`KUBECONFIG=<kube.kubeconfig_path>`、`TELEPORT_TOOLS_VERSION=off`（关闭 tsh 客户端自动更新）。
+- **常驻 tsh 子进程**（`tsh_daemons.py`）：
+  - 日志工具用一个常驻的 `tsh proxy aws --app <app>` 本地代理，启动前先 `tsh apps login --aws-role <aws_role> <app>`；查询在进程内用 botocore 经这个代理发出。单页约 0.75 秒，以前每页起一次 `tsh aws` 加 aws CLI 要 1.4–1.9 秒。
+  - KnowledgeFS 库用一个常驻的 `tsh proxy db --tunnel` 隧道。
+  - 两者都在首次使用时启动；影子副本的证书变化（续期）、进程退出、或代理拒绝请求后自动重启；网关退出时整组杀掉。它们的输出由后台任务持续读取并保留末尾 50 行，启动失败时附在错误里。
+- **子进程**：参数列表方式执行，不经 shell。tsh 运行在独立进程组里，到截止时间整组杀掉。环境里删除 `HTTP(S)_PROXY`、`ALL_PROXY`、`NO_PROXY`，设置 `TELEPORT_HOME=<shadow_home>`、`KUBECONFIG=<kube.kubeconfig_path>`、`TELEPORT_TOOLS_VERSION=off`（关闭 tsh 客户端自动更新）。
 - **时间预算**：整次工具调用共用一个截止时间（`time_budget_seconds`，默认 40 秒），SQL 定位、登录和每次 tsh 调用都只用剩余时间，保证低于 Nginx 的 60 秒超时。
-- **按需登录（兜底）**：tsh 18.11 的 `tsh aws` 没有 app 证书时会自动登录，kube 证书丢失时 `tsh kubectl` 会自动重签。仍失败时：
-  - 日志工具执行 `tsh apps login --aws-role <aws_role> <app>`，集群工具执行 `tsh kube login --all`，然后重试一次；并发调用共享这一次登录。
-  - 登录也失败时，用宿主机 tsh 对 `teleport.auth_home` 跑 `tsh status`：未登录返回 `TELEPORT_EXPIRED`（等 watchdog 续期后重试），已登录返回 `NOT_AUTHORIZED`，并附当前 Roles。
+- **按需登录**：
+  - 集群工具在 kube 证书丢失时由 `tsh kubectl` 自动重签；仍失败则执行 `tsh kube login --all` 后重试一次，并发调用共享这一次登录。
+  - 日志工具的代理返回 403 或连接失败时，重启代理（含 `apps login`）并重试本页一次。
+  - 登录或代理启动失败时，用宿主机 tsh 对 `teleport.auth_home` 跑 `tsh status`：未登录返回 `TELEPORT_EXPIRED`（等 watchdog 续期后重试），已登录返回 `NOT_AUTHORIZED`，并附当前 Roles。
 - 审计日志 `db_gateway_audit.log` 记录工具名、状态、耗时、函数名/窗口/过滤条件/事件数，或集群/完整参数/退出码/输出字节数；不记录日志和 kubectl 输出内容。
 
 ### `plugin_lambda_logs`
 
-执行 `tsh aws --app <app> logs filter-log-events --region <region> --log-group-name /aws/lambda/<函数名> …`，用户给的过滤式和翻页令牌以 `--filter-pattern=…`、`--next-token=…` 形式传入。
+调用 CloudWatch Logs `FilterLogEvents`（日志组 `/aws/lambda/<函数名>`，区域 `<region>`），与手工命令 `tsh aws --app <app> logs filter-log-events …` 等价，但经常驻代理加 botocore 发出。镜像不再包含 aws CLI。
 
 | 参数 | 说明 |
 | --- | --- |
@@ -203,7 +208,7 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
 | `AWS_ERROR` | 第一页 aws 报错（附 stderr） |
 | `LOGS_TIMEOUT` | 第一页就超过时间预算，一条都没取到 |
 | `KUBECTL_ERROR` | kubectl 报错（stderr 有错误行或退出码非 0） |
-| `TSH_TIMEOUT` | 时间预算在 tsh 完成前用完：等待并发槽位、登录超时、还没开始查询，或 kubectl 没有任何输出；稍后重试 |
+| `TSH_TIMEOUT` | 时间预算在 tsh 完成前用完：等待并发槽位、登录超时、常驻代理没有及时就绪、还没开始查询，或 kubectl 没有任何输出；稍后重试 |
 
 ### 配置（`settings.teleport_tools`）
 
@@ -212,7 +217,7 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
 | `tsh_path` | `/opt/teleport/bin/tsh` |
 | `shadow_home` | `/tmp/db-gateway/tsh-home` |
 | `time_budget_seconds` | `40` |
-| `max_concurrent` | `3`（每个工具各自的并发上限，不占数据库查询的槽位） |
+| `max_concurrent` | `3`（每个工具各自的并发上限；按工作空间定位时的插件库查询另外还占 `plugin` 库的查询槽位） |
 | `lambda_logs.enabled` | `true`；`false` 时工具不出现在 `tools/list` |
 | `lambda_logs.app` / `aws_role` / `region` | `aws-support-logs` / `SupportLambdaLogsReadOnly` / `us-east-1` |
 | `lambda_logs.default_timezone` | `Asia/Shanghai` |
@@ -221,8 +226,25 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
 | `kube.clusters` | `{"prod": "lg-eks-01", "staging": "dify-plugin-1"}` |
 | `kube.max_output_bytes` | `1048576` |
 | `kube.kubeconfig_path` | `/tmp/db-gateway/kubeconfig` |
+| `knowledgefs.enabled` | `true`；`false` 时 `knowledgefs` 库返回 `UNKNOWN_DATABASE` |
+| `knowledgefs.teleport_db` | `knowledge-fs-production-readonly` |
 
 `shadow_home` 和 `kubeconfig_path` 在容器内，容器重启后丢失，首次调用时自动重建。
+
+## KnowledgeFS 库 `knowledgefs`
+
+`db_gateway_query` 和 `db_gateway_schema` 的第 4 个库，指向 Teleport 数据库 `knowledge-fs-production-readonly`（KnowledgeFS 生产 Aurora 只读端点；库 `knowledgefs`，账号 `postgres.user`），用于排查知识库文档的上传、解析和编译、来源工作流、检索回答链路和删除问题。常用表有：
+- 文档：`logical_documents`、`document_revisions`、`document_compilation_attempts`、`parse_artifacts`、`upload_sessions`；
+- 来源工作流：`source_workflow_runs`；
+- 检索回答：`answer_traces`、`answer_trace_steps`；
+- 删除：`deletion_jobs`、`deletion_job_items`。
+
+和其他三个库不同，它的隧道不是独立的 `tsh-proxy-*` 容器，而是 db-gateway 在容器内自己启动的 `tsh proxy db --tunnel --port <postgres.port_knowledgefs> …`（默认 `127.0.0.1:56064`，host 网络）。具体行为：
+- 第一次查询时启动隧道，最多等 15 秒。
+- 续期后隧道会重启；连接池里的旧连接断开后，由现有的连接重试机制重连。
+- 隧道启动失败：会话失效返回 `TELEPORT_EXPIRED`，其他原因返回 `QUERY_ERROR`。
+
+只读校验、分页、超时、审计和其他库一致。
 
 ## 构建
 

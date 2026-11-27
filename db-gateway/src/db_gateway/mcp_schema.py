@@ -16,7 +16,9 @@ TOOL_SCHEMA: dict[str, Any] = {
     },
     "description": (
         "Run a read-only SELECT/WITH query through the DB Gateway. "
-        "Databases: prod, billing, plugin. The gateway enforces read-only SQL "
+        "Databases: prod, billing, plugin, knowledgefs (KnowledgeFS production: knowledge-base "
+        "documents, parsing/compilation, source workflows, retrieval answer traces, deletions). "
+        "The gateway enforces read-only SQL "
         "(single statement; may start with '(' e.g. '(SELECT 1) UNION ALL (SELECT 2)'). "
         "Results are paginated: at most `limit` rows (<= server max_rows, default 1000) "
         "starting at `offset`. The response includes row_count, total_rows (null if the "
@@ -35,8 +37,11 @@ TOOL_SCHEMA: dict[str, Any] = {
         "properties": {
             "database": {
                 "type": "string",
-                "enum": ["prod", "billing", "plugin"],
-                "description": "prod=langgenius, billing=billing, plugin=dify_plugin_daemon",
+                "enum": ["prod", "billing", "plugin", "knowledgefs"],
+                "description": (
+                    "prod=langgenius, billing=billing, plugin=dify_plugin_daemon, "
+                    "knowledgefs=KnowledgeFS production (knowledge-fs-production-readonly, db knowledgefs)"
+                ),
             },
             "sql": {
                 "type": "string",
@@ -91,7 +96,7 @@ SCHEMA_TOOL_SCHEMA: dict[str, Any] = {
     "description": (
         "Look up the real columns (name, type, nullable, default) and indexes of one or more "
         "tables through the DB Gateway, from information_schema.columns and pg_indexes. "
-        "Databases: prod, billing, plugin. Use it before writing SQL to avoid 'column does "
+        "Databases: prod, billing, plugin, knowledgefs. Use it before writing SQL to avoid 'column does "
         "not exist' errors and type mismatches (e.g. uuid = text), and to pick filters that "
         "hit an index. Read-only."
     ),
@@ -100,8 +105,11 @@ SCHEMA_TOOL_SCHEMA: dict[str, Any] = {
         "properties": {
             "database": {
                 "type": "string",
-                "enum": ["prod", "billing", "plugin"],
-                "description": "prod=langgenius, billing=billing, plugin=dify_plugin_daemon",
+                "enum": ["prod", "billing", "plugin", "knowledgefs"],
+                "description": (
+                    "prod=langgenius, billing=billing, plugin=dify_plugin_daemon, "
+                    "knowledgefs=KnowledgeFS production (knowledge-fs-production-readonly, db knowledgefs)"
+                ),
             },
             "tables": {
                 "type": "array",

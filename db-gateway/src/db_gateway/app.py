@@ -19,6 +19,7 @@ from db_gateway.teleport_auth_web import (
     handle_teleport_auth_post,
 )
 from db_gateway.teleport_tokens import TokenStore
+from db_gateway.tsh_daemons import stop_all as stop_tsh_daemons
 
 
 APP_CONFIG_KEY: web.AppKey[Any] = web.AppKey("db_gateway.http.config", object)
@@ -50,6 +51,7 @@ async def handle_status(request: web.Request) -> web.Response:
             "prod": cfg.postgres.port_prod,
             "billing": cfg.postgres.port_billing,
             "plugin": cfg.postgres.port_plugin,
+            "knowledgefs": cfg.postgres.port_knowledgefs,
         },
         "teleport_proxy": cfg.teleport.proxy,
     })
@@ -180,6 +182,7 @@ def create_db_gateway_app(cfg: Any | None = None) -> web.Application:
     app.router.add_post("/teleport-auth", handle_teleport_auth_post)
     app.router.add_post("/internal/teleport-auth/issue", handle_teleport_auth_issue)
     app.on_cleanup.append(_close_pg_pools)
+    app.on_cleanup.append(_stop_tsh_daemons)
     return app
 
 
@@ -187,6 +190,11 @@ async def _close_pg_pools(_app: web.Application) -> None:
     from db_gateway.pg_pool import MANAGER
 
     await MANAGER.close_all()
+
+
+async def _stop_tsh_daemons(_app: web.Application) -> None:
+    """Kill the long-running tsh processes (aws proxy, KnowledgeFS tunnel)."""
+    await stop_tsh_daemons()
 
 
 def run_db_gateway_app() -> None:

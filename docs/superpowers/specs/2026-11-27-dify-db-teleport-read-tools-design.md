@@ -289,6 +289,38 @@ Task 0 之后在 A 之内新增的两个决定：
 | 删除 `-kube` 目录后再 `tsh kubectl` | 自动重签，成功，3.0 秒 |
 | kubectl 退出码 | Forbidden、NotFound、`unknown flag`、`context was not found` 都是 rc=0（18.0.0 和 18.11.0 相同）；没有 kubeconfig 时 `error: context "…" does not exist`，rc=0 |
 
+### 9.3 上线校验（2026-11-27 22:05–22:15 KST，Task 8）
+
+部署：合并 #29（`32f3aa8`）触发 CI run 93。
+
+- `plan` 只选中 db-gateway；Build db-gateway、Deploy db-gateway 两个作业成功。
+- 新容器 22:05:42 KST 启动，镜像内 `tsh` 为 18.11.0，`aws-cli` 为 1.46.3。
+- OpenConnector `dify-db` 的 `list_tools` 返回 4 个工具，两个新工具 `operationType=read`、`confirmationRequired=false`。
+
+| 校验 | 结果 |
+| --- | --- |
+| `kube_read prod get deploy dify-api-oltp -n dify-plugin -o wide` | 成功，7/7，镜像 `langgenius/dify-api:hotfix-1.20.0-fix.3@sha256:…`。5.8 秒，含首次 `tsh kube login --all` |
+| `-l workload.user.cattle.io/workloadselector=apps.deployment-dify-plugin-dify-api-oltp` | 成功，7 个 Pod，1.0 秒 |
+| `auth can-i get pods -n dify-plugin` | `yes` |
+| `get secrets -n dify-plugin` | `KUBECTL_ERROR`，Teleport Forbidden，`exit_code=0` |
+| `delete pod x` | `INVALID_ARGUMENT`，没有执行 tsh |
+| `staging get pods -n dify-staging` | 成功，3.3 秒 |
+| `plugin_lambda_logs` 示例函数，60 分钟，`"REPORT RequestId"`，limit 3 | 3 条，带 `next_token`，4.8 秒（自动登录 app 后 JSON 解析正常） |
+| 用 `window.start_ms/end_ms` 加 `next_token` 续页 | 紧接着的下一批 3 条，1.5 秒 |
+| `tenant_id` + `langgenius/openai` | 定位到同一函数，返回 `plugin_unique_identifier=langgenius/openai:1.2.1@402c…`，2.6 秒 |
+| 3 天窗口，`"Traceback"`，limit 1000，在容器内调本机 `/mcp` | 第 1 页 972 条，32.0 秒到预算返回 `next_token`；第 2 页 126 条，6.2 秒，`complete=true`；共 1098 条，无重复 |
+| 线上 `/opt/dify-db/.tsh/keys` | 没有 `-app`、`-kube` 目录；影子副本里有，用户证书与线上一致 |
+| 续期后自愈 | watchdog 22:14:27 续期，影子副本 22:14:38 重新同步；两个工具无需人工即成功（4.3 秒、3.1 秒） |
+| 审计日志 | 记录工具、窗口、参数、退出码、字节数，不含日志和输出内容 |
+| 其他容器 | 只有 db-gateway 重建；`tsh-auth-watchdog`、3 个 `tsh-proxy-db*` 和其他 MCP 的运行时长不变 |
+
+其他观察（都与本次改动无关）：
+- 22:11:08 线上 `keys/` 出现 `yangyonggang-db/teleport.dify.dev/lg-pgsql-read-01.{crt,key}`，用户证书文件被重写，22:11:40 插件库连接池因 `teleport keys changed` 被清空一次。
+  - 来源：隧道容器 `tsh-proxy-db-plugin`（`tsh proxy db --tunnel … lg-pgsql-read-01`）在 21:39 续期后第一次有连接时签发数据库证书，并写回共享目录。
+  - 这是隧道原有的行为：每次续期后每条隧道第一次有连接时会发生一次，不是新工具引起的。之后 `db_gateway_query` 正常。
+- watchdog 续期时 `tsh logout --all` 在 tsh 18.0.0 上报 `unknown long flag '--all'`。之后仍会删除 keys 和 profile，续期成功，不影响结果。
+- `serverless_runtimes.plugin_unique_identifier` 有唯一索引 `uni_serverless_runtimes_plugin_unique_identifier`，按工作空间定位最多一行。
+
 ## 10. 留给实现者
 
 - 以下数值可按实测调整：时间预算、单页事件数、并发数、读管道的宽限时间。
