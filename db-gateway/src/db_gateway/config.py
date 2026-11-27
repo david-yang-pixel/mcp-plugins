@@ -108,7 +108,7 @@ class KubeReadConfig(BaseModel):
 class KnowledgeFsConfig(BaseModel):
     enabled: bool = True
     teleport_db: str = "knowledge-fs-production-readonly"
-    db_user: str = ""   # empty: postgres.user
+    # The tunnel and the queries both log in as postgres.user.
 
 
 class TeleportToolsConfig(BaseModel):

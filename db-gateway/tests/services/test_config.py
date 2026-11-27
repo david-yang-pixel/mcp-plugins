@@ -112,7 +112,8 @@ def test_knowledgefs_defaults():
     cfg = AppConfig()
     assert (cfg.postgres.db_knowledgefs, cfg.postgres.port_knowledgefs) == ("knowledgefs", 56064)
     k = cfg.teleport_tools.knowledgefs
-    assert (k.enabled, k.teleport_db, k.db_user) == (True, "knowledge-fs-production-readonly", "")
+    assert (k.enabled, k.teleport_db) == (True, "knowledge-fs-production-readonly")
+    assert not hasattr(k, "db_user")       # 查询和隧道都用 postgres.user（PR #30 评论）
 
 
 def test_runtime_settings_enable_knowledgefs():

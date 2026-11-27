@@ -31,6 +31,17 @@ logger = get_logger(module="tsh_daemons")
 STOP_WAIT_SECONDS = 5.0
 OUTPUT_TAIL_LINES = 50
 
+# `tsh proxy aws` prints its (local, per-process) credentials as export lines.
+# Never keep them in the output tail, logs or error messages.
+_SECRET_EXPORT_RE = re.compile(
+    r"^(\s*(?:export\s+)?[A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|ACCESS_KEY|KEY_ID)[A-Za-z0-9_]*=).*$",
+    re.IGNORECASE,
+)
+
+
+def redact(line: str) -> str:
+    return _SECRET_EXPORT_RE.sub(r"\1<redacted>", line)
+
 _DAEMONS: "weakref.WeakSet[TshDaemon]" = weakref.WeakSet()
 
 
@@ -116,7 +127,8 @@ class TshDaemon:
         )
         self._proc = proc
         self.output.clear()
-        lines: list[str] = []
+        lines: list[str] = []      # raw, for parse() only
+        shown: list[str] = []      # redacted, for messages
         assert proc.stdout is not None
 
         async def wait_ready() -> dict[str, str] | None:
@@ -125,7 +137,8 @@ class TshDaemon:
                 if line is None:
                     return None
                 lines.append(line)
-                self.output.append(line)
+                shown.append(redact(line))
+                self.output.append(shown[-1])
                 info = self._parse(lines)
                 if info is not None:
                     return info
@@ -138,7 +151,7 @@ class TshDaemon:
         if info is not None and proc.returncode is not None:
             info = None   # matched, but the process is already gone: not a running daemon
         if info is None:
-            tail = "\n".join(lines).strip()[-600:]
+            tail = "\n".join(shown).strip()[-600:]
             rc = proc.returncode
             await self._stop_locked()
             if timed_out:
@@ -163,7 +176,7 @@ class TshDaemon:
             line = await self._readline(proc.stdout)
             if line is None:
                 break
-            self.output.append(line)
+            self.output.append(redact(line))
         rc = await proc.wait()
         logger.warning("tsh_daemon_exited", daemon=self.name, exit_code=rc,
                        tail=" | ".join(list(self.output)[-5:])[-400:])
@@ -226,13 +239,14 @@ def _parse_tunnel(lines: list[str]) -> dict[str, str] | None:
 
 
 def _knowledgefs_args(cfg: Any) -> list[str]:
-    kfs = cfg.teleport_tools.knowledgefs
+    # Same user as the query/metadata connections (Teleport's Postgres engine takes the
+    # user from the client's startup message, so a tunnel-only override would not apply).
     return [
         "proxy", "db", "--tunnel",
         "--port", str(cfg.postgres.port_knowledgefs),
-        "--db-user", kfs.db_user or cfg.postgres.user,
+        "--db-user", cfg.postgres.user,
         "--db-name", cfg.postgres.db_knowledgefs,
-        kfs.teleport_db,
+        cfg.teleport_tools.knowledgefs.teleport_db,
     ]
 
 

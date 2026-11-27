@@ -59,4 +59,3 @@ teleport_tools:
   knowledgefs:
     enabled: true
     teleport_db: knowledge-fs-production-readonly
-    db_user: ""                    # empty: postgres.user

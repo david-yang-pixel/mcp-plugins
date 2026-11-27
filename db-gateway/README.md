@@ -228,7 +228,6 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
 | `kube.kubeconfig_path` | `/tmp/db-gateway/kubeconfig` |
 | `knowledgefs.enabled` | `true`；`false` 时 `knowledgefs` 库返回 `UNKNOWN_DATABASE` |
 | `knowledgefs.teleport_db` | `knowledge-fs-production-readonly` |
-| `knowledgefs.db_user` | 空（即 `postgres.user`） |
 
 `shadow_home` 和 `kubeconfig_path` 在容器内，容器重启后丢失，首次调用时自动重建。
 

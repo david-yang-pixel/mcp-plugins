@@ -41,6 +41,7 @@
     - 超时：抛子类 `TshDaemonTimeout`，日志工具 → `TSH_TIMEOUT`，KnowledgeFS → `QUERY_ERROR`「隧道启动超时，稍后重试」，不查 `tsh status`（最终审查 M4：超时与角色无关）。
      - 成功 → 记录签名和解析结果，后台任务继续读完剩余输出（防止管道堵塞），只保留末尾若干行用于报错。
 - **`mark_stale()`**：调用方发现代理异常时调用，下次 `ensure` 强制重启。
+- 保留的输出、日志和错误消息里，凭据类 `export` 行（`*SECRET*`、`*TOKEN*`、`*PASSWORD*`、`*ACCESS_KEY*`、`*KEY_ID*`）的值替换为 `<redacted>`。解析就绪信息时仍使用原始行（PR #30 评论）。
 - **`stop()`**：杀进程组并回收。模块级 `stop_all()` 在 aiohttp `on_cleanup` 调用。
 - 只写影子目录，不写线上 `.tsh`（与上一轮相同）。
 
@@ -71,7 +72,8 @@
 
 - 配置：
   - `postgres.db_knowledgefs="knowledgefs"`、`postgres.port_knowledgefs=56064`；
-  - `teleport_tools.knowledgefs`：`enabled=true`、`teleport_db="knowledge-fs-production-readonly"`、`db_user=""`（空时用 `postgres.user`，即 `pro_ops_teleport_read`）。
+  - `teleport_tools.knowledgefs`：`enabled=true`、`teleport_db="knowledge-fs-production-readonly"`。
+  - 隧道和查询都用 `postgres.user`（`pro_ops_teleport_read`）登录。原先的 `db_user` 覆盖项只会改到隧道参数，而 Teleport 的 Postgres 引擎读的是客户端启动消息里的用户名，所以已删除（PR #30 评论）。
 - `core`：
   - `_DB_KEY_TO_ATTR`、`_DB_KEY_TO_PORT_ATTR` 加 `knowledgefs`。
   - 在 `execute_gateway_query` 和 `execute_schema_lookup` 真正连库之前，对 `knowledgefs` 调 `ensure_knowledgefs_tunnel(cfg)`（截止时间 15 秒）。

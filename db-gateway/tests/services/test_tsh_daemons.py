@@ -165,3 +165,44 @@ async def test_ready_timeout_raises_daemon_timeout(cfg, fake_tsh):
     fake_tsh.push(stdout="still starting\n", sleep=30)
     with pytest.raises(TshDaemonTimeout):
         await make(start_timeout=1).ensure(cfg, dl(10))
+
+
+# --- PR #30 review (Codex) ----------------------------------------------------------
+
+SECRET_OUT = ("Started AWS proxy on http://127.0.0.1:45137.\n"
+              "  export AWS_ACCESS_KEY_ID=AKIAREALLOOKING\n"
+              "  export AWS_SECRET_ACCESS_KEY=supersecretvalue\n")
+
+
+async def test_credentials_are_redacted_in_error_tail(cfg, fake_tsh):
+    fake_tsh.push(stdout=SECRET_OUT, code=1)            # 打印了凭据但没就绪就退出
+    never_ready = TshDaemon("test", args=lambda cfg: ["proxy", "aws"], parse=lambda lines: None)
+    with pytest.raises(TshDaemonError) as exc:
+        await never_ready.ensure(cfg, dl(5))
+    text = str(exc.value)
+    assert "supersecretvalue" not in text and "AKIAREALLOOKING" not in text
+    assert "AWS_SECRET_ACCESS_KEY=<redacted>" in text
+
+
+async def test_credentials_are_redacted_in_kept_output(cfg, fake_tsh):
+    from db_gateway.aws_logs import AWS_PROXY
+
+    fake_tsh.push()                                       # apps login
+    fake_tsh.push(stdout=SECRET_OUT + '  export AWS_CA_BUNDLE="/x/ca.pem"\n'
+                         '  export HTTPS_PROXY="http://127.0.0.1:45137"\n', sleep=30)
+    env = await AWS_PROXY.ensure(cfg, dl(10))
+    assert env["AWS_SECRET_ACCESS_KEY"] == "supersecretvalue"          # 解析仍拿到真值
+    kept = "\n".join(AWS_PROXY.output)
+    assert "supersecretvalue" not in kept and "AKIAREALLOOKING" not in kept
+    assert "HTTPS_PROXY" in kept
+
+
+async def test_knowledgefs_tunnel_uses_postgres_user(cfg, fake_tsh):
+    from db_gateway.tsh_daemons import ensure_knowledgefs_tunnel
+
+    cfg.postgres.user = "other_reader"
+    fake_tsh.push(stdout='Started authenticated tunnel for the PostgreSQL database "x" in cluster "c" '
+                         'on 127.0.0.1:56064.\n', sleep=30)
+    await ensure_knowledgefs_tunnel(cfg, dl(5))
+    argv = fake_tsh.calls[0]["argv"]
+    assert argv[argv.index("--db-user") + 1] == "other_reader"
