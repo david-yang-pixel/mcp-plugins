@@ -31,3 +31,26 @@ db_gateway:
 teleport:
   proxy: teleport.example.com:443
   auth_home: ./.tsh
+# Read-only Teleport tools (plugin_lambda_logs, kube_read). They run the bundled
+# tsh against a container-local copy of teleport.auth_home (shadow_home) and never
+# write the shared one.
+teleport_tools:
+  tsh_path: /opt/teleport/bin/tsh
+  shadow_home: /tmp/db-gateway/tsh-home
+  time_budget_seconds: 40   # whole tool call; keep below the 60s Nginx timeout
+  max_concurrent: 3
+  lambda_logs:
+    enabled: true
+    app: aws-support-logs
+    aws_role: SupportLambdaLogsReadOnly
+    region: us-east-1
+    default_timezone: Asia/Shanghai
+    default_limit: 1000
+    max_limit: 10000
+  kube:
+    enabled: true
+    clusters:
+      prod: lg-eks-01
+      staging: dify-plugin-1
+    max_output_bytes: 1048576
+    kubeconfig_path: /tmp/db-gateway/kubeconfig
