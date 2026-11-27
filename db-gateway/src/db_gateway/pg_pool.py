@@ -239,7 +239,11 @@ class PoolManager:
             max_idle=settings.max_idle_seconds,
             max_lifetime=settings.max_lifetime_seconds,
             timeout=settings.acquire_timeout_seconds,
-            kwargs={"autocommit": True},
+            # No server-side prepared statements: in a pipeline psycopg records a
+            # statement as prepared when it is sent, so one skipped after an
+            # earlier error would stay in the cache and fail every later use on
+            # this pooled connection ("prepared statement _pg3_N does not exist").
+            kwargs={"autocommit": True, "prepare_threshold": None},
             configure=self._configure,
             check=self._make_check(settings.check_idle_seconds),
             # No `reset` callback: with one, returned connections go through a
@@ -773,8 +777,11 @@ async def _metadata_rows(
     """All queries in one READ ONLY transaction, sent as one pipeline (one round trip).
 
     If a statement fails, the server skips the rest of the pipeline (ROLLBACK
-    included) and psycopg raises on leaving the block; callers then run
-    ``_cleanup_after_error`` (pool) or close the connection (one-off).
+    included) and psycopg raises, inside the block or when leaving it; callers
+    then run ``_cleanup_after_error`` (pool) or close the connection (one-off).
+    Pooled connections never use server-side prepared statements (see
+    ``_new_pool``), so a skipped statement leaves no stale prepared-statement
+    cache behind.
     """
     async with conn.pipeline():
         await conn.execute("BEGIN TRANSACTION READ ONLY")
@@ -819,7 +826,8 @@ async def run_metadata_queries(
     settings = settings or PoolSettings()
     key = PoolKey(host=host, port=int(port), user=user, database=database)
     manager = manager or MANAGER
-    deadline = float(timeout) + settings.acquire_timeout_seconds + 5
+    # statement_timeout applies to each statement, so the batch may use it per query.
+    deadline = float(timeout) * max(1, len(queries)) + settings.acquire_timeout_seconds + 5
 
     async def pooled() -> list[list[list[Any]]]:
         for attempt in range(2):

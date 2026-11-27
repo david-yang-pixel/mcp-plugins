@@ -77,7 +77,7 @@ SQL 先按原规则通过只读校验（调用方自己写 `EXPLAIN ...` 仍会�
 ### 连接方式 `postgres.driver`
 
 - `psql`（默认）：每次查询启动一个 psql 进程并新建连接。经 `tsh proxy db --tunnel` 建连（TLS 到 Teleport、DB agent、Postgres 认证）约需 2 秒，`timing_ms.connect_and_overhead_ms` 主要就是这部分。
-- `pool`：进程内用 psycopg 连接池为每个库（prod、billing、plugin）保持连接，平时一次查询只需自身的往返。执行方式与 psql 路径一致。默认（不计数）每页只有一个往返：`BEGIN READ ONLY; SET LOCAL statement_timeout; DECLARE; [MOVE offset;] FETCH; SELECT pg_advisory_unlock_all(); ROLLBACK` 作为一个批次发出，任一语句出错时后面的语句不会执行，由网关补发回滚和解锁。传 `count_total=true` 时为两个往返：第一个到 `FETCH` 为止；第二个是 `[SET LOCAL statement_timeout; MOVE ALL;] SELECT pg_advisory_unlock_all(); ROLLBACK`，只有页面取满时才执行计数。每个批次是一条简单查询消息，结束后一律回滚。值按 PostgreSQL 文本输出返回，csv/json 结果与 psql 路径逐字一致。`column_types` 用 `format_type()` 解析并缓存。
+- `pool`：进程内用 psycopg 连接池为每个库（prod、billing、plugin）保持连接，平时一次查询只需自身的往返。执行方式与 psql 路径一致。默认（不计数）每页只有一个往返：`BEGIN READ ONLY; SET LOCAL statement_timeout; DECLARE; [MOVE offset;] FETCH; SELECT pg_advisory_unlock_all(); ROLLBACK` 作为一个批次发出，任一语句出错时后面的语句不会执行，由网关补发回滚和解锁。传 `count_total=true` 时为两个往返：第一个到 `FETCH` 为止；第二个是 `[SET LOCAL statement_timeout; MOVE ALL;] SELECT pg_advisory_unlock_all(); ROLLBACK`，只有页面取满时才执行计数。每个批次是一条简单查询消息，结束后一律回滚。值按 PostgreSQL 文本输出返回，csv/json 结果与 psql 路径逐字一致。`column_types` 用 `format_type()` 解析并缓存；不计数时这条网关内置的类型查询在回滚之后执行（只在类型首次出现时多一次往返）。连接池的连接不使用服务端预备语句（`prepare_threshold=None`），出错后不会残留失效的预备语句缓存。
 
 pool 模式与 Teleport 续签的配合：
 - 证书由 `tsh-auth-watchdog` 自动续签：`tsh logout --all` 后用密码和 TOTP 重新 `tsh login`。之后 `tsh-cert.path` 重启 `tsh-proxy-db*` 隧道，经隧道的已有连接会全部断开。连接池不接触证书，只连接本机隧道端口。

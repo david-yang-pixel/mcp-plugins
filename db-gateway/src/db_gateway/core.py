@@ -308,13 +308,16 @@ async def execute_gateway_query(
     if explain_plan:
         audit_extra["explain"] = True
     count_budget = 0.0
-    if want_count and not explain_plan:
+    count_disabled = False
+    if want_count:
         audit_extra["count_total"] = True
-        count_budget = float(
-            _cfg_number(cfg.postgres, "count_timeout_seconds", _DEFAULT_COUNT_TIMEOUT_SECONDS)
-        )
-        if count_budget <= 0:
-            warnings.append("count_total 未生效：服务端已关闭计数（count_timeout_seconds=0）")
+        if explain_plan:
+            warnings.append("explain=true 时忽略 count_total（执行计划不计数）")
+        else:
+            count_budget = max(0.0, float(
+                _cfg_number(cfg.postgres, "count_timeout_seconds", _DEFAULT_COUNT_TIMEOUT_SECONDS)
+            ))
+            count_disabled = count_budget <= 0
     audit_file = _audit_path(cfg)
 
     try:
@@ -367,7 +370,8 @@ async def execute_gateway_query(
     except asyncio.TimeoutError:
         timeout = cfg.postgres.query_timeout_seconds
         error_status, error_code = "TIMEOUT", "QUERY_TIMEOUT"
-        error_text = f"查询超时：psql 在 {timeout}s（另加计数预算）内未完成，已终止"
+        budget = f"（另加 {count_budget:g}s 计数预算）" if count_budget > 0 else " "
+        error_text = f"查询超时：超过 {timeout}s{budget}仍未完成，已终止"
         error_text += await _timeout_index_hint(
             cfg=cfg, database_key=database, db_name=db_name, db_port=db_port, body=body,
         )
@@ -402,7 +406,9 @@ async def execute_gateway_query(
         )
 
     total_rows = result.total_rows
-    if total_rows is None and result.total_rows_note:
+    if total_rows is None and count_disabled:
+        warnings.append("total_rows 为 null：count_total 未生效，服务端已关闭计数（count_timeout_seconds=0）")
+    elif total_rows is None and result.total_rows_note:
         warnings.append(f"total_rows 为 null：{result.total_rows_note}")
 
     if fmt == "json":

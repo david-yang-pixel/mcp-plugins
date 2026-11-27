@@ -95,7 +95,7 @@ def _kwargs(db, **overrides):
         "database": db["database"],
         "timeout": 10,
         "max_rows": 1000,
-        "count_timeout": 5,
+        "count_timeout": 0,  # production default: no count unless count_total=true
     }
     base.update(overrides)
     return base
@@ -127,9 +127,10 @@ TYPES_SQL = (
         ("(SELECT 1 AS x) UNION ALL (SELECT 2)", {}),
     ],
 )
-async def test_pool_results_match_psql(database, manager, sql, extra):
+@pytest.mark.parametrize("count_timeout", [0, 5])
+async def test_pool_results_match_psql(database, manager, sql, extra, count_timeout):
     for describe in (False, True):
-        kwargs = _kwargs(database, sql=sql, describe=describe, **extra)
+        kwargs = _kwargs(database, sql=sql, describe=describe, count_timeout=count_timeout, **extra)
         expected = await run_psql(**kwargs)
         actual = await run_pool_query(manager=manager, **kwargs)
         assert actual.csv == expected.csv
@@ -440,14 +441,16 @@ async def test_requested_count_adds_one_round_trip(database, manager, monkeypatc
     await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT 1"))
     calls = _spy_round_trips(monkeypatch)
 
-    paged = await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT id FROM t ORDER BY id", offset=5, limit=5))
+    paged = await run_pool_query(
+        manager=manager, **_kwargs(database, sql="SELECT id FROM t ORDER BY id", offset=5, limit=5, count_timeout=5),
+    )
     assert paged.total_rows == 25 and paged.has_more is True
     assert len(calls) == 2  # setup+fetch, then count+unlock+rollback
 
 
 async def test_describe_without_count_matches_the_count_path(database, manager):
     sql = "SELECT id, label, 1.5::numeric(4,2) AS n FROM t ORDER BY id"
-    counted = await run_pool_query(manager=manager, describe=True, **_kwargs(database, sql=sql, limit=3))
+    counted = await run_pool_query(manager=manager, describe=True, **_kwargs(database, sql=sql, limit=3, count_timeout=5))
     single = await run_pool_query(manager=manager, describe=True, **_kwargs(database, sql=sql, limit=3, count_timeout=0))
     assert single.column_types == counted.column_types == ["integer", "text", "numeric(4,2)"]
     assert single.rows == counted.rows
@@ -718,3 +721,51 @@ async def test_metadata_statement_timeout_is_reported_and_recovers(database, man
     with pytest.raises(StatementTimeout):
         await run_metadata_query(**kwargs, sql="SELECT pg_sleep(3)", params=None, timeout=0.5)
     assert await run_metadata_query(**kwargs, sql="SELECT 1", params=None) == [["1"]]
+
+
+async def test_failed_metadata_pipeline_does_not_poison_the_connection(database, manager):
+    """Code review: a pipeline that fails after psycopg queued a named prepared
+    statement must not leave a cache entry for a statement the server skipped."""
+    from db_gateway.pg_pool import StatementTimeout, run_metadata_queries, run_metadata_query
+
+    kwargs = dict(host=database["host"], port=database["port"], user=database["user"], password="",
+                  database=database["database"], manager=manager, timeout=1.0,
+                  settings=PoolSettings(min_size=1, max_size=1))
+
+    def pair(sleep: float):
+        return [("SELECT pg_sleep(%s::float)", (sleep,)), ("SELECT %s::int + 1", (1,))]
+
+    for _ in range(6):  # other single catalog lookups on the same connection
+        await run_metadata_query(**kwargs, sql="SELECT 1 WHERE %s::int = 1", params=(1,))
+    for _ in range(5):
+        await run_metadata_queries(**kwargs, queries=pair(0))
+    with pytest.raises(StatementTimeout):
+        await run_metadata_queries(**kwargs, queries=pair(2))  # first query times out
+
+    for _ in range(3):
+        assert (await run_metadata_queries(**kwargs, queries=pair(0)))[1] == [["2"]]
+
+
+async def test_metadata_deadline_covers_every_batched_statement(database, manager, monkeypatch):
+    """Code review: each batched statement has its own statement_timeout, so the
+    client deadline must grow with the batch instead of firing first."""
+    from db_gateway import pg_pool
+    from db_gateway.pg_pool import run_metadata_queries
+
+    seen: list[float] = []
+    real_wait_for = asyncio.wait_for
+
+    async def spy(aw, timeout):
+        # pg_pool.asyncio is the global module: only record the gateway's own deadline.
+        if "run_metadata_queries" in getattr(aw, "__qualname__", ""):
+            seen.append(timeout)
+        return await real_wait_for(aw, timeout)
+
+    monkeypatch.setattr(pg_pool.asyncio, "wait_for", spy)
+    settings = PoolSettings(min_size=1, max_size=1, acquire_timeout_seconds=2)
+    await run_metadata_queries(
+        host=database["host"], port=database["port"], user=database["user"], password="",
+        database=database["database"], manager=manager, settings=settings, timeout=3.0,
+        queries=[("SELECT 1", None), ("SELECT 2", None), ("SELECT 3", None)],
+    )
+    assert len(seen) == 1 and seen[0] >= 3 * 3.0 + settings.acquire_timeout_seconds

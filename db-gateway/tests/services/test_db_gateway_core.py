@@ -355,7 +355,53 @@ async def test_count_total_is_ignored_when_the_server_disables_counting(tmp_path
         )
 
     assert run.await_args.kwargs["count_timeout"] == 0
-    assert any("count_timeout_seconds=0" in w for w in result.warnings)
+    assert [w for w in result.warnings if "total_rows" in w or "count_total" in w] == [
+        "total_rows 为 null：count_total 未生效，服务端已关闭计数（count_timeout_seconds=0）"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_disabled_counting_does_not_warn_when_the_page_is_not_full(tmp_path):
+    from db_gateway.core import execute_gateway_query
+
+    cfg = _cfg(tmp_path)
+    cfg.postgres.count_timeout_seconds = 0
+    page = _page_result(has_more=False, truncated=False, total_rows=12, offset_skipped=0)
+    with patch("db_gateway.core.run_psql", AsyncMock(return_value=page)):
+        result = await execute_gateway_query(
+            cfg=cfg, database="prod", sql="SELECT id FROM tenants ORDER BY id", count_total=True,
+        )
+
+    assert result.total_rows == 12 and result.warnings == []
+
+
+@pytest.mark.asyncio
+async def test_count_total_with_explain_is_ignored_with_a_warning(tmp_path):
+    from db_gateway.core import execute_gateway_query
+
+    plan = _page_result(has_more=False, truncated=False, total_rows=2, offset_skipped=0)
+    run = AsyncMock(return_value=plan)
+    with patch("db_gateway.core.run_psql", run):
+        result = await execute_gateway_query(
+            cfg=_cfg(tmp_path), database="prod", sql="SELECT 1", explain=True, count_total=True,
+        )
+
+    assert run.await_args.kwargs["count_timeout"] == 0
+    assert any("explain=true" in w and "count_total" in w for w in result.warnings)
+    assert _audit_entries(tmp_path)[-1]["count_total"] is True
+
+
+@pytest.mark.asyncio
+async def test_timeout_message_names_the_count_budget_when_counting(tmp_path):
+    from db_gateway.core import execute_gateway_query
+
+    with patch("db_gateway.core.run_psql", AsyncMock(side_effect=asyncio.TimeoutError())):
+        result = await execute_gateway_query(
+            cfg=_cfg(tmp_path), database="prod", sql="SELECT 1 FROM missing_hint_table", count_total=True,
+        )
+
+    assert result.code == "QUERY_TIMEOUT"
+    assert result.error.startswith("查询超时：超过 30s（另加 5s 计数预算）仍未完成，已终止")
 
 
 @pytest.mark.asyncio
@@ -853,7 +899,7 @@ async def test_timeout_error_lists_indexes_of_referenced_tables(tmp_path):
 
     assert result.code == "QUERY_TIMEOUT"
     error = result.error or ""
-    assert error.startswith("查询超时：psql 在 30s")
+    assert error.startswith("查询超时：超过 30s 仍未完成")
     assert "workflow_run_tenant_idx ON public.workflow_runs USING btree (tenant_id, created_at)" in error
     assert "apps_pkey" in error
     # CTE names are not tables, but the table read inside the CTE is.
@@ -898,7 +944,7 @@ async def test_timeout_index_lookup_failure_keeps_original_error(tmp_path):
         first = await _timeout_query(tmp_path)
         second = await _timeout_query(tmp_path)
 
-    original = "查询超时：psql 在 30s（另加计数预算）内未完成，已终止"
+    original = "查询超时：超过 30s 仍未完成，已终止"
     assert first.code == "QUERY_TIMEOUT" and first.error == original
     assert second.error == original
     # Failed lookups back off instead of hitting the database on every timeout.
@@ -917,7 +963,7 @@ async def test_timeout_index_lookup_is_bounded_by_a_short_budget(tmp_path, monke
         result = await asyncio.wait_for(_timeout_query(tmp_path), timeout=2)
 
     assert result.code == "QUERY_TIMEOUT"
-    assert result.error == "查询超时：psql 在 30s（另加计数预算）内未完成，已终止"
+    assert result.error == "查询超时：超过 30s 仍未完成，已终止"
 
 
 @pytest.mark.asyncio
@@ -933,7 +979,7 @@ async def test_timeout_index_budget_exhaustion_backs_off(tmp_path, monkeypatch):
         first = await asyncio.wait_for(_timeout_query(tmp_path), timeout=2)
         second = await asyncio.wait_for(_timeout_query(tmp_path), timeout=2)
 
-    original = "查询超时：psql 在 30s（另加计数预算）内未完成，已终止"
+    original = "查询超时：超过 30s 仍未完成，已终止"
     assert first.error == original and second.error == original
     # The budget-exhausted lookup starts the 60s backoff: no second catalog query.
     assert meta.await_count == 1

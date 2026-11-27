@@ -159,6 +159,11 @@ _TELEPORT_SIGNATURES = (
 )
 
 
+# Client-side slack on top of statement_timeout (+ count budget) for psql's own
+# startup and the Teleport connect (~2 s), so the server's statement_timeout fires
+# first and a query near the limit is not killed by the client.
+PSQL_CONNECT_MARGIN_SECONDS = 5.0
+
 # total_rows_note when the page is full and no count was requested (count_timeout <= 0).
 NOT_COUNTED_NOTE = "结果超过一页，未统计总行数；需要总数时传 count_total=true"
 
@@ -429,7 +434,7 @@ async def run_psql(
     Raises:
         PsqlSafetyError: SQL (or its wrapped form) failed read-only validation
         TeleportAuthExpired: connection failed (likely auth/port-forward down)
-        asyncio.TimeoutError: psql exceeded ``timeout + count_timeout``
+        asyncio.TimeoutError: psql exceeded ``timeout + count_timeout`` + PSQL_CONNECT_MARGIN_SECONDS
         RuntimeError: other psql errors
     """
     body = validate_read_only_sql(sql)
@@ -484,7 +489,7 @@ async def run_psql(
         )
         spawned = time.perf_counter()
         stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=float(timeout) + count_timeout,
+            proc.communicate(), timeout=float(timeout) + count_timeout + PSQL_CONNECT_MARGIN_SECONDS,
         )
     except asyncio.TimeoutError:
         with suppress(ProcessLookupError):
