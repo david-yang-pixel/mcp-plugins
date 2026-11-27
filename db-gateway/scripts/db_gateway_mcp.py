@@ -2,7 +2,7 @@
 """Minimal stdio MCP server for DB Gateway.
 
 Exposes the tools of the HTTP MCP endpoint (schemas shared with it):
-  - db_gateway_query(database, sql, offset=0, limit=None, format="csv", explain=false)
+  - db_gateway_query(database, sql, offset=0, limit=None, format="csv", explain=false, count_total=false)
     -> POST <DB_GATEWAY_URL>/query
   - db_gateway_schema(database, tables) -> POST <DB_GATEWAY_URL>/schema
 
@@ -46,7 +46,7 @@ def _gateway_query(args: dict[str, Any]) -> dict[str, Any]:
     }
     # Only forward optional args when given, so older gateways keep working.
     # Unknown arguments (e.g. the retired ticket_id) are dropped.
-    for key in ("offset", "limit", "format", "explain"):
+    for key in ("offset", "limit", "format", "explain", "count_total"):
         if args.get(key) is not None:
             payload[key] = args[key]
     return _gateway_post("/query", payload)

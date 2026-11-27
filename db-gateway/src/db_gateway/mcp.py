@@ -71,6 +71,7 @@ async def handle_mcp_message(message: dict[str, Any], *, cfg: Any) -> dict[str, 
                 limit=args.get("limit"),
                 output_format=args.get("format") or "csv",
                 explain=args.get("explain"),
+                count_total=args.get("count_total"),
             )
             payload = data.to_json()
         elif name == "db_gateway_schema":

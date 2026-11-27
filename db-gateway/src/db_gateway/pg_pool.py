@@ -38,6 +38,7 @@ from psycopg_pool import AsyncConnectionPool, PoolClosed, PoolTimeout
 
 from db_gateway.postgres import (
     EXPLAIN_PREFIX,
+    NOT_COUNTED_NOTE,
     WRAP_PREFIX,
     PsqlResult,
     TeleportAuthExpired,
@@ -409,7 +410,8 @@ async def run_pool_query(
 
     Same contract as ``postgres.run_psql``: cursor in a READ ONLY transaction,
     ``MOVE offset`` -> ``FETCH limit+1`` -> ``MOVE ALL`` for ``total_rows``. The
-    count runs only when the page is full; otherwise the total is exact.
+    count runs only when requested (``count_timeout > 0``) and the page is full;
+    otherwise the total is exact when the cursor ran out inside the page.
 
     ``explain=True`` runs ``EXPLAIN <validated SQL>`` (never ANALYZE, so the
     statement is planned but not executed) and returns the plan lines as rows of
@@ -602,8 +604,14 @@ async def _query_page(
     timing: dict[str, float],
     started: float,
 ) -> PsqlResult:
-    """One page in two round trips, like the psql path.
+    """One page in one round trip, or two when a count was requested.
 
+    Without a count (``count_timeout <= 0``) a single batch:
+    ``BEGIN READ ONLY; SET LOCAL statement_timeout; DECLARE; [MOVE offset;] FETCH;
+    SELECT pg_advisory_unlock_all(); ROLLBACK``. If a statement fails the rest of
+    the batch is skipped and ``_cleanup_after_error`` rolls back and unlocks.
+
+    With a count, the unlock + ROLLBACK wait for the FETCH result:
     1. ``BEGIN READ ONLY; SET LOCAL statement_timeout; DECLARE; [MOVE offset;] FETCH``
     2. ``[SET LOCAL statement_timeout; MOVE ALL;] SELECT pg_advisory_unlock_all(); ROLLBACK``
 
@@ -621,6 +629,10 @@ async def _query_page(
     if offset > 0:
         batch.append(f"MOVE FORWARD {int(offset)} IN {_CURSOR_NAME}")
     batch.append(f"FETCH FORWARD {page_limit + 1} FROM {_CURSOR_NAME}")
+    fetch_index = len(batch) - 1
+    single_batch = count_timeout <= 0
+    if single_batch:
+        batch += [_UNLOCK_ALL, "ROLLBACK"]
     sent = ";\n".join(batch)
     try:
         await cur.execute(sent)
@@ -629,13 +641,15 @@ async def _query_page(
         raise
     results = await _results(cur)
     skipped = max(0, results[3][1]) if offset > 0 else 0
-    _status, _count, fetched_rows, description, pgresult = results[-1]
+    _status, _count, fetched_rows, description, pgresult = results[fetch_index]
     data_rows = fetched_rows or []
     columns = [col.name for col in description or []]
     timing["query_ms"] = _ms(time.perf_counter() - query_started)
 
     column_types: list[str] | None = None
     if describe and pgresult is not None:
+        # Gateway-owned catalog lookup (format_type); after the single batch it
+        # runs outside the transaction, which is fine for a fixed read-only SELECT.
         describe_started = time.perf_counter()
         column_types = await _column_types(manager, conn, pgresult)
         timing["describe_ms"] = _ms(time.perf_counter() - describe_started)
@@ -648,17 +662,21 @@ async def _query_page(
     if not has_more:
         # Cursor exhausted inside this page: exact total without counting.
         total_rows = skipped + fetched
+    elif single_batch:
+        total_note = NOT_COUNTED_NOTE
+    if single_batch:
+        return _page_result(columns, rows, column_types, has_more, total_rows, total_note,
+                            skipped, timing, started)
+
+    if not has_more:
         finish = [_UNLOCK_ALL, "ROLLBACK"]
-    elif count_timeout > 0:
+    else:
         finish = [
             f"SET LOCAL statement_timeout = {int(count_timeout * 1000)}",
             f"MOVE FORWARD ALL IN {_CURSOR_NAME}",
             _UNLOCK_ALL,
             "ROLLBACK",
         ]
-    else:
-        total_note = "未计算总行数（count_timeout_seconds=0）"
-        finish = [_UNLOCK_ALL, "ROLLBACK"]
 
     finish_started = time.perf_counter()
     counting = len(finish) == 4
@@ -678,7 +696,21 @@ async def _query_page(
         total_note = f"计数阶段失败，总行数未知：{_error_text(e)}"
         await _cleanup_after_error(conn)
     timing["count_ms" if counting else "finish_ms"] = _ms(time.perf_counter() - finish_started)
+    return _page_result(columns, rows, column_types, has_more, total_rows, total_note,
+                        skipped, timing, started)
 
+
+def _page_result(
+    columns: list[str],
+    rows: list[list[Any]],
+    column_types: list[str] | None,
+    has_more: bool,
+    total_rows: int | None,
+    total_note: str | None,
+    skipped: int,
+    timing: dict[str, float],
+    started: float,
+) -> PsqlResult:
     parse_started = time.perf_counter()
     csv_text = rows_to_csv(columns, rows) if columns else ""
     timing["parse_ms"] = _ms(time.perf_counter() - parse_started)

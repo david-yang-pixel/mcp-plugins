@@ -151,17 +151,24 @@ async def test_connection_is_reused(database, manager):
     assert second.rows == [["2"]]
 
 
-async def test_transaction_is_read_only_and_rolled_back(database, manager):
+@pytest.mark.parametrize("count_timeout", [0, 5])
+async def test_transaction_is_read_only_and_rolled_back(database, manager, count_timeout):
     with pytest.raises(RuntimeError, match="read-only transaction"):
-        await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT nextval('seq')"))
+        await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT nextval('seq')", count_timeout=count_timeout))
     # The connection is clean afterwards (no aborted transaction left behind).
-    ok = await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT current_setting('transaction_read_only')"))
+    ok = await run_pool_query(
+        manager=manager,
+        **_kwargs(database, sql="SELECT current_setting('transaction_read_only')", count_timeout=count_timeout),
+    )
     assert ok.rows == [["on"]]
 
 
-async def test_statement_timeout_is_a_timeout(database, manager):
+@pytest.mark.parametrize("count_timeout", [0, 5])
+async def test_statement_timeout_is_a_timeout(database, manager, count_timeout):
     with pytest.raises(asyncio.TimeoutError):
-        await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT pg_sleep(3)", timeout=1))
+        await run_pool_query(
+            manager=manager, **_kwargs(database, sql="SELECT pg_sleep(3)", timeout=1, count_timeout=count_timeout),
+        )
 
 
 async def test_query_error_is_reported(database, manager):
@@ -301,7 +308,8 @@ async def test_pool_reset_between_lookup_and_checkout_is_retried(database, manag
     assert calls["n"] == 2
 
 
-async def test_session_settings_do_not_leak_to_the_next_query(database, manager):
+@pytest.mark.parametrize("count_timeout", [0, 5])
+async def test_session_settings_do_not_leak_to_the_next_query(database, manager, count_timeout):
     """Security review: session GUCs set by one caller must not reach the next.
 
     The forced ROLLBACK undoes session-level SET/set_config made inside the
@@ -310,13 +318,19 @@ async def test_session_settings_do_not_leak_to_the_next_query(database, manager)
     settings = PoolSettings(min_size=1, max_size=1)  # same backend for both queries
     changed = await run_pool_query(
         manager=manager, settings=settings,
-        **_kwargs(database, sql="SELECT set_config('search_path', 'evil', false), set_config('work_mem', '1MB', false)"),
+        **_kwargs(
+            database, count_timeout=count_timeout,
+            sql="SELECT set_config('search_path', 'evil', false), set_config('work_mem', '1MB', false)",
+        ),
     )
     assert changed.rows == [["evil", "1MB"]]
 
     after = await run_pool_query(
         manager=manager, settings=settings,
-        **_kwargs(database, sql="SELECT current_setting('search_path'), current_setting('work_mem') <> '1MB'"),
+        **_kwargs(
+            database, count_timeout=count_timeout,
+            sql="SELECT current_setting('search_path'), current_setting('work_mem') <> '1MB'",
+        ),
     )
     assert after.timing_ms["pool_new_connections"] == 0
     assert after.rows == [['"$user", public', "t"]]
@@ -327,10 +341,27 @@ async def test_session_settings_do_not_leak_to_the_next_query(database, manager)
         await run_pool_query(manager=manager, settings=settings, **_kwargs(database, sql="SELECT pg_advisory_lock(42)"))
 
 
+@pytest.mark.parametrize("count_timeout", [0, 5])
+async def test_advisory_lock_taken_by_a_full_page_is_released(database, manager, count_timeout):
+    settings = PoolSettings(min_size=1, max_size=1)
+    page = await run_pool_query(
+        manager=manager, settings=settings,
+        **_kwargs(
+            database, limit=3, count_timeout=count_timeout,
+            sql="SELECT g, query_to_xml('select pg_advisory_lock(11)', false, false, '') IS NOT NULL FROM generate_series(1, 50) g",
+        ),
+    )
+    assert page.has_more is True
+
+    after = await run_pool_query(manager=manager, settings=settings, **_kwargs(database, sql=_advisory_locks_sql()))
+    assert after.rows == [["0"]]
+
+
 def _advisory_locks_sql() -> str:
     return "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()"
 
 
+@pytest.mark.parametrize("count_timeout", [0, 5])
 @pytest.mark.parametrize(
     "sql",
     [
@@ -340,9 +371,9 @@ def _advisory_locks_sql() -> str:
         "SELECT query_to_xml('select pg_advisory_lock(8)', false, false, '')",
     ],
 )
-async def test_advisory_locks_never_survive_a_pooled_query(database, manager, sql):
+async def test_advisory_locks_never_survive_a_pooled_query(database, manager, sql, count_timeout):
     settings = PoolSettings(min_size=1, max_size=1)  # same backend for both queries
-    await run_pool_query(manager=manager, settings=settings, **_kwargs(database, sql=sql))
+    await run_pool_query(manager=manager, settings=settings, **_kwargs(database, sql=sql, count_timeout=count_timeout))
 
     after = await run_pool_query(manager=manager, settings=settings, **_kwargs(database, sql=_advisory_locks_sql()))
 
@@ -350,14 +381,15 @@ async def test_advisory_locks_never_survive_a_pooled_query(database, manager, sq
     assert after.rows == [["0"]]
 
 
-async def test_advisory_lock_is_released_after_a_failed_query(database, manager):
+@pytest.mark.parametrize("count_timeout", [0, 5])
+async def test_advisory_lock_is_released_after_a_failed_query(database, manager, count_timeout):
     settings = PoolSettings(min_size=1, max_size=1)
     with pytest.raises(RuntimeError):
         await run_pool_query(
             manager=manager, settings=settings,
             # The division by zero only happens after query_to_xml took the lock.
             **_kwargs(
-                database,
+                database, count_timeout=count_timeout,
                 sql="SELECT 1 / (CASE WHEN query_to_xml('select pg_advisory_lock(9)', false, false, '') IS NOT NULL THEN 0 END)",
             ),
         )
@@ -366,9 +398,8 @@ async def test_advisory_lock_is_released_after_a_failed_query(database, manager)
     assert after.rows == [["0"]]
 
 
-async def test_warm_query_uses_two_round_trips(database, manager, monkeypatch):
-    """Each execute() is one round trip; the pool must not send statement by statement."""
-    await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT 1"))
+def _spy_round_trips(monkeypatch) -> list[str]:
+    """Record every execute(): each one is a round trip to the server."""
     calls: list[str] = []
     real_cursor_execute = psycopg.AsyncCursor.execute
     real_conn_execute = psycopg.AsyncConnection.execute
@@ -383,15 +414,43 @@ async def test_warm_query_uses_two_round_trips(database, manager, monkeypatch):
 
     monkeypatch.setattr(psycopg.AsyncCursor, "execute", cursor_execute)
     monkeypatch.setattr(psycopg.AsyncConnection, "execute", conn_execute)
+    return calls
 
-    small = await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT id FROM t ORDER BY id"))
-    assert small.total_rows == 25
-    assert len(calls) == 2
+
+async def test_warm_query_without_count_is_one_round_trip(database, manager, monkeypatch):
+    """No count requested (the default): setup, fetch, unlock and ROLLBACK go in one batch."""
+    await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT 1", count_timeout=0))
+    calls = _spy_round_trips(monkeypatch)
+
+    small = await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT id FROM t ORDER BY id", count_timeout=0))
+    assert small.total_rows == 25 and small.has_more is False
+    assert len(calls) == 1
 
     calls.clear()
+    paged = await run_pool_query(
+        manager=manager, **_kwargs(database, sql="SELECT id FROM t ORDER BY id", offset=5, limit=5, count_timeout=0),
+    )
+    assert paged.rows == [[str(i)] for i in range(6, 11)]
+    assert paged.has_more is True and paged.offset_skipped == 5
+    assert paged.total_rows is None and "count_total=true" in paged.total_rows_note
+    assert len(calls) == 1
+
+
+async def test_requested_count_adds_one_round_trip(database, manager, monkeypatch):
+    await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT 1"))
+    calls = _spy_round_trips(monkeypatch)
+
     paged = await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT id FROM t ORDER BY id", offset=5, limit=5))
     assert paged.total_rows == 25 and paged.has_more is True
     assert len(calls) == 2  # setup+fetch, then count+unlock+rollback
+
+
+async def test_describe_without_count_matches_the_count_path(database, manager):
+    sql = "SELECT id, label, 1.5::numeric(4,2) AS n FROM t ORDER BY id"
+    counted = await run_pool_query(manager=manager, describe=True, **_kwargs(database, sql=sql, limit=3))
+    single = await run_pool_query(manager=manager, describe=True, **_kwargs(database, sql=sql, limit=3, count_timeout=0))
+    assert single.column_types == counted.column_types == ["integer", "text", "numeric(4,2)"]
+    assert single.rows == counted.rows
 
 
 # ---------------------------------------------------------------------------
@@ -415,11 +474,12 @@ def workflow_db(database):
     return database
 
 
-async def test_pool_error_includes_hint_and_position(workflow_db, manager):
+@pytest.mark.parametrize("count_timeout", [0, 5])
+async def test_pool_error_includes_hint_and_position(workflow_db, manager, count_timeout):
     with pytest.raises(RuntimeError) as info:
         await run_pool_query(
             manager=manager,
-            **_kwargs(workflow_db, sql="SELECT id\nFROM workflow_runs WHERE stauts = 'x'"),
+            **_kwargs(workflow_db, sql="SELECT id\nFROM workflow_runs WHERE stauts = 'x'", count_timeout=count_timeout),
         )
     text = str(info.value)
     assert 'column "stauts" does not exist' in text

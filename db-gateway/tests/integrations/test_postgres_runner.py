@@ -219,7 +219,7 @@ async def test_count_timeout_keeps_page_and_returns_null_total():
 
 
 @pytest.mark.asyncio
-async def test_count_disabled_skips_move_all():
+async def test_no_count_skips_move_all():
     page = "\n".join(str(i) for i in range(1, 7))
     stdout = f"x\n{page}\nTime: 2.0 ms\n{MARK} fetch 6\n"
     result, cmd, _ = await _run(stdout, limit=5, count_timeout=0)
@@ -227,7 +227,7 @@ async def test_count_disabled_skips_move_all():
     assert not any("MOVE FORWARD ALL" in s for s in _sql_args(cmd))
     assert result.has_more is True
     assert result.total_rows is None
-    assert "count_timeout_seconds=0" in (result.total_rows_note or "")
+    assert "count_total=true" in (result.total_rows_note or "")
 
 
 @pytest.mark.asyncio

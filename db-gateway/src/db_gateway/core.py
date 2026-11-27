@@ -235,8 +235,13 @@ async def execute_gateway_query(
     limit: Any = None,
     output_format: Any = "csv",
     explain: Any = False,
+    count_total: Any = False,
 ) -> GatewayQueryResult:
     """Validate and execute one read-only query page through local DB proxy.
+
+    ``count_total=True``: when the page is full, also count the remaining rows
+    (one more round trip, bounded by ``count_timeout_seconds``). Without it
+    ``total_rows`` is only set when the result fits in the page.
 
     ``explain=True``: after the unchanged read-only checks, the gateway runs
     ``EXPLAIN <sql>`` (no ANALYZE, the statement is never executed) and returns
@@ -278,6 +283,7 @@ async def execute_gateway_query(
         return fail("INVALID_ARGUMENT", f"format 只支持 {list(_VALID_FORMATS)}，收到: {output_format!r}")
     try:
         explain_plan = _parse_bool(explain, "explain")
+        want_count = _parse_bool(count_total, "count_total")
     except ValueError as e:
         return fail("INVALID_ARGUMENT", str(e))
 
@@ -296,6 +302,14 @@ async def execute_gateway_query(
     audit_extra: dict[str, Any] = {"offset": page_offset, "limit": page_limit, "format": fmt}
     if explain_plan:
         audit_extra["explain"] = True
+    count_budget = 0.0
+    if want_count and not explain_plan:
+        audit_extra["count_total"] = True
+        count_budget = float(
+            _cfg_number(cfg.postgres, "count_timeout_seconds", _DEFAULT_COUNT_TIMEOUT_SECONDS)
+        )
+        if count_budget <= 0:
+            warnings.append("count_total 未生效：服务端已关闭计数（count_timeout_seconds=0）")
     audit_file = _audit_path(cfg)
 
     try:
@@ -339,6 +353,7 @@ async def execute_gateway_query(
             limit=page_limit,
             describe=(fmt == "json" and not explain_plan),
             explain=explain_plan,
+            count_timeout=count_budget,
         )
     except PsqlSafetyError as e:
         error_status, error_code, error_text = "REJECTED_SQL_SAFETY", "SQL_SAFETY_ERROR", f"SQL safety check failed: {e}"
@@ -455,12 +470,11 @@ async def _run_psql_controlled(
     limit: int | None = None,
     describe: bool = False,
     explain: bool = False,
+    count_timeout: float = 0.0,
 ) -> PsqlResult:
     max_concurrent = max(1, int(getattr(cfg.postgres, "max_concurrent_queries", 3) or 3))
     singleflight_enabled = bool(getattr(cfg.postgres, "singleflight_enabled", True))
-    count_timeout = float(
-        _cfg_number(cfg.postgres, "count_timeout_seconds", _DEFAULT_COUNT_TIMEOUT_SECONDS)
-    )
+    count_timeout = max(0.0, float(count_timeout or 0))
     run_kwargs: dict[str, Any] = {
         "cfg": cfg,
         "database_key": database_key,

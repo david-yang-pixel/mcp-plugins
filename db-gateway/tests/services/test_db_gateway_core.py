@@ -295,6 +295,7 @@ async def test_gateway_pagination_returns_total_and_next_offset(tmp_path):
             sql="SELECT id FROM tenants ORDER BY id;",
             offset=10,
             limit=2,
+            count_total=True,
         )
 
     kwargs = run.await_args.kwargs
@@ -318,8 +319,58 @@ async def test_gateway_pagination_returns_total_and_next_offset(tmp_path):
     assert entry["status"] == "OK"
     assert entry["offset"] == 10 and entry["limit"] == 2
     assert entry["total_rows"] == 23
+    assert entry["count_total"] is True
     assert "ticket_id" not in entry and "ticket_id_missing" not in entry
     assert "queue_wait_ms" in entry["timing_ms"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_does_not_count_unless_asked(tmp_path):
+    """Counting costs an extra round trip (and up to count_timeout_seconds): opt-in only."""
+    from db_gateway.core import execute_gateway_query
+
+    page = _page_result(total_rows=None, total_rows_note="结果超过一页，未统计总行数；需要总数时传 count_total=true")
+    run = AsyncMock(return_value=page)
+    with patch("db_gateway.core.run_psql", run):
+        result = await execute_gateway_query(
+            cfg=_cfg(tmp_path), database="prod", sql="SELECT id FROM tenants ORDER BY id", limit=2,
+        )
+
+    assert run.await_args.kwargs["count_timeout"] == 0
+    assert result.total_rows is None and result.has_more is True
+    assert any("count_total=true" in w for w in result.warnings)
+    assert "count_total" not in _audit_entries(tmp_path)[-1]
+
+
+@pytest.mark.asyncio
+async def test_count_total_is_ignored_when_the_server_disables_counting(tmp_path):
+    from db_gateway.core import execute_gateway_query
+
+    cfg = _cfg(tmp_path)
+    cfg.postgres.count_timeout_seconds = 0
+    run = AsyncMock(return_value=_page_result(total_rows=None, total_rows_note="结果超过一页，未统计总行数"))
+    with patch("db_gateway.core.run_psql", run):
+        result = await execute_gateway_query(
+            cfg=cfg, database="prod", sql="SELECT id FROM tenants ORDER BY id", limit=2, count_total=True,
+        )
+
+    assert run.await_args.kwargs["count_timeout"] == 0
+    assert any("count_timeout_seconds=0" in w for w in result.warnings)
+
+
+@pytest.mark.asyncio
+async def test_count_total_must_be_a_boolean(tmp_path):
+    from db_gateway.core import execute_gateway_query
+
+    run = AsyncMock(return_value=_page_result())
+    with patch("db_gateway.core.run_psql", run):
+        result = await execute_gateway_query(
+            cfg=_cfg(tmp_path), database="prod", sql="SELECT 1", count_total="maybe",
+        )
+
+    assert result.success is False and result.code == "INVALID_ARGUMENT"
+    assert "count_total" in result.error
+    run.assert_not_awaited()
 
 
 @pytest.mark.asyncio

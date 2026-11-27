@@ -133,10 +133,10 @@ def test_stdio_forwards_explain(monkeypatch):
     monkeypatch.setenv("DB_GATEWAY_API_KEY", "k")
     monkeypatch.setattr(module.request, "urlopen", fake_urlopen)
 
-    module._gateway_query({"database": "prod", "sql": "SELECT 1", "explain": True})
+    module._gateway_query({"database": "prod", "sql": "SELECT 1", "explain": True, "count_total": True})
 
     assert captured["url"] == "http://gateway.invalid/query"
-    assert captured["body"] == {"database": "prod", "sql": "SELECT 1", "explain": True}
+    assert captured["body"] == {"database": "prod", "sql": "SELECT 1", "explain": True, "count_total": True}
 
 
 def test_stdio_schema_tool_posts_to_schema_endpoint(monkeypatch, capsys):

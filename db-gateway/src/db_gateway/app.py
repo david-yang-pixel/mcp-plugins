@@ -78,6 +78,7 @@ async def handle_query(request: web.Request) -> web.Response:
         limit=body.get("limit"),
         output_format=body.get("format") or "csv",
         explain=body.get("explain"),
+        count_total=body.get("count_total"),
     )
     status = 200 if result.success else 400
     if result.code == "TELEPORT_EXPIRED":
