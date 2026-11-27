@@ -106,3 +106,18 @@ def test_dockerfile_bundles_pinned_tsh():
     assert "TELEPORT_VERSION=18.11.0" in text
     assert "8d3dba03ea6b6e0d72c97e190da0595e8f0d70f5573c3a26b1908cf60caf6e3f" in text
     assert AppConfig().teleport_tools.tsh_path in text      # /opt/teleport/bin/tsh
+
+
+def test_knowledgefs_defaults():
+    cfg = AppConfig()
+    assert (cfg.postgres.db_knowledgefs, cfg.postgres.port_knowledgefs) == ("knowledgefs", 56064)
+    k = cfg.teleport_tools.knowledgefs
+    assert (k.enabled, k.teleport_db, k.db_user) == (True, "knowledge-fs-production-readonly", "")
+
+
+def test_runtime_settings_enable_knowledgefs():
+    settings = json.loads((ROOT / "deploy" / "runtime.json").read_text())["settings"]
+    cfg = AppConfig(**settings)
+    assert settings["teleport_tools"]["knowledgefs"]["enabled"] is True
+    assert settings["postgres"]["port_knowledgefs"] == 56064
+    assert cfg.teleport_tools.knowledgefs.enabled is True
