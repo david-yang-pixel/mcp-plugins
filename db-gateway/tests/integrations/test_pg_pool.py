@@ -206,15 +206,36 @@ def _terminate_pool_backends(db) -> int:
     return len(rows)
 
 
-async def test_dropped_connection_fails_once_then_reconnects(database, manager):
-    # Like a tsh-proxy-db restart: the pooled connection dies while idle.
+async def test_dropped_idle_connection_is_retried_on_a_fresh_one(database, manager):
+    # Like a tsh-proxy-db restart: the pooled connection dies while idle. The
+    # query fails right after checkout, so it is retried at once on a new
+    # connection instead of failing (and draining the pool).
     await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT 1"))
     assert _terminate_pool_backends(database) >= 1
 
-    with pytest.raises(TeleportAuthExpired):
-        await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT 1"))
     again = await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT 3"))
     assert again.rows == [["3"]]
+    assert again.timing_ms["pool_reconnects"] == 1
+
+
+async def test_dropped_connection_is_retried_for_catalog_queries(database, manager):
+    from db_gateway.pg_pool import run_metadata_query
+
+    kwargs = dict(host=database["host"], port=database["port"], user=database["user"], password="",
+                  database=database["database"], manager=manager)
+    await run_metadata_query(**kwargs, sql="SELECT 1", params=None)
+    assert _terminate_pool_backends(database) >= 1
+
+    assert await run_metadata_query(**kwargs, sql="SELECT 7", params=None) == [["7"]]
+
+
+async def test_lost_tunnel_still_reports_teleport_expired(slow_link, latency_proxy, manager):
+    settings = PoolSettings(acquire_timeout_seconds=1.5, connect_timeout_seconds=1)
+    await run_pool_query(manager=manager, settings=settings, **_kwargs(slow_link, sql="SELECT 1"))
+    await latency_proxy.close()  # the tunnel is gone: the retry cannot connect either
+
+    with pytest.raises(TeleportAuthExpired):
+        await run_pool_query(manager=manager, settings=settings, **_kwargs(slow_link, sql="SELECT 1"))
 
 
 async def test_idle_check_replaces_dropped_connection_transparently(database, manager):
@@ -226,21 +247,53 @@ async def test_idle_check_replaces_dropped_connection_transparently(database, ma
     assert result.rows == [["4"]]
 
 
-async def test_teleport_key_change_drains_the_pool(database, manager, tmp_path):
-    keys = tmp_path / "keys" / "teleport.example.com"
-    keys.mkdir(parents=True)
-    cert = keys / "agent-x509.pem"
-    cert.write_text("old")
-    kwargs = _kwargs(database, sql="SELECT 1", auth_home=str(tmp_path))
+async def test_keepalive_lets_the_next_query_skip_the_idle_probe(slow_link, manager):
+    """Idle connections are verified in the background, off the request path."""
+    settings = PoolSettings(check_idle_seconds=0.3)
+    kwargs = _kwargs(slow_link, sql="SELECT 1")
+    await run_pool_query(manager=manager, settings=settings, **kwargs)
+    await asyncio.sleep(0.4)  # idle long enough that checkout would probe it
 
-    await run_pool_query(manager=manager, **kwargs)
-    reused = await run_pool_query(manager=manager, **kwargs)
-    cert.write_text("renewed")
-    os.utime(cert, (time.time() + 5, time.time() + 5))
-    after_renewal = await run_pool_query(manager=manager, **kwargs)
+    await manager.keepalive(older_than=0.2, probe_timeout=2)
+    elapsed, page = await _elapsed(run_pool_query(manager=manager, settings=settings, **kwargs))
 
-    assert reused.timing_ms["pool_new_connections"] == 0
-    assert after_renewal.timing_ms["pool_new_connections"] == 1
+    assert page.timing_ms["pool_new_connections"] == 0
+    assert elapsed < LINK_DELAY * 1.8, f"{elapsed:.3f}s: the query still probed the connection"
+
+
+async def test_keepalive_replaces_a_dead_idle_connection(database, manager):
+    await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT 1"))
+    assert _terminate_pool_backends(database) >= 1
+
+    await manager.keepalive(older_than=0, probe_timeout=2)
+    after = await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT 8"))
+
+    assert after.rows == [["8"]]
+    assert after.timing_ms["pool_reconnects"] == 0  # already replaced in the background
+
+
+async def test_keepalive_does_not_grow_the_pool(database, manager):
+    settings = PoolSettings(min_size=1, max_size=5)
+    await run_pool_query(manager=manager, settings=settings, **_kwargs(database, sql="SELECT 1"))
+    (key,) = manager.open_pools()
+
+    for _ in range(3):
+        await manager.keepalive(older_than=0, probe_timeout=2)
+    await asyncio.sleep(0.3)  # give a (wrongly) growing pool time to connect
+
+    assert manager._pools[key].get_stats()["pool_size"] == 1
+
+
+async def test_keepalive_gives_up_on_a_stalled_connection(slow_link, latency_proxy, manager):
+    await run_pool_query(manager=manager, **_kwargs(slow_link, sql="SELECT 1"))
+    latency_proxy.pause()  # responses never arrive: a black-holed connection
+
+    elapsed, _ = await _elapsed(manager.keepalive(older_than=0, probe_timeout=0.5))
+    latency_proxy.resume()
+
+    assert elapsed < 1.5, f"{elapsed:.3f}s: the probe did not time out"
+    after = await run_pool_query(manager=manager, **_kwargs(slow_link, sql="SELECT 9"))
+    assert after.rows == [["9"]]
 
 
 async def test_unreachable_tunnel_is_teleport_expired(manager):
@@ -590,17 +643,56 @@ async def test_timeout_error_lists_indexes_from_the_database(workflow_db, manage
 LINK_DELAY = 0.15  # seconds added to every server -> client chunk
 
 
-@pytest.fixture
-async def slow_link(database):
-    """TCP proxy to the test server that delays server responses by LINK_DELAY.
+class LatencyProxy:
+    """TCP proxy to the test server that delays server responses by ``delay``.
 
-    Chunks keep their order and are delivered LINK_DELAY after they arrive (pure
-    latency, not per-chunk delay), so a request/response costs one LINK_DELAY.
+    Chunks keep their order and are delivered ``delay`` after they arrive (pure
+    latency, not per-chunk delay), so a request/response costs one ``delay``.
+    ``pause()`` stalls server -> client traffic (a black-holed connection),
+    ``drop_all()`` closes every proxied connection (a tunnel restart) and
+    ``close()`` also stops listening (the tunnel is gone).
     """
-    tasks: set[asyncio.Task] = set()
 
-    async def handle(client_reader, client_writer):
-        server_reader, server_writer = await asyncio.open_connection(database["host"], database["port"])
+    def __init__(self, host: str, port: int, delay: float) -> None:
+        self.host, self.target_port, self.delay = host, port, delay
+        self.port = 0
+        self._server: asyncio.base_events.Server | None = None
+        self._tasks: set[asyncio.Task] = set()
+        self._writers: set[asyncio.StreamWriter] = set()
+        self._flowing = asyncio.Event()
+        self._flowing.set()
+
+    async def start(self) -> "LatencyProxy":
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        self.port = self._server.sockets[0].getsockname()[1]
+        return self
+
+    def pause(self) -> None:
+        self._flowing.clear()
+
+    def resume(self) -> None:
+        self._flowing.set()
+
+    async def drop_all(self) -> None:
+        for writer in list(self._writers):
+            writer.close()
+        for task in list(self._tasks):
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._writers.clear()
+        self._tasks.clear()
+
+    async def close(self) -> None:
+        server, self._server = self._server, None
+        if server is not None:
+            server.close()  # stop listening first ...
+        await self.drop_all()  # ... then drop live connections: 3.12 wait_closed() waits for them
+        if server is not None:
+            await server.wait_closed()
+
+    async def _handle(self, client_reader, client_writer):
+        server_reader, server_writer = await asyncio.open_connection(self.host, self.target_port)
+        self._writers.update({client_writer, server_writer})
 
         async def forward(reader, writer):
             try:
@@ -621,35 +713,39 @@ async def slow_link(database):
                     if data is None:
                         break
                     await asyncio.sleep(max(0.0, due - time.monotonic()))
+                    await self._flowing.wait()
                     writer.write(data)
                     await writer.drain()
 
             sender = asyncio.create_task(deliver())
             try:
                 while data := await reader.read(65536):
-                    await queue.put((time.monotonic() + LINK_DELAY, data))
+                    await queue.put((time.monotonic() + self.delay, data))
             except (ConnectionError, asyncio.CancelledError):
                 pass
             finally:
                 await queue.put((0.0, None))
-                try:
-                    await sender
-                except (ConnectionError, asyncio.CancelledError):
-                    pass
+                sender.cancel()
+                await asyncio.gather(sender, return_exceptions=True)
                 writer.close()
 
         pumps = [asyncio.create_task(forward(client_reader, server_writer)),
                  asyncio.create_task(delayed(server_reader, client_writer))]
-        tasks.update(pumps)
+        self._tasks.update(pumps)
         await asyncio.gather(*pumps, return_exceptions=True)
 
-    server = await asyncio.start_server(handle, "127.0.0.1", 0)
-    port = server.sockets[0].getsockname()[1]
-    yield {**database, "port": port}
-    server.close()
-    for task in tasks:
-        task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+
+@pytest.fixture
+async def latency_proxy(database):
+    proxy = await LatencyProxy(database["host"], database["port"], LINK_DELAY).start()
+    yield proxy
+    await proxy.close()
+
+
+@pytest.fixture
+async def slow_link(database, latency_proxy):
+    """The test database reached through ``latency_proxy``."""
+    yield {**database, "port": latency_proxy.port}
 
 
 async def _elapsed(coro) -> tuple[float, object]:
