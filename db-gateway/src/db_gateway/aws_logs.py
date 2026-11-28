@@ -6,8 +6,11 @@ against 1.4–1.9 s for a fresh `tsh aws` + aws CLI process per page.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
+import time
+from pathlib import Path
 from typing import Any
 
 import botocore.session
@@ -23,14 +26,52 @@ from botocore.exceptions import (
     SSLError,
 )
 
+from db_gateway.log import get_logger
 from db_gateway.teleport_cli import tsh_login
 from db_gateway.tsh_daemons import TshDaemon
+
+logger = get_logger(module="aws_logs")
 
 _ENV_KEYS = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_CA_BUNDLE", "HTTPS_PROXY")
 _EXPORT_RE = re.compile(r"^\s*export\s+(" + "|".join(_ENV_KEYS) + r")=(.*)$")
 
 CONNECT_TIMEOUT_SECONDS = 10
 READ_TIMEOUT_SECONDS = 30
+
+# Private copies of each proxy's local CA, outside every TELEPORT_HOME. The proxy
+# writes `<app>-localca.pem` into the key ring once, at start, and the client
+# reads it on every new TLS connection; but other tsh processes rewrite the key
+# ring (the first `tsh kubectl` of a generation, `tsh apps login`) and can drop
+# the file when they overlap with a proxy start. Copies older than this go.
+CA_COPY_DIR = Path("/tmp/db-gateway/aws-proxy-ca")
+CA_COPY_KEEP_SECONDS = 600.0
+
+
+def _private_ca_copy(path: str) -> str:
+    """Copy the proxy's CA where no tsh process writes; the reported path if unreadable."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError as e:
+        logger.warning("aws_proxy_ca_copy_failed", error=f"{type(e).__name__}: {e}"[:300])
+        return path
+    CA_COPY_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target = CA_COPY_DIR / f"ca-{hashlib.sha256(data).hexdigest()[:16]}.pem"
+    if target.exists():
+        os.utime(target)
+    else:
+        tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, target)
+    cutoff = time.time() - CA_COPY_KEEP_SECONDS
+    for old in CA_COPY_DIR.glob("ca-*.pem"):
+        try:
+            if old != target and old.stat().st_mtime < cutoff:
+                old.unlink()
+        except OSError:
+            pass
+    return str(target)
 
 
 def parse_proxy_env(lines: list[str]) -> dict[str, str] | None:
@@ -42,9 +83,9 @@ def parse_proxy_env(lines: list[str]) -> dict[str, str] | None:
             env[m.group(1)] = m.group(2).strip().strip("\"'")
     if not all(k in env for k in _ENV_KEYS):
         return None
-    # The path is under TELEPORT_HOME=<sessions>/current/...; after a renewal
-    # `current` names the next proxy's CA, so pin this proxy's generation.
-    env["AWS_CA_BUNDLE"] = os.path.realpath(env["AWS_CA_BUNDLE"])
+    # The path is under TELEPORT_HOME=<sessions>/current/...: resolve it to this
+    # proxy's generation, then keep a copy no key-ring rewrite can remove.
+    env["AWS_CA_BUNDLE"] = _private_ca_copy(os.path.realpath(env["AWS_CA_BUNDLE"]))
     return env
 
 
