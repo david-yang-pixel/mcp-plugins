@@ -27,9 +27,17 @@ class PostgresConfig(BaseModel):
     port_billing: int = 56062
     port_plugin: int = 56063
     # KnowledgeFS production (Teleport db knowledge-fs-production-readonly). Its tunnel
-    # is run by db-gateway itself (tsh_daemons.KNOWLEDGEFS_TUNNEL), not a tsh-proxy container.
+    # is run by db-gateway itself (tsh_daemons.ensure_tunnel), not a tsh-proxy container.
     db_knowledgefs: str = "knowledgefs"
     port_knowledgefs: int = 56064
+    # prod / billing / plugin 的 Teleport 数据库名。留空时连宿主机 tsh-proxy-* 隧道
+    # （port_*）；填了就由 db-gateway 自己在 tunnel_port_* 上起隧道（tsh_daemons.py）。
+    teleport_db_prod: str = ""
+    teleport_db_billing: str = ""
+    teleport_db_plugin: str = ""
+    tunnel_port_prod: int = 56071
+    tunnel_port_billing: int = 56072
+    tunnel_port_plugin: int = 56073
     query_timeout_seconds: int = 30
     max_rows: int = 1000
     max_concurrent_queries: int = 3
@@ -51,9 +59,6 @@ class PostgresConfig(BaseModel):
     pool_acquire_timeout_seconds: float = 15
     # pool 模式连接失败后的重试间隔，需覆盖 tsh-proxy-db 重启的几秒。
     pool_retry_delay_seconds: float = 1.5
-    # 后台监视 <teleport.auth_home> 的用户证书；续签后立即重启运行中的 tsh 常驻进程
-    # （KnowledgeFS 隧道、AWS 代理）并逐条验证连接池里的连接，不再清空连接池。
-    pool_watch_teleport_keys: bool = True
     # 后台保活：每隔该秒数探测一次空闲连接，查询取连接时就不用再探测；0 关闭。
     pool_keepalive_seconds: float = 30
     # 存活探测（空查询）的超时；超时的连接直接关闭。
@@ -78,13 +83,36 @@ class DbGatewayConfig(BaseModel):
 
 
 class TeleportConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     proxy: str = ""
     user: str = ""
     public_base_url: str = ""
+    # The tsh bundled in the image (18.11); the host-mounted /usr/local/bin/tsh (18.0.0)
+    # is never run: it fails `tsh aws` signature verification against the 18.11 proxy.
+    tsh_path: str = "/opt/teleport/bin/tsh"
+    # db-gateway's own Teleport sessions: one gen-<N>/{home,kubeconfig} per login and a
+    # `current` symlink to the live one (teleport_session.py).
+    sessions_dir: str = "/tmp/db-gateway/tsh-sessions"
+    # Log in again (password + TOTP from the environment) this long before the cert expires.
+    auto_renew: bool = True
+    renew_before_seconds: int = 480
+    # Base delay between automatic attempts after a network/transient failure (backs off).
+    renew_retry_seconds: int = 30
+    # Old gen-<N> directories are removed this long after a switch (> a tool call's budget).
+    session_retain_seconds: int = 90
+    # Consecutive rejected logins (bad password/OTP) before automatic login stops until a
+    # manual /teleport-auth login: Teleport locks the user after a few failed attempts.
+    max_auth_failures: int = 2
+    login_timeout_seconds: int = 60
+    notify_interval_seconds: int = 3600
+    # Only the legacy scripts (scripts/auth-watchdog.py, scripts/tsh-init.py) still use these.
     auth_home: str = "/opt/zd-agent/.tsh"
     warn_threshold_minutes: int = 30
     check_interval_seconds: int = 300
-    notify_interval_seconds: int = 3600
+    # Filled from TELEPORT_PASSWORD / TELEPORT_TOTP_SECRET; never logged or serialized.
+    password: str = Field(default="", repr=False, exclude=True)
+    totp_secret: str = Field(default="", repr=False, exclude=True)
 
 
 class FeishuConfig(BaseModel):
@@ -109,7 +137,7 @@ class KubeReadConfig(BaseModel):
         default_factory=lambda: {"prod": "lg-eks-01", "staging": "dify-plugin-1"}
     )
     max_output_bytes: int = 1048576
-    kubeconfig_path: str = "/tmp/db-gateway/kubeconfig"
+    # The kubeconfig lives in each session's gen-<N> directory (teleport_session.py).
 
 
 class KnowledgeFsConfig(BaseModel):
@@ -119,13 +147,12 @@ class KnowledgeFsConfig(BaseModel):
 
 
 class TeleportToolsConfig(BaseModel):
-    """plugin_lambda_logs / kube_read: read-only tsh tools (see teleport_cli.py)."""
+    """plugin_lambda_logs / kube_read: read-only tsh tools (see teleport_cli.py).
 
-    # tsh 18.11 bundled in the image; the host-mounted /usr/local/bin/tsh (18.0.0)
-    # fails `tsh aws` signature verification against the 18.11 proxy.
-    tsh_path: str = "/opt/teleport/bin/tsh"
-    # Container-local copy of teleport.auth_home; the tools never write the shared one.
-    shadow_home: str = "/tmp/db-gateway/tsh-home"
+    The tsh binary is ``teleport.tsh_path``; retired keys (tsh_path, shadow_home)
+    in old config files are ignored.
+    """
+
     # Budget for one whole tool call (Nginx proxy_read_timeout is 60s).
     time_budget_seconds: float = 40
     max_concurrent: int = 3
@@ -195,6 +222,10 @@ def load_config(config_path: str = "config.yaml") -> AppConfig:
         cfg.db_gateway.listen_port = env.db_gateway_listen_port
     if env.teleport_user:
         cfg.teleport.user = env.teleport_user
+    if env.teleport_password:
+        cfg.teleport.password = env.teleport_password
+    if env.teleport_totp_secret:
+        cfg.teleport.totp_secret = env.teleport_totp_secret
     if env.teleport_public_base_url:
         cfg.teleport.public_base_url = env.teleport_public_base_url.rstrip("/")
     if env.feishu_webhook_url:

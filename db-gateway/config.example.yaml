@@ -6,6 +6,14 @@ postgres:
   port_billing: 56062
   port_plugin: 56063
   port_knowledgefs: 56064          # local tunnel run by db-gateway (teleport_tools.knowledgefs)
+  # Step 2: a filled teleport_db_<db> moves that database from the host tunnel
+  # (port_<db>) to a tunnel db-gateway runs itself on tunnel_port_<db>.
+  teleport_db_prod: ""             # lg-pgsql-read-01
+  teleport_db_billing: ""          # lg-billing-01
+  teleport_db_plugin: ""           # lg-pgsql-read-01
+  tunnel_port_prod: 56071
+  tunnel_port_billing: 56072
+  tunnel_port_plugin: 56073
   user: your-read-only-database-user
   db_prod: your-production-database
   db_billing: your-billing-database
@@ -23,8 +31,7 @@ postgres:
   pool_check_idle_seconds: 60
   pool_acquire_timeout_seconds: 15
   pool_retry_delay_seconds: 1.5
-  # Background maintenance (pool mode): renewal handling + keepalive, see README.
-  pool_watch_teleport_keys: true
+  # Background keepalive (pool mode), see README.
   pool_keepalive_seconds: 30
   pool_probe_timeout_seconds: 5
   pool_maintenance_interval_seconds: 10
@@ -34,15 +41,22 @@ db_gateway:
   # Audit log directory (file: db_gateway_audit.log). Empty/omitted:
   # <resources.base_dir>/<resources.state_dir>/logs
   audit_log_dir: ""
+# db-gateway's own Teleport session (README "Teleport 会话"). Credentials come from
+# TELEPORT_USER / TELEPORT_PASSWORD / TELEPORT_TOTP_SECRET; without them nothing logs in.
 teleport:
   proxy: teleport.example.com:443
-  auth_home: ./.tsh
-# Read-only Teleport tools (plugin_lambda_logs, kube_read). They run the bundled
-# tsh against a container-local copy of teleport.auth_home (shadow_home) and never
-# write the shared one.
-teleport_tools:
   tsh_path: /opt/teleport/bin/tsh
-  shadow_home: /tmp/db-gateway/tsh-home
+  sessions_dir: /tmp/db-gateway/tsh-sessions
+  auto_renew: true
+  renew_before_seconds: 480
+  renew_retry_seconds: 30
+  session_retain_seconds: 90
+  max_auth_failures: 2
+  login_timeout_seconds: 60
+  notify_interval_seconds: 3600
+  auth_home: ./.tsh                # host session; only for host-scoped manual logins
+# Read-only Teleport tools (plugin_lambda_logs, kube_read) on that session.
+teleport_tools:
   time_budget_seconds: 40   # whole tool call; keep below the 60s Nginx timeout
   max_concurrent: 3
   lambda_logs:
@@ -59,7 +73,6 @@ teleport_tools:
       prod: lg-eks-01
       staging: dify-plugin-1
     max_output_bytes: 1048576
-    kubeconfig_path: /tmp/db-gateway/kubeconfig
   knowledgefs:
     enabled: true
     teleport_db: knowledge-fs-production-readonly

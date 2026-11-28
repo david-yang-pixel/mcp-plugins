@@ -47,11 +47,14 @@ async def _apps_login(cfg: Any, deadline: float) -> None:
     await tsh_login(["apps", "login", "--aws-role", lc.aws_role, lc.app], cfg=cfg, deadline=deadline)
 
 
+# Rotated on every renewal (tsh_daemons.rotate_running): a new proxy with fresh
+# credentials starts before the old one is stopped.
 AWS_PROXY = TshDaemon(
     "aws_proxy",
     args=lambda cfg: ["proxy", "aws", "--app", cfg.teleport_tools.lambda_logs.app],
     parse=parse_proxy_env,
     before_start=_apps_login,
+    rotate_on_renew=True,
 )
 
 _session: Any = None

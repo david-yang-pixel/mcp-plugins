@@ -1,11 +1,16 @@
 """Teleport auth web relay — allows remote password+OTP login via HTTPS.
 
 Flow:
-1. Watchdog detects cert expiry → generates one-time token → pushes Feishu card
+1. A one-time link is minted and pushed to Feishu:
+   * by db-gateway itself when its automatic login stopped (maintenance.py) —
+     the token renews db-gateway's own session (``SCOPE_SESSION``);
+   * by the legacy tsh-auth-watchdog through ``/internal/teleport-auth/issue`` —
+     the token renews the host session at ``teleport.auth_home`` (``SCOPE_HOST``),
+     which the host tunnels use until step 2 moves them into db-gateway.
 2. User opens URL on phone → GET /teleport-auth?t=<token> → HTML form
 3. User types password + OTP → POST /teleport-auth
-4. Server validates token + spawns `tsh login` via PTY, feeds password + OTP to stdin
-5. tsh writes new certs to TELEPORT_HOME → return success
+4. Server validates token + runs `tsh login` via PTY for the token's session
+5. Success consumes the token; a wrong code keeps it for a retry
 
 ⚠️ Security: password flows through the HTTPS endpoint. Accept this tradeoff
 knowingly — the official headless flow (cluster-level config) keeps passwords
@@ -13,15 +18,24 @@ on the user's device.
 """
 from __future__ import annotations
 
+import hmac
 import os
 from html import escape
+from typing import Optional
 from urllib.parse import urlparse
 
 from aiohttp import web
 
 from db_gateway.log import get_logger
 from db_gateway.app_context import app_config, teleport_auth_token_store
-from db_gateway.teleport_tokens import TokenStore
+from db_gateway.teleport_tokens import SCOPE_HOST, SCOPE_SESSION, TokenStore
+
+# Links in db-gateway's own alerts stay valid until the next (hourly) reminder.
+SESSION_LINK_TTL_MINUTES = 60
+_TARGET_LABELS = {
+    SCOPE_SESSION: "db-gateway 自管会话",
+    SCOPE_HOST: "宿主机 tsh 会话（tsh-proxy 隧道使用）",
+}
 
 logger = get_logger(module="services.teleport_auth_web")
 
@@ -56,10 +70,10 @@ _FORM_HTML = """<!DOCTYPE html>
 <body>
 <div class="card">
   <h1>🔐 Teleport 证书续期</h1>
-  <p class="sub">服务器：__SERVER__ &nbsp;·&nbsp; 用户：__USER__</p>
+  <p class="sub">服务器：__SERVER__ &nbsp;·&nbsp; 用户：__USER__<br>续期对象：__TARGET__</p>
   <div class="warn">
     密码与 OTP 码将通过 HTTPS 发送到服务器，由本站点直接调用 <code>tsh login</code>。
-    只输入一次，用完丢弃；token 5 分钟后失效。
+    只输入一次，用完丢弃；链接一次性使用，过期后失效。
   </div>
   <form method="post" action="/teleport-auth">
     <input type="hidden" name="t" value="__TOKEN__">
@@ -105,12 +119,13 @@ def _server_label(public_base_url: str) -> str:
     return parsed.netloc or public_base_url
 
 
-def render_form(token: str, user: str, public_base_url: str = "") -> str:
+def render_form(token: str, user: str, public_base_url: str = "", scope: str = SCOPE_SESSION) -> str:
     return (
         _FORM_HTML
         .replace("__TOKEN__", escape(token, quote=True))
         .replace("__USER__", escape(user or "(未配置)"))
         .replace("__SERVER__", escape(_server_label(public_base_url)))
+        .replace("__TARGET__", escape(_TARGET_LABELS.get(scope, scope)))
     )
 
 
@@ -119,10 +134,10 @@ def render_result(*, ok: bool, message: str, detail: str = "") -> str:
         return _RESULT_HTML.format(
             title="认证成功",
             emoji="✅",
-            message=message,
-            detail=f"<p class='sub'>系统会在 30 秒内自动恢复数据库连接。</p>",
+            message=escape(message),
+            detail="<p class='sub'>系统会在 30 秒内自动恢复数据库连接。</p>",
         )
-    d_html = f"<pre>{detail}</pre>" if detail else ""
+    d_html = f"<pre>{escape(detail)}</pre>" if detail else ""
     return _RESULT_HTML.format(
         title="认证失败",
         emoji="❌",
@@ -147,10 +162,38 @@ async def _run_tsh_login(
     )
 
 
+async def _renew_own_session(cfg, *, password: str, otp: str) -> tuple[bool, str]:
+    """Manual login into db-gateway's own session (resumes a paused auto-login)."""
+    from db_gateway.teleport_session import SESSION, LoginRejected
+
+    try:
+        await SESSION.renew(cfg, reason="manual_web", password=password, otp=otp)
+    except LoginRejected as e:
+        if e.kind == "locked":
+            return False, "locked: " + str(e)
+        return False, "invalid credentials: " + str(e)
+    except Exception as e:  # noqa: BLE001 - shown to the person, never the password
+        return False, f"{type(e).__name__}: {e}"
+    return True, "ok"
+
+
 # ====================== HTTP handlers ======================
 
+async def issue_link(app: web.Application, scope: str, *, ttl_minutes: int = 5) -> Optional[str]:
+    """Mint a one-time ``/teleport-auth`` link; None without a public base URL."""
+    cfg = app_config(app)
+    base = getattr(cfg.teleport, "public_base_url", "")
+    if not isinstance(base, str) or not base.rstrip("/"):
+        logger.error("teleport_public_base_url_missing")
+        return None
+    store: TokenStore = teleport_auth_token_store(app)
+    tok = await store.create(scope, ttl_minutes=ttl_minutes)
+    logger.info("teleport_auth_token_issued", scope=scope)
+    return f"{base.rstrip('/')}/teleport-auth?t={tok}"
+
+
 async def handle_teleport_auth_issue(request: web.Request) -> web.Response:
-    """POST /internal/teleport-auth/issue — called by watchdog to mint a new token.
+    """POST /internal/teleport-auth/issue — the legacy watchdog mints a host-session link.
 
     Auth: X-Internal-Secret header must match env `INTERNAL_SHARED_SECRET`.
     Returns: JSON {"url": "<public-base-url>/teleport-auth?t=<tok>"}.
@@ -161,21 +204,15 @@ async def handle_teleport_auth_issue(request: web.Request) -> web.Response:
             status=500, text="server not configured (INTERNAL_SHARED_SECRET empty)",
         )
     supplied = request.headers.get("X-Internal-Secret", "")
-    if supplied != internal_secret:
+    if not hmac.compare_digest(supplied.encode("utf-8"), internal_secret.encode("utf-8")):
         return web.Response(status=401, text="bad internal secret")
 
-    store: TokenStore = teleport_auth_token_store(request.app)
-    tok = await store.create()
-    cfg = app_config(request.app)
-    public_base_url = cfg.teleport.public_base_url.rstrip("/")
-    if not public_base_url:
-        logger.error("teleport_public_base_url_missing")
+    url = await issue_link(request.app, SCOPE_HOST)
+    if url is None:
         return web.Response(
             status=500,
             text="server not configured (teleport.public_base_url empty)",
         )
-    url = f"{public_base_url}/teleport-auth?t={tok}"
-    logger.info("teleport_auth_token_issued")
     return web.json_response({"url": url, "expires_in_seconds": 300})
 
 
@@ -183,12 +220,13 @@ async def handle_teleport_auth_get(request: web.Request) -> web.Response:
     """GET /teleport-auth?t=<token> → render password+OTP form."""
     token = request.query.get("t", "")
     store: TokenStore = teleport_auth_token_store(request.app)
-    if not await store.peek(token):
+    entry = await store.lookup(token)
+    if entry is None:
         return web.Response(
             status=403,
             text=render_result(
                 ok=False, message="Token 无效或已过期",
-                detail="请等待 watchdog 下次检测并推送新链接（最多 5 分钟）。",
+                detail="请使用飞书里最新推送的认证链接。",
             ),
             content_type="text/html",
         )
@@ -198,6 +236,7 @@ async def handle_teleport_auth_get(request: web.Request) -> web.Response:
             token=token,
             user=cfg.teleport.user or "",
             public_base_url=cfg.teleport.public_base_url,
+            scope=entry.scope,
         ),
         content_type="text/html",
     )
@@ -218,13 +257,14 @@ async def handle_teleport_auth_post(request: web.Request) -> web.Response:
     )
 
     store: TokenStore = teleport_auth_token_store(request.app)
-    # Peek first (not consume) — allows retry with same token if creds wrong
-    if not await store.peek(token):
+    # Look up first (not consume) — allows retry with same token if creds wrong
+    entry = await store.lookup(token)
+    if entry is None:
         return web.Response(
             status=403,
             text=render_result(
                 ok=False, message="Token 无效或已过期",
-                detail="返回飞书找最新的那条卡片（token 有效期 5 分钟）。",
+                detail="返回飞书找最新的那条认证链接。",
             ),
             content_type="text/html",
         )
@@ -237,13 +277,16 @@ async def handle_teleport_auth_post(request: web.Request) -> web.Response:
         )
 
     cfg = app_config(request.app)
-    ok, msg = await _run_tsh_login(
-        proxy=cfg.teleport.proxy,
-        user=cfg.teleport.user,
-        password=password,
-        otp=otp,
-        auth_home=cfg.teleport.auth_home,
-    )
+    if entry.scope == SCOPE_HOST:
+        ok, msg = await _run_tsh_login(
+            proxy=cfg.teleport.proxy,
+            user=cfg.teleport.user,
+            password=password,
+            otp=otp,
+            auth_home=cfg.teleport.auth_home,
+        )
+    else:
+        ok, msg = await _renew_own_session(cfg, password=password, otp=otp)
 
     # Password reference goes out of scope; do NOT log
     del password, otp
@@ -251,26 +294,28 @@ async def handle_teleport_auth_post(request: web.Request) -> web.Response:
     if ok:
         # 成功才消耗 token（失败让用户重试，不用重新生成）
         await store.consume(token)
-        logger.info("teleport_auth_relay_success", user=cfg.teleport.user)
+        logger.info("teleport_auth_relay_success", user=cfg.teleport.user, scope=entry.scope)
+        message = ("db-gateway 的 Teleport 会话已续期，自动续期已恢复。"
+                   if entry.scope == SCOPE_SESSION else "证书已续期。数据库连接会在 30 秒内自动恢复。")
         return web.Response(
-            text=render_result(
-                ok=True,
-                message="证书已续期。数据库连接会在 30 秒内自动恢复。",
-            ),
+            text=render_result(ok=True, message=message),
             content_type="text/html",
         )
 
     # 失败：保留 token，用户可以回到飞书链接重试（token 5 分钟内仍有效）
-    logger.warning("teleport_auth_relay_failed", reason=msg[:200])
+    logger.warning("teleport_auth_relay_failed", scope=entry.scope, reason=msg[:200])
 
-    # 把 "invalid credentials" 翻译成友好提示
+    # 把 "invalid credentials" / 锁定翻译成友好提示
     hint = ""
-    if "invalid credentials" in msg.lower():
+    if msg.startswith("locked: "):
+        hint = ("<strong>Teleport 账号已被锁定</strong>。请等锁定解除（或联系管理员解锁）后"
+                "再使用新的认证链接登录，不要反复重试。")
+    elif "invalid credentials" in msg.lower():
         hint = (
             "<strong>密码或 OTP 错误</strong>。最常见原因：OTP 码过期了"
             "（30 秒切换）。请返回飞书卡片，等 Google Authenticator 显示"
             "<strong>新的码 + 剩余至少 25 秒</strong>时立刻填写提交。"
-            "同一 token 5 分钟内可重试。"
+            "同一链接在有效期内可重试。"
         )
     return web.Response(
         status=200,  # 不返 500，避免浏览器报错页覆盖我们的指引

@@ -67,7 +67,6 @@ def test_pool_driver_settings_default_to_psql():
     assert pg.pool_min_size == 1
     assert pg.pool_max_idle_seconds == 240
     assert pg.pool_retry_delay_seconds == 1.5
-    assert pg.pool_watch_teleport_keys is True
 
 
 def test_pool_driver_rejects_unknown_driver():
@@ -82,7 +81,6 @@ def test_pool_driver_rejects_unknown_driver():
 
 def test_teleport_tools_defaults():
     t = AppConfig().teleport_tools
-    assert (t.tsh_path, t.shadow_home) == ("/opt/teleport/bin/tsh", "/tmp/db-gateway/tsh-home")
     assert (t.time_budget_seconds, t.max_concurrent) == (40, 3)
     assert t.lambda_logs.model_dump() == {
         "enabled": True, "app": "aws-support-logs", "aws_role": "SupportLambdaLogsReadOnly",
@@ -91,7 +89,6 @@ def test_teleport_tools_defaults():
     }
     assert t.kube.clusters == {"prod": "lg-eks-01", "staging": "dify-plugin-1"}
     assert t.kube.max_output_bytes == 1048576
-    assert t.kube.kubeconfig_path == "/tmp/db-gateway/kubeconfig"
 
 
 def test_runtime_settings_enable_both_teleport_tools():
@@ -105,7 +102,7 @@ def test_dockerfile_bundles_pinned_tsh():
     text = (ROOT / "Dockerfile").read_text()
     assert "TELEPORT_VERSION=18.11.0" in text
     assert "8d3dba03ea6b6e0d72c97e190da0595e8f0d70f5573c3a26b1908cf60caf6e3f" in text
-    assert AppConfig().teleport_tools.tsh_path in text      # /opt/teleport/bin/tsh
+    assert AppConfig().teleport.tsh_path in text      # /opt/teleport/bin/tsh
 
 
 def test_knowledgefs_defaults():
@@ -122,3 +119,52 @@ def test_runtime_settings_enable_knowledgefs():
     assert settings["teleport_tools"]["knowledgefs"]["enabled"] is True
     assert settings["postgres"]["port_knowledgefs"] == 56064
     assert cfg.teleport_tools.knowledgefs.enabled is True
+
+
+def test_teleport_session_defaults():
+    t = AppConfig().teleport
+    assert t.tsh_path == "/opt/teleport/bin/tsh"          # the only tsh db-gateway runs
+    assert t.sessions_dir == "/tmp/db-gateway/tsh-sessions"
+    assert (t.auto_renew, t.renew_before_seconds, t.renew_retry_seconds) == (True, 480, 30)
+    assert (t.session_retain_seconds, t.max_auth_failures) == (90, 2)
+
+
+def test_teleport_credentials_come_from_env_and_are_never_serialized(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TELEPORT_PASSWORD", "pw-secret-value")
+    monkeypatch.setenv("TELEPORT_TOTP_SECRET", "TOTPSECRETVALUE")
+    cfg = load_config(str(tmp_path / "missing.yaml"))
+    assert cfg.teleport.password == "pw-secret-value"
+    assert cfg.teleport.totp_secret == "TOTPSECRETVALUE"
+    dumped = json.dumps(cfg.model_dump(mode="json"))
+    assert "pw-secret-value" not in dumped and "TOTPSECRETVALUE" not in dumped
+    assert "pw-secret-value" not in repr(cfg) and "TOTPSECRETVALUE" not in repr(cfg)
+
+
+def test_self_managed_tunnels_are_off_by_default_with_fixed_ports():
+    pg = AppConfig().postgres
+    assert (pg.teleport_db_prod, pg.teleport_db_billing, pg.teleport_db_plugin) == ("", "", "")
+    assert (pg.tunnel_port_prod, pg.tunnel_port_billing, pg.tunnel_port_plugin) == (56071, 56072, 56073)
+    assert (pg.port_prod, pg.port_billing, pg.port_plugin) == (56061, 56062, 56063)  # host tunnels
+
+
+def test_retired_teleport_keys_in_old_configs_still_load(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "teleport:\n  auth_home: /opt/zd-agent/.tsh\n  proxy: t.example:443\n"
+        "teleport_tools:\n  tsh_path: /usr/local/bin/tsh\n  shadow_home: /tmp/x\n"
+        "  kube:\n    kubeconfig_path: /tmp/kc\n"
+        "postgres:\n  pool_watch_teleport_keys: true\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(str(path))
+    assert cfg.teleport.proxy == "t.example:443"
+    assert cfg.teleport.tsh_path == "/opt/teleport/bin/tsh"   # the retired tools key is ignored
+
+
+def test_runtime_settings_no_longer_chown_host_tsh():
+    runtime = json.loads((ROOT / "deploy" / "runtime.json").read_text())
+    assert "HOST_TSH_UID" not in runtime["environment"]
+    assert "HOST_TSH_GID" not in runtime["environment"]
+    assert {"TELEPORT_PASSWORD", "TELEPORT_TOTP_SECRET", "TELEPORT_USER"} <= set(runtime["secrets"])
