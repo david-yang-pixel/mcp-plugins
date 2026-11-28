@@ -92,6 +92,27 @@ async def test_rotate_starts_the_new_process_before_stopping_the_old(cfg, fake_t
     assert not alive(old)
 
 
+async def test_stop_also_kills_a_rotated_process_still_waiting_to_retire(cfg, fake_tsh):
+    fake_tsh.push(stdout=READY.format(port=5555), sleep=30)
+    fake_tsh.push(stdout=READY.format(port=6666), sleep=30)
+    d = make()
+    await d.ensure(cfg, dl(5))
+    old = d.pid
+    await d.rotate(cfg, dl(5))
+    new = d.pid
+    await d.stop()
+    await asyncio.sleep(0.2)
+    assert not alive(old) and not alive(new)
+
+
+def test_a_retired_process_outlives_any_tool_call_that_started_on_it():
+    from db_gateway import tsh_daemons
+    from db_gateway.config import TeleportToolsConfig, TeleportConfig
+
+    budget = TeleportToolsConfig().time_budget_seconds
+    assert budget < tsh_daemons.ROTATE_KILL_DELAY_SECONDS < TeleportConfig().session_retain_seconds
+
+
 async def test_failed_rotation_keeps_the_running_process(cfg, fake_tsh):
     fake_tsh.push(stdout=READY.format(port=5555), sleep=30)
     fake_tsh.push(stderr="ERROR: boom\n", code=1)

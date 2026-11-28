@@ -28,10 +28,13 @@ from aiohttp import web
 
 from db_gateway.log import get_logger
 from db_gateway.app_context import app_config, teleport_auth_token_store
-from db_gateway.teleport_tokens import SCOPE_HOST, SCOPE_SESSION, TokenStore
+from db_gateway.teleport_tokens import MAX_FAILED_LOGINS, SCOPE_HOST, SCOPE_SESSION, TokenStore
 
 # Links in db-gateway's own alerts stay valid until the next (hourly) reminder.
 SESSION_LINK_TTL_MINUTES = 60
+# One manual login at a time (a double submit would send the same code twice,
+# and two host-session logins would rewrite the same auth_home together).
+_manual_login_running = False
 _TARGET_LABELS = {
     SCOPE_SESSION: "db-gateway 自管会话",
     SCOPE_HOST: "宿主机 tsh 会话（tsh-proxy 隧道使用）",
@@ -277,16 +280,27 @@ async def handle_teleport_auth_post(request: web.Request) -> web.Response:
         )
 
     cfg = app_config(request.app)
-    if entry.scope == SCOPE_HOST:
-        ok, msg = await _run_tsh_login(
-            proxy=cfg.teleport.proxy,
-            user=cfg.teleport.user,
-            password=password,
-            otp=otp,
-            auth_home=cfg.teleport.auth_home,
+    global _manual_login_running
+    if _manual_login_running:     # checked and set with no await in between
+        return web.Response(
+            status=409,
+            text=render_result(ok=False, message="已有一次登录正在进行，请等它完成后再刷新查看，不要重复提交"),
+            content_type="text/html",
         )
-    else:
-        ok, msg = await _renew_own_session(cfg, password=password, otp=otp)
+    _manual_login_running = True
+    try:
+        if entry.scope == SCOPE_HOST:
+            ok, msg = await _run_tsh_login(
+                proxy=cfg.teleport.proxy,
+                user=cfg.teleport.user,
+                password=password,
+                otp=otp,
+                auth_home=cfg.teleport.auth_home,
+            )
+        else:
+            ok, msg = await _renew_own_session(cfg, password=password, otp=otp)
+    finally:
+        _manual_login_running = False
 
     # Password reference goes out of scope; do NOT log
     del password, otp
@@ -303,7 +317,11 @@ async def handle_teleport_auth_post(request: web.Request) -> web.Response:
         )
 
     # 失败：保留 token，用户可以回到飞书链接重试（token 5 分钟内仍有效）
-    logger.warning("teleport_auth_relay_failed", scope=entry.scope, reason=msg[:200])
+    failures = await store.record_failure(token)
+    logger.warning("teleport_auth_relay_failed", scope=entry.scope, failures=failures, reason=msg[:200])
+    left = MAX_FAILED_LOGINS - failures
+    retry_note = (f"此链接还可再试 {left} 次。" if left > 0
+                  else "此链接已连续失败 3 次并作废，请等待下一条提醒里的新链接。")
 
     # 把 "invalid credentials" / 锁定翻译成友好提示
     hint = ""
@@ -315,13 +333,13 @@ async def handle_teleport_auth_post(request: web.Request) -> web.Response:
             "<strong>密码或 OTP 错误</strong>。最常见原因：OTP 码过期了"
             "（30 秒切换）。请返回飞书卡片，等 Google Authenticator 显示"
             "<strong>新的码 + 剩余至少 25 秒</strong>时立刻填写提交。"
-            "同一链接在有效期内可重试。"
+            + retry_note
         )
     return web.Response(
         status=200,  # 不返 500，避免浏览器报错页覆盖我们的指引
         text=render_result(
             ok=False,
-            message=hint or "tsh login 失败",
+            message=hint or ("tsh login 失败。" + retry_note),
             detail=msg[-800:] if not hint else "",
         ),
         content_type="text/html",

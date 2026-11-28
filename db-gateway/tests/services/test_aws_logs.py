@@ -44,6 +44,17 @@ def test_parse_proxy_env_strips_quotes():
     assert parse_proxy_env(PROXY_OUT.format(ca="/x").splitlines()[:6]) is None
 
 
+def test_ca_bundle_is_pinned_to_the_generation_the_proxy_started_in(tmp_path):
+    import os
+
+    (tmp_path / "gen-1").mkdir()
+    (tmp_path / "gen-1" / "localca.pem").write_text("ca")
+    os.symlink("gen-1", tmp_path / "current")
+    env = parse_proxy_env(PROXY_OUT.format(ca=tmp_path / "current" / "localca.pem").splitlines())
+    # After a switch, `current/...` would name the next proxy's CA.
+    assert env["AWS_CA_BUNDLE"] == str(tmp_path / "gen-1" / "localca.pem")
+
+
 async def test_proxy_logs_into_app_then_starts_proxy(cfg, fake_tsh, tmp_path):
     fake_tsh.push()                                              # tsh apps login
     fake_tsh.push(stdout=PROXY_OUT.format(ca=tmp_path / "ca.pem"), sleep=30)

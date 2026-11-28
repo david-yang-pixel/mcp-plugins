@@ -137,9 +137,13 @@ class TeleportSessionManager:
         self._last_error: str | None = None
         self._background: set[asyncio.Task] = set()
         self._listeners: list[Listener] = []
+        # TOTP window whose code this process last submitted (automatic or typed):
+        # Teleport rejects a code used before, so it is never sent twice.
+        self._last_otp_window: int | None = None
         # Seams for tests.
         self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
         self._totp: Callable[[str], str] = _default_totp
+        self._wall: Callable[[], float] = time.time
 
     # --- state -------------------------------------------------------------------
 
@@ -218,6 +222,20 @@ class TeleportSessionManager:
         async with self._get_lock():
             return await self._renew_locked(cfg, reason=reason, password=password, otp=otp)
 
+    async def renew_if_unchanged(
+        self, cfg: Any, *, seen: SessionSnapshot | None, reason: str,
+    ) -> SessionSnapshot:
+        """Scheduled renewal; skipped when another caller renewed while this one waited.
+
+        ``seen`` is the snapshot the caller judged due. A second login right after
+        another one would reuse that window's code and be rejected.
+        """
+        async with self._get_lock():
+            current = self._current
+            if current is not None and current is not seen:
+                return current
+            return await self._renew_locked(cfg, reason=reason)
+
     # --- renewal -----------------------------------------------------------------
 
     def _check_auto_login_allowed(self, cfg: Any) -> None:
@@ -248,10 +266,10 @@ class TeleportSessionManager:
         (root / "home").mkdir(parents=True, mode=0o700)
         try:
             await self._login(cfg, root, manual=manual, password=password, otp=otp, deadline=deadline)
-            await self._sublogins(cfg, root)
+            await self._sublogins(cfg, root, deadline=deadline)
             status = await get_tsh_status(
                 tsh_path=cfg.teleport.tsh_path, auth_home=str(root / "home"),
-                timeout=STATUS_TIMEOUT_SECONDS,
+                timeout=self._step_timeout(STATUS_TIMEOUT_SECONDS, deadline, floor=1.0),
             )
         except BaseException as e:
             shutil.rmtree(root, ignore_errors=True)
@@ -280,12 +298,15 @@ class TeleportSessionManager:
         t = cfg.teleport
         attempts = 1 if manual else 2
         for attempt in range(attempts):
+            if not manual:
+                await self._wait_for_unused_window(deadline)
             code = otp if manual else self._totp(t.totp_secret)
             timeout = float(t.login_timeout_seconds)
             if deadline is not None:
                 timeout = min(timeout, deadline - time.monotonic())
                 if timeout <= 0:
                     raise LoginFailed("Teleport 登录的时间预算已用完，稍后重试")
+            self._last_otp_window = self._window()
             result = await login_fresh(
                 tsh_path=t.tsh_path, proxy=t.proxy, user=t.user,
                 password=password if manual else t.password, otp=code or "",
@@ -314,16 +335,36 @@ class TeleportSessionManager:
                     f"Teleport 拒绝了自动登录（连续 {self._auth_failures} 次），自动登录已暂停："
                     f"{result.message[-300:]}", "auth",
                 )
-            if attempt + 1 < attempts:
-                # The code may have been used by another client in this window: wait for a new one.
-                wait = TOTP_INTERVAL_SECONDS - (time.time() % TOTP_INTERVAL_SECONDS) + 1.5
-                if deadline is not None and time.monotonic() + wait + 10 > deadline:
-                    break
-                await self._sleep(wait)
+            # Next attempt: the code may have been used by another client in this
+            # window, so it waits for a new one (or gives up within the budget).
         raise LoginRejected("Teleport 拒绝了自动登录，稍后由后台重试", "auth")
 
-    async def _sublogins(self, cfg: Any, root: Path) -> None:
-        """Kube and AWS app logins inside the new generation; failures only warn."""
+    def _window(self) -> int:
+        return int(self._wall() // TOTP_INTERVAL_SECONDS)
+
+    async def _wait_for_unused_window(self, deadline: float | None) -> None:
+        """Wait until the TOTP window changes if this window's code was already sent."""
+        if self._last_otp_window is None or self._window() != self._last_otp_window:
+            return
+        wait = TOTP_INTERVAL_SECONDS - (self._wall() % TOTP_INTERVAL_SECONDS) + 1.5
+        if deadline is not None and time.monotonic() + wait + 10 > deadline:
+            # Not counted as a rejection: nothing is sent to Teleport.
+            raise LoginFailed("本 TOTP 窗口的验证码已用过，等下一个窗口再登录，稍后重试")
+        await self._sleep(wait)
+
+    @staticmethod
+    def _step_timeout(limit: float, deadline: float | None, *, floor: float = 0.0) -> float:
+        """``limit`` seconds, cut to what an on-demand caller's deadline leaves."""
+        if deadline is None:
+            return limit
+        return max(floor, min(limit, deadline - time.monotonic()))
+
+    async def _sublogins(self, cfg: Any, root: Path, *, deadline: float | None = None) -> None:
+        """Kube and AWS app logins inside the new generation; failures only warn.
+
+        On demand (``deadline``) they only use the caller's remaining time; a step
+        with less than a second left is skipped, and the tools redo it when needed.
+        """
         from db_gateway.teleport_cli import run_tsh
 
         tools = cfg.teleport_tools
@@ -334,9 +375,15 @@ class TeleportSessionManager:
             lc = tools.lambda_logs
             steps.append(["apps", "login", "--aws-role", lc.aws_role, lc.app])
         for args in steps:
+            step_deadline = time.monotonic() + SUBLOGIN_TIMEOUT_SECONDS
+            if deadline is not None:
+                step_deadline = min(step_deadline, deadline)
+            if step_deadline - time.monotonic() < 1.0:
+                logger.warning("teleport_sublogin_skipped", args=args, reason="time budget")
+                continue
             result = await run_tsh(
                 args, cfg=cfg, home=root / "home", kubeconfig=root / "kubeconfig",
-                deadline=time.monotonic() + SUBLOGIN_TIMEOUT_SECONDS,
+                deadline=step_deadline,
             )
             if result.exit_code != 0:
                 logger.warning("teleport_sublogin_failed", args=args, exit_code=result.exit_code,
@@ -357,13 +404,15 @@ class TeleportSessionManager:
 
     @staticmethod
     def _remove_leftovers(sessions: Path) -> None:
-        """Generations left by a previous process (container restart)."""
+        """What a previous process left (container restart): only entries this module creates."""
         if not sessions.exists():
             return
         for entry in sessions.iterdir():
-            if entry.is_symlink() or entry.is_file():
-                entry.unlink(missing_ok=True)
-            elif entry.is_dir():
+            name = entry.name
+            if name == CURRENT or (name.startswith(f".{CURRENT}-") and name.endswith(".tmp")):
+                if entry.is_symlink() or entry.is_file():
+                    entry.unlink(missing_ok=True)
+            elif _generation_of(entry) is not None and entry.is_dir() and not entry.is_symlink():
                 shutil.rmtree(entry, ignore_errors=True)
 
     async def _remove_older_later(self, sessions: Path, keep_from: int, delay: float) -> None:
@@ -372,6 +421,13 @@ class TeleportSessionManager:
             generation = _generation_of(entry)
             if generation is not None and generation < keep_from:
                 shutil.rmtree(entry, ignore_errors=True)
+
+    async def shutdown(self) -> None:
+        """Cancel background work (generation cleanup, listeners) at app cleanup."""
+        tasks = list(self._background)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def _reset(self) -> None:
         """Drop all state but keep the listeners (static wiring done at import time)."""

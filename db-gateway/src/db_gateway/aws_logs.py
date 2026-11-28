@@ -6,6 +6,7 @@ against 1.4–1.9 s for a fresh `tsh aws` + aws CLI process per page.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from typing import Any
 
@@ -39,7 +40,12 @@ def parse_proxy_env(lines: list[str]) -> dict[str, str] | None:
         m = _EXPORT_RE.match(line)
         if m:
             env[m.group(1)] = m.group(2).strip().strip("\"'")
-    return env if all(k in env for k in _ENV_KEYS) else None
+    if not all(k in env for k in _ENV_KEYS):
+        return None
+    # The path is under TELEPORT_HOME=<sessions>/current/...; after a renewal
+    # `current` names the next proxy's CA, so pin this proxy's generation.
+    env["AWS_CA_BUNDLE"] = os.path.realpath(env["AWS_CA_BUNDLE"])
+    return env
 
 
 async def _apps_login(cfg: Any, deadline: float) -> None:

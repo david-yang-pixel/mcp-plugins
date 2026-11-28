@@ -48,7 +48,11 @@ class FakeSession:
     def current(self):
         return self.snap
 
-    async def renew(self, cfg, *, reason: str):
+    async def renew(self, cfg, **kwargs):
+        raise AssertionError("background renewals must use renew_if_unchanged")
+
+    async def renew_if_unchanged(self, cfg, *, seen, reason: str):
+        assert seen is self.snap, "the loop passes the snapshot it judged due"
         self.renewals.append(reason)
         result = self.results.pop(0) if self.results else snapshot(len(self.renewals))
         if isinstance(result, BaseException):
@@ -59,19 +63,20 @@ class FakeSession:
         return result
 
 
-def _cfg(**postgres) -> AppConfig:
+def _cfg(teleport=None, **postgres) -> AppConfig:
     pg = {"driver": "pool", "pool_keepalive_seconds": 30, "pool_maintenance_interval_seconds": 10,
           "pool_probe_timeout_seconds": 5}
     pg.update(postgres)
-    return AppConfig(teleport={"renew_before_seconds": 480, "renew_retry_seconds": 30,
-                               "notify_interval_seconds": 3600}, postgres=pg)
+    tp = {"renew_before_seconds": 480, "renew_retry_seconds": 30, "notify_interval_seconds": 3600}
+    tp.update(teleport or {})
+    return AppConfig(teleport=tp, postgres=pg)
 
 
-def _maintenance(session=None, alerts=None, events=None, **postgres) -> Maintenance:
+def _maintenance(session=None, alerts=None, events=None, teleport=None, **postgres) -> Maintenance:
     async def alert(title, message, link):
         alerts.append((title, message, link))
 
-    return Maintenance(_cfg(**postgres), manager=FakeManager([] if events is None else events),
+    return Maintenance(_cfg(teleport, **postgres), manager=FakeManager([] if events is None else events),
                        session=session or FakeSession(), alert=alert if alerts is not None else None)
 
 
@@ -171,6 +176,43 @@ async def test_stopped_auto_login_sends_one_throttled_alert_with_a_link():
     session.blocked = None                     # a manual login on /teleport-auth succeeded
     session.snap = snapshot(2)
     assert await m.session_step() == 300
+
+
+async def test_a_new_stop_after_a_manual_login_alerts_at_once():
+    session = FakeSession()
+    session.blocked = "连续 2 次被拒绝"
+    alerts: list = []
+    m = _maintenance(session, alerts=alerts)
+    await m.session_step()
+    session.blocked = None                     # manual login
+    session.snap = snapshot(2)
+    await m.session_step()
+    session.blocked = "账号被锁定"               # stopped again within the hour
+    await m.session_step()
+    assert len(alerts) == 2
+
+
+async def test_without_auto_login_a_configured_gateway_asks_for_manual_logins():
+    session = FakeSession(auto=False)
+    alerts: list = []
+    m = _maintenance(session, alerts=alerts, teleport={"proxy": "teleport.example:443", "user": "u",
+                                                       "auto_renew": False})
+    steps: list[int] = []
+
+    async def fake_sleep(seconds):
+        steps.append(len(alerts))
+        if len(steps) == 1:
+            session.snap = snapshot(1, minutes_left=55)      # a manual login happened
+        if len(steps) == 2:
+            session.snap = snapshot(1, minutes_left=5)       # nearly expired again
+        if len(steps) == 3:
+            raise asyncio.CancelledError
+
+    m._sleep = fake_sleep
+    with pytest.raises(asyncio.CancelledError):
+        await m.run_session()
+    assert steps == [1, 1, 2] and session.renewals == []
+    assert all(link for _, _, link in alerts) and "人工登录" in alerts[0][0]
 
 
 async def test_failure_alert_only_once_the_session_is_unusable():

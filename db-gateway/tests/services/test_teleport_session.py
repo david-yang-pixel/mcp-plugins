@@ -1,6 +1,7 @@
 """teleport_session: db-gateway's own Teleport session (gen-<N> directories + `current` symlink)."""
 import asyncio
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -81,7 +82,7 @@ async def test_disabled_tools_skip_their_logins(cfg, fake_tsh):
     assert [c["argv"][0] for c in fake_tsh.calls] == ["login", "status"]
 
 
-async def test_next_renewal_switches_atomically_and_removes_the_old_generation_later(cfg, fake_tsh):
+async def test_next_renewal_switches_atomically_and_removes_the_old_generation_later(cfg, fake_tsh, no_wait):
     cfg.teleport.session_retain_seconds = 0.2
     push_login_ok(fake_tsh)
     push_login_ok(fake_tsh)
@@ -108,6 +109,40 @@ async def test_leftovers_from_before_a_restart_are_removed(cfg, fake_tsh):
     assert snap.generation == 1
     assert not (sessions / "gen-7").exists()
     assert os.readlink(sessions / "current") == "gen-1"
+
+
+async def test_leftover_cleanup_only_touches_what_db_gateway_created(cfg, fake_tsh):
+    sessions = Path(cfg.teleport.sessions_dir)
+    (sessions / "gen-3" / "home").mkdir(parents=True)
+    os.symlink("gen-3", sessions / ".current-3.tmp")
+    (sessions / "unrelated").mkdir()
+    (sessions / "notes.txt").write_text("keep")
+    push_login_ok(fake_tsh)
+
+    await SESSION.renew(cfg, reason="startup")
+
+    assert not (sessions / "gen-3").exists() and not (sessions / ".current-3.tmp").is_symlink()
+    assert (sessions / "unrelated").is_dir() and (sessions / "notes.txt").read_text() == "keep"
+
+
+async def test_on_demand_sublogins_stay_within_the_request_budget(cfg, monkeypatch, tmp_path):
+    from db_gateway import teleport_cli
+
+    deadlines: list[float] = []
+
+    async def fake_run_tsh(args, *, cfg, deadline, **kwargs):
+        deadlines.append(deadline)
+        return teleport_cli.TshResult(exit_code=0, stdout="", stderr="", timed_out=False,
+                                      truncated=False, elapsed_ms=0)
+
+    monkeypatch.setattr(teleport_cli, "run_tsh", fake_run_tsh)
+    now = time.monotonic()
+    await SESSION._sublogins(cfg, tmp_path, deadline=now + 5)
+    assert len(deadlines) == 2 and all(d <= now + 5 for d in deadlines)
+
+    deadlines.clear()
+    await SESSION._sublogins(cfg, tmp_path, deadline=time.monotonic() + 0.5)
+    assert deadlines == []               # no budget left: done on demand by the tools later
 
 
 async def test_subcredential_failure_does_not_fail_the_renewal(cfg, fake_tsh):
@@ -166,6 +201,47 @@ async def test_two_rejected_logins_stop_automatic_login_until_a_manual_one(cfg, 
     snap = await SESSION.renew(cfg, reason="manual_web", password="typed-pw", otp="555555")
     assert snap.generation >= 1 and not SESSION.blocked
     assert logins(fake_tsh)[-1]["entered"] == {"password": "typed-pw", "otp": "555555"}
+
+
+async def test_a_rejected_code_is_never_submitted_again_in_the_same_totp_window(cfg, fake_tsh, monkeypatch):
+    """Callers without time to wait for a new window fail without another attempt."""
+    window_start = (time.time() // 30) * 30
+    monkeypatch.setattr(SESSION, "_wall", lambda: window_start + 1)
+    fake_tsh.push(code=1, stderr=REJECTED)
+    deadline = asyncio.get_running_loop().time() + 20       # the next window is ~30 s away
+
+    results = await asyncio.gather(*(SESSION.ensure_session(cfg, deadline) for _ in range(2)),
+                                   return_exceptions=True)
+
+    assert len(logins(fake_tsh)) == 1                       # the second caller did not reuse the code
+    assert not SESSION.blocked and SESSION.status_info()["auth_failures"] == 1
+    assert all(isinstance(r, LoginFailed) and not isinstance(r, LoginRejected) for r in results)
+
+
+async def test_automatic_login_waits_for_a_new_window_after_a_manual_login(cfg, fake_tsh, no_wait, otps):
+    push_login_ok(fake_tsh)
+    push_login_ok(fake_tsh)
+    await SESSION.renew(cfg, reason="manual_web", password="typed-pw", otp="555555")
+    await SESSION.renew(cfg, reason="scheduled")
+    assert len(no_wait) == 1          # the person's code is this window's code too
+
+
+async def test_background_renewal_is_skipped_when_another_caller_renewed_meanwhile(cfg, fake_tsh):
+    push_login_ok(fake_tsh)
+    on_demand = asyncio.ensure_future(SESSION.ensure_session(cfg, asyncio.get_running_loop().time() + 30))
+    await asyncio.sleep(0.05)                               # it holds the lock now
+
+    snap = await SESSION.renew_if_unchanged(cfg, seen=None, reason="scheduled")
+
+    assert snap is await on_demand
+    assert len(logins(fake_tsh)) == 1
+
+
+async def test_background_renewal_runs_when_nothing_changed(cfg, fake_tsh):
+    first = install_session(cfg, generation=1, minutes_left=5)
+    push_login_ok(fake_tsh)
+    snap = await SESSION.renew_if_unchanged(cfg, seen=first, reason="scheduled")
+    assert snap.generation == 2
 
 
 async def test_locked_account_stops_after_one_attempt(cfg, fake_tsh, no_wait, otps):

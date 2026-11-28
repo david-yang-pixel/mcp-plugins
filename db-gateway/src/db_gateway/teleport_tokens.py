@@ -18,6 +18,8 @@ from typing import Optional
 
 SCOPE_SESSION = "session"
 SCOPE_HOST = "host"
+# Failed logins one link allows; each counts toward Teleport's own account lockout.
+MAX_FAILED_LOGINS = 3
 
 @dataclass
 class AuthToken:
@@ -26,6 +28,7 @@ class AuthToken:
     scope: str = SCOPE_SESSION
     ttl_minutes: int = 5
     used: bool = False
+    failures: int = 0
     expires_at: datetime = field(init=False)
 
     def __post_init__(self) -> None:
@@ -66,6 +69,17 @@ class TokenStore:
                 return False
             token.used = True
             return True
+
+    async def record_failure(self, tok: str) -> int:
+        """Count a failed login through ``tok``; the link dies after MAX_FAILED_LOGINS."""
+        async with self._lock:
+            token = self._tokens.get(tok)
+            if token is None:
+                return MAX_FAILED_LOGINS
+            token.failures += 1
+            if token.failures >= MAX_FAILED_LOGINS:
+                token.used = True
+            return token.failures
 
     async def peek(self, tok: str) -> bool:
         """Check a token's validity without consuming."""

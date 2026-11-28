@@ -9,7 +9,10 @@
   retried with exponential backoff. Rejected credentials stop automatic login
   (account-lock guard, see ``TeleportSessionManager``): a throttled Feishu
   alert then carries a one-time ``/teleport-auth`` link for a manual login,
-  which lifts the stop. Without credentials nothing is attempted.
+  which lifts the stop. Without credentials (or with ``auto_renew: false``) a
+  gateway that has ``teleport.proxy`` and a user set asks for a manual login the
+  same way whenever its session is missing or about to expire; with neither, as
+  in the CI smoke test, nothing is attempted.
 * Keepalive: idle pooled connections are probed every ``pool_keepalive_seconds``
   so that a query never pays the checkout probe (see ``PoolManager.keepalive``).
   A renewal needs no pool action: connections outlive the certificate that
@@ -103,8 +106,12 @@ class Maintenance:
 
     async def run_session(self) -> None:
         if not self.session.can_auto_login(self.cfg):
-            logger.info("teleport_auto_login_disabled",
-                        reason="no credentials or teleport.auto_renew is off")
+            if self._teleport_configured():
+                logger.info("teleport_manual_login_mode",
+                            reason="no credentials or teleport.auto_renew is off")
+                await self._run_manual()
+            else:
+                logger.info("teleport_session_disabled", reason="teleport.proxy or user not set")
             return
         backoff = self.retry_seconds
         while True:
@@ -124,6 +131,27 @@ class Maintenance:
                 else:            # stopped: wait for a manual login
                     delay = _BLOCKED_POLL_SECONDS
             await self._sleep(delay)
+
+    def _teleport_configured(self) -> bool:
+        tp = getattr(self.cfg, "teleport", None)
+        return all(isinstance(getattr(tp, name, None), str) and getattr(tp, name) for name in ("proxy", "user"))
+
+    async def _run_manual(self) -> None:
+        """No automatic login: ask for a manual one before the session runs out."""
+        while True:
+            snap = self.session.current()
+            if snap is None or snap.valid_until is None or snap.seconds_left() < self.renew_before:
+                await self._send_alert(
+                    "manual",
+                    "⚠️ db-gateway Teleport 需要人工登录",
+                    "没有配置自动登录（或 teleport.auto_renew 已关闭），会话"
+                    + ("不可用" if snap is None or not snap.usable() else "即将到期")
+                    + "。请用下面的一次性链接登录。",
+                    link=True,
+                )
+            else:
+                self._last_alert.pop("manual", None)
+            await self._sleep(_BLOCKED_POLL_SECONDS)
 
     # --- one step each ----------------------------------------------------------------
 
@@ -152,11 +180,15 @@ class Maintenance:
                 link=True,
             )
             return None
+        self._last_alert.pop("blocked", None)   # a manual login lifted it: alert a new stop at once
         snap = self.session.current()
         wait = self._next_look(snap)
         if wait is not None:
             return wait
-        await self.session.renew(self.cfg, reason="startup" if snap is None else "scheduled")
+        # Skipped inside if an on-demand or manual login renewed while this waited.
+        await self.session.renew_if_unchanged(
+            self.cfg, seen=snap, reason="startup" if snap is None else "scheduled",
+        )
         self._last_renewal = time.monotonic()
         self._last_alert.clear()       # healthy again: the next problem alerts at once
         return self._next_look(self.session.current()) or self.retry_seconds

@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -179,3 +180,40 @@ def test_failure_detail_is_html_escaped():
     from db_gateway.teleport_auth_web import render_result
 
     assert "<script>" not in render_result(ok=False, message="x", detail="<script>alert(1)</script>")
+
+
+async def test_a_second_submit_while_one_login_runs_is_not_sent_to_teleport(web_app):
+    app, client = web_app
+    tok = await _token(app, SCOPE_SESSION)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_renew(*args, **kwargs):
+        started.set()
+        await release.wait()
+
+    renew = AsyncMock(side_effect=slow_renew)
+    with patch("db_gateway.teleport_session.SESSION.renew", renew):
+        first = asyncio.ensure_future(client.post("/teleport-auth", data={"t": tok, "password": "pw", "otp": "1"}))
+        await asyncio.wait_for(started.wait(), 5)
+        try:
+            second = await asyncio.wait_for(
+                client.post("/teleport-auth", data={"t": tok, "password": "pw", "otp": "1"}), 5)
+            assert "正在进行" in await second.text()
+        finally:
+            release.set()
+        assert "认证成功" in await (await first).text()
+    assert renew.await_count == 1
+
+
+async def test_a_link_stops_working_after_three_failed_logins(web_app):
+    from db_gateway.teleport_session import LoginRejected
+
+    app, client = web_app
+    tok = await _token(app, SCOPE_SESSION)
+    renew = AsyncMock(side_effect=LoginRejected("密码或 OTP 错误：invalid credentials", "auth"))
+    with patch("db_gateway.teleport_session.SESSION.renew", renew):
+        for _ in range(3):
+            await client.post("/teleport-auth", data={"t": tok, "password": "pw", "otp": "000000"})
+        last = await client.post("/teleport-auth", data={"t": tok, "password": "pw", "otp": "000000"})
+    assert renew.await_count == 3
+    assert "Token 无效或已过期" in await last.text()

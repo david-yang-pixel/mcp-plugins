@@ -31,8 +31,10 @@ logger = get_logger(module="tsh_daemons")
 
 STOP_WAIT_SECONDS = 5.0
 OUTPUT_TAIL_LINES = 50
-# A rotated-out process keeps serving requests that started on it for this long.
-ROTATE_KILL_DELAY_SECONDS = 10.0
+# A rotated-out process keeps serving requests that started on it for this long:
+# longer than a whole tool call (teleport_tools.time_budget_seconds, 40) and
+# shorter than its session generation is kept (teleport.session_retain_seconds, 90).
+ROTATE_KILL_DELAY_SECONDS = 45.0
 ROTATE_BUDGET_SECONDS = 40.0
 
 # `tsh proxy aws` prints its (local, per-process) credentials as export lines.
@@ -94,6 +96,7 @@ class TshDaemon:
         self._stale = False
         self._lock: asyncio.Lock | None = None
         self._retiring: set[asyncio.Task] = set()
+        self._retired: list[_Running] = []          # rotated out, not killed yet
         # Successful starts so far: a change means connections made through the
         # previous process (e.g. a DB tunnel) are gone.
         self.starts = 0
@@ -149,6 +152,7 @@ class TshDaemon:
             logger.info("tsh_daemon_rotated", daemon=self.name, pid=self.pid,
                         old_pid=old.proc.pid if old else None)
             if old is not None:
+                self._retired.append(old)
                 task = asyncio.ensure_future(self._retire_later(old, ROTATE_KILL_DELAY_SECONDS))
                 self._retiring.add(task)
                 task.add_done_callback(self._retiring.discard)
@@ -235,9 +239,13 @@ class TshDaemon:
                 logger.warning("tsh_daemon_stop_timeout", daemon=self.name, pid=proc.pid)
 
     async def _retire_later(self, old: _Running, delay: float) -> None:
-        await asyncio.sleep(delay)
-        old.reader.cancel()
-        await self._kill(old.proc)
+        try:
+            await asyncio.sleep(delay)
+        finally:                     # also when stop() cancels the wait
+            if old in self._retired:
+                self._retired.remove(old)
+            old.reader.cancel()
+            await self._kill(old.proc)
 
     async def _stop_locked(self) -> None:
         running, self._running = self._running, None
@@ -247,8 +255,14 @@ class TshDaemon:
         await self._kill(running.proc)
 
     async def stop(self) -> None:
-        for task in list(self._retiring):
-            task.cancel()
+        retiring = list(self._retiring)
+        for task in retiring:
+            task.cancel()                # kills the rotated-out process now
+        await asyncio.gather(*retiring, return_exceptions=True)
+        while self._retired:             # a task cancelled before it ran never got to it
+            old = self._retired.pop()
+            old.reader.cancel()
+            await self._kill(old.proc)
         async with self._get_lock():
             await self._stop_locked()
 
@@ -256,11 +270,13 @@ class TshDaemon:
         """Synchronous kill + forget (tests: each test runs on its own event loop)."""
         for task in list(self._retiring):
             task.cancel()
-        if self._running is not None:
-            _killpg(self._running.proc.pid)
-            self._running.reader.cancel()
+        for running in [*self._retired, self._running]:
+            if running is not None:
+                _killpg(running.proc.pid)
+                running.reader.cancel()
         self._running = self._lock = None
         self._retiring = set()
+        self._retired = []
         self._stale = False
 
 

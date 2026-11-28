@@ -212,6 +212,7 @@ def create_db_gateway_app(cfg: Any | None = None) -> web.Application:
     app.on_cleanup.append(_stop_maintenance)   # before the pools it maintains
     app.on_cleanup.append(_close_pg_pools)
     app.on_cleanup.append(_stop_tsh_daemons)
+    app.on_cleanup.append(_stop_teleport_session)
     return app
 
 
@@ -262,6 +263,13 @@ async def _close_pg_pools(_app: web.Application) -> None:
 async def _stop_tsh_daemons(_app: web.Application) -> None:
     """Kill the long-running tsh processes (AWS proxy, db-gateway's tunnels)."""
     await stop_tsh_daemons()
+
+
+async def _stop_teleport_session(_app: web.Application) -> None:
+    """Cancel the session manager's background tasks (old-generation cleanup, listeners)."""
+    from db_gateway.teleport_session import SESSION
+
+    await SESSION.shutdown()
 
 
 def run_db_gateway_app() -> None:
