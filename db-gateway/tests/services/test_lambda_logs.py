@@ -1,7 +1,6 @@
 """plugin_lambda_logs: CloudWatch logs of SaaS plugin Lambdas through `tsh proxy aws` + botocore."""
 import asyncio
 import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -10,9 +9,9 @@ from botocore.exceptions import ClientError, ProxyConnectionError
 
 from db_gateway.lambda_logs import execute_plugin_lambda_logs, parse_time_ms
 from db_gateway.postgres import TeleportAuthExpired
-from db_gateway.teleport import TshStatus
 from db_gateway.teleport_cli import TshTimeout
 from db_gateway.tsh_daemons import TshDaemonError
+from tsh_helpers import install_session
 
 EV = {"timestamp": 1795775460000, "logStreamName": "s", "eventId": "1", "message": "m",
       "ingestionTime": 1795775460100}
@@ -196,10 +195,8 @@ async def test_daemon_error_without_session_is_expired(cfg, logs):
     assert out["code"] == "TELEPORT_EXPIRED"
 
 
-async def test_daemon_error_with_session_is_not_authorized(cfg, logs, monkeypatch):
-    status = TshStatus(user="u", cluster="c", roles=["production-read-all"],
-                       valid_until=datetime.now(timezone.utc), remaining=timedelta(hours=1))
-    monkeypatch.setattr("db_gateway.teleport_cli.get_tsh_status", AsyncMock(return_value=status))
+async def test_daemon_error_with_session_is_not_authorized(cfg, logs):
+    install_session(cfg)                         # logged in: the app or role is missing
     logs.get_error = TshDaemonError('aws_proxy 启动失败（退出码 1）：ERROR: app "x" not found')
     out = await execute_plugin_lambda_logs(cfg=cfg, function_name="f", since_minutes=5)
     assert out["code"] == "NOT_AUTHORIZED" and "production-read-all" in out["error"]
@@ -228,6 +225,30 @@ async def test_resolve_by_tenant_and_plugin(cfg, logs, monkeypatch):
     assert out["plugin_unique_identifier"] == "langgenius/openai:1.2.1@abc"
     assert q.call_args.kwargs["params"] == ("6f1d2c3e-0000-4000-8000-000000000001", "langgenius/openai")
     assert any("安装表反映当前状态" in w for w in out["warnings"])
+
+
+async def test_resolve_uses_the_plugin_tunnel_db_gateway_runs(cfg, logs, monkeypatch):
+    """Step 2 switches plugin to a self-managed tunnel: the lookup must follow it."""
+    q = AsyncMock(return_value=[["p:1@c", "serverless", "fn--3", "https://x.lambda-url.us-east-1.on.aws/"]])
+    monkeypatch.setattr("db_gateway.lambda_logs.run_metadata_query", q)
+    prepare = AsyncMock(return_value=(56073, None))
+    monkeypatch.setattr("db_gateway.lambda_logs._prepare_database", prepare)
+    logs.push(page([EV]))
+    out = await execute_plugin_lambda_logs(cfg=cfg, tenant_id="6f1d2c3e-0000-4000-8000-000000000001",
+                                           plugin_id="a/b", since_minutes=10)
+    assert out["function_name"] == "fn--3"
+    assert prepare.await_args.args[1] == "plugin"
+    assert q.call_args.kwargs["port"] == 56073 and q.call_args.kwargs["database"] == "dify_plugin_daemon"
+
+
+async def test_resolve_reports_a_plugin_tunnel_failure(cfg, logs, monkeypatch):
+    q = AsyncMock()
+    monkeypatch.setattr("db_gateway.lambda_logs.run_metadata_query", q)
+    monkeypatch.setattr("db_gateway.lambda_logs._prepare_database",
+                        AsyncMock(return_value=(None, ("TELEPORT_EXPIRED", "Teleport 会话不可用"))))
+    out = await execute_plugin_lambda_logs(cfg=cfg, tenant_id="6f1d2c3e-0000-4000-8000-000000000001",
+                                           plugin_id="a/b", since_minutes=10)
+    assert out["code"] == "TELEPORT_EXPIRED" and q.await_count == 0 and logs.calls == []
 
 
 @pytest.mark.parametrize("rows,needle", [
@@ -294,12 +315,10 @@ async def test_audit_has_no_log_content(cfg, logs):
     assert '"tool": "plugin_lambda_logs"' in text and "SECRET-PAYLOAD" not in text
 
 
-async def test_daemon_timeout_with_session_is_tsh_timeout(cfg, logs, monkeypatch):
+async def test_daemon_timeout_with_session_is_tsh_timeout(cfg, logs):
     from db_gateway.tsh_daemons import TshDaemonTimeout
 
-    status = TshStatus(user="u", cluster="c", roles=["support-lambda-logs"],
-                       valid_until=datetime.now(timezone.utc), remaining=timedelta(hours=1))
-    monkeypatch.setattr("db_gateway.teleport_cli.get_tsh_status", AsyncMock(return_value=status))
+    install_session(cfg)
     logs.get_error = TshDaemonTimeout("aws_proxy 在 15s 内没有就绪：")
     out = await execute_plugin_lambda_logs(cfg=cfg, function_name="f", since_minutes=5)
     assert out["code"] == "TSH_TIMEOUT"

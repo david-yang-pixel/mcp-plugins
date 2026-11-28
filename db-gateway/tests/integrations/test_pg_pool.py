@@ -594,7 +594,6 @@ async def test_schema_lookup_shows_workflow_runs_columns_and_indexes(workflow_db
     cfg.postgres.db_prod = workflow_db["database"]
     cfg.postgres.port_prod = workflow_db["port"]
     cfg.postgres.driver = "pool" if use_pool else "psql"
-    cfg.postgres.pool_watch_teleport_keys = False
 
     data = await execute_schema_lookup(cfg=cfg, database="prod", tables=["workflow_runs", "missing_one"])
 
@@ -621,7 +620,6 @@ async def test_timeout_error_lists_indexes_from_the_database(workflow_db, manage
     cfg.postgres.db_prod = workflow_db["database"]
     cfg.postgres.port_prod = workflow_db["port"]
     cfg.postgres.driver = "pool"
-    cfg.postgres.pool_watch_teleport_keys = False
     cfg.postgres.query_timeout_seconds = 1
     cfg.postgres.count_timeout_seconds = 0
 
@@ -788,7 +786,6 @@ async def test_schema_lookup_is_one_round_trip(slow_link, workflow_db, manager, 
     cfg.postgres.db_prod = slow_link["database"]
     cfg.postgres.port_prod = slow_link["port"]
     cfg.postgres.driver = "pool"
-    cfg.postgres.pool_watch_teleport_keys = False
 
     await execute_schema_lookup(cfg=cfg, database="prod", tables=["workflow_runs"])  # opens the connection
     elapsed, data = await _elapsed(execute_schema_lookup(cfg=cfg, database="prod", tables=["workflow_runs"]))

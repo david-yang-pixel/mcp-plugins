@@ -70,19 +70,33 @@ def parse_tsh_status(output: str) -> Optional[TshStatus]:
     )
 
 
+_PROXY_VARS = ("http_proxy", "https_proxy", "all_proxy")
+
+
 async def get_tsh_status(
-    *, proxy: str, user: str, auth_home: str,
+    *, auth_home: str, proxy: str = "", user: str = "", tsh_path: str = "tsh",
+    timeout: float = 10.0,
 ) -> Optional[TshStatus]:
-    """Run `tsh status` subprocess, parse output."""
-    env = dict(os.environ)
+    """Run `tsh status` against ``auth_home`` and parse it; None when not logged in.
+
+    ``proxy`` / ``user`` are accepted for the legacy callers and unused.
+    """
+    env = {k: v for k, v in os.environ.items() if k.lower() not in _PROXY_VARS}
     env["TELEPORT_HOME"] = auth_home
+    env["TELEPORT_TOOLS_VERSION"] = "off"
     proc = await asyncio.create_subprocess_exec(
-        "tsh", "status",
+        tsh_path, "status",
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
     )
-    stdout, _stderr = await proc.communicate()
+    try:
+        stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return None
     if proc.returncode != 0:
         return None
     return parse_tsh_status(stdout.decode("utf-8", errors="replace"))

@@ -1,10 +1,15 @@
-"""Long-running tsh processes managed by db-gateway (aws proxy, db tunnel).
+"""Long-running tsh processes managed by db-gateway (DB tunnels, AWS proxy).
 
-Each daemon runs ``tsh <args>`` against the shadow TELEPORT_HOME (see
-teleport_cli), in its own process group. It is started lazily, reused while
-the shadow certificate stays the same, and restarted after a renewal, after it
-exits, or after a caller marked it stale. Its output is drained in the
-background so the process never blocks on a full pipe.
+Each daemon runs ``tsh <args>`` in its own process group with
+``TELEPORT_HOME=<sessions_dir>/current/home`` (teleport_session.py). It is started
+lazily once a session exists, restarted when it exits or a caller marks it stale,
+and its output is drained in the background so it never blocks on a full pipe.
+
+DB tunnels are not touched on renewal: a running `tsh proxy db --tunnel` reads
+the new certificate through the switched ``current`` symlink (measured on the
+server). The AWS proxy is rotated instead: a new process (new local port and
+credentials) starts first, callers move to it, and the old one is killed a few
+seconds later so requests already on it can finish.
 """
 from __future__ import annotations
 
@@ -15,21 +20,22 @@ import re
 import signal
 import time
 import weakref
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from db_gateway.log import get_logger
-from db_gateway.teleport_cli import (
-    TshTimeout,
-    _tsh_env,
-    ensure_shadow_home,
-    source_signature,
-    strip_ansi,
-)
+from db_gateway.teleport_cli import TshTimeout, _tsh_env, strip_ansi
+from db_gateway.teleport_session import SESSION, SessionSnapshot
 
 logger = get_logger(module="tsh_daemons")
 
 STOP_WAIT_SECONDS = 5.0
 OUTPUT_TAIL_LINES = 50
+# A rotated-out process keeps serving requests that started on it for this long:
+# longer than a whole tool call (teleport_tools.time_budget_seconds, 40) and
+# shorter than its session generation is kept (teleport.session_retain_seconds, 90).
+ROTATE_KILL_DELAY_SECONDS = 45.0
+ROTATE_BUDGET_SECONDS = 40.0
 
 # `tsh proxy aws` prints its (local, per-process) credentials as export lines.
 # Never keep them in the output tail, logs or error messages.
@@ -41,6 +47,7 @@ _SECRET_EXPORT_RE = re.compile(
 
 def redact(line: str) -> str:
     return _SECRET_EXPORT_RE.sub(r"\1<redacted>", line)
+
 
 _DAEMONS: "weakref.WeakSet[TshDaemon]" = weakref.WeakSet()
 
@@ -60,6 +67,14 @@ def _killpg(pid: int) -> None:
         pass
 
 
+@dataclass
+class _Running:
+    proc: asyncio.subprocess.Process
+    reader: asyncio.Task
+    info: dict[str, str]
+    output: "collections.deque[str]"
+
+
 class TshDaemon:
     def __init__(
         self,
@@ -69,68 +84,95 @@ class TshDaemon:
         parse: Callable[[list[str]], dict[str, str] | None],
         before_start: Callable[[Any, float], Awaitable[None]] | None = None,
         start_timeout: float = 15.0,
+        rotate_on_renew: bool = False,
     ) -> None:
         self.name = name
         self._args = args
         self._parse = parse
         self._before_start = before_start
         self._start_timeout = start_timeout
-        self._proc: asyncio.subprocess.Process | None = None
-        self._reader: asyncio.Task | None = None
-        self._info: dict[str, str] | None = None
-        self._sig: list[list[str]] | None = None
+        self.rotate_on_renew = rotate_on_renew
+        self._running: _Running | None = None
         self._stale = False
         self._lock: asyncio.Lock | None = None
+        self._retiring: set[asyncio.Task] = set()
+        self._retired: list[_Running] = []          # rotated out, not killed yet
         # Successful starts so far: a change means connections made through the
-        # previous process (e.g. the KnowledgeFS tunnel) are gone.
+        # previous process (e.g. a DB tunnel) are gone.
         self.starts = 0
         self.output: collections.deque[str] = collections.deque(maxlen=OUTPUT_TAIL_LINES)
         _DAEMONS.add(self)
 
     @property
     def pid(self) -> int | None:
-        return self._proc.pid if self._proc is not None else None
+        return self._running.proc.pid if self._running is not None else None
 
     def _alive(self) -> bool:
-        return self._proc is not None and self._proc.returncode is None
+        return self._running is not None and self._running.proc.returncode is None
 
     def mark_stale(self) -> None:
         """Force a restart on the next ``ensure`` (e.g. the proxy rejected a request)."""
         self._stale = True
 
-    async def ensure(self, cfg: Any, deadline: float) -> dict[str, str]:
-        """Return the parsed ready output of a running daemon, starting it if needed."""
+    def _get_lock(self) -> asyncio.Lock:
         if self._lock is None:
             self._lock = asyncio.Lock()
-        async with self._lock:
-            shadow = await ensure_shadow_home(cfg)
-            sig = source_signature(shadow)
-            if self._alive() and not self._stale and self._info is not None and self._sig == sig:
-                return dict(self._info)
+        return self._lock
+
+    async def ensure(self, cfg: Any, deadline: float) -> dict[str, str]:
+        """Return the parsed ready output of a running daemon, starting it if needed."""
+        async with self._get_lock():
+            if self._alive() and not self._stale and self._running is not None:
+                return dict(self._running.info)
+            await SESSION.ensure_session(cfg, deadline)   # TeleportAuthExpired without a login
             await self._stop_locked()
             if time.monotonic() >= deadline:
                 raise TshTimeout(f"{self.name} 启动前时间预算已用完，稍后重试")
             if self._before_start is not None:
                 await self._before_start(cfg, deadline)
-            self._info = await self._start(cfg, deadline)
-            self._sig = sig
+            self._install(await self._spawn(cfg, deadline))
             self._stale = False
-            self.starts += 1
             logger.info("tsh_daemon_started", daemon=self.name, pid=self.pid)
-            return dict(self._info)
+            return dict(self._running.info)
 
-    async def _start(self, cfg: Any, deadline: float) -> dict[str, str]:
+    async def rotate(self, cfg: Any, deadline: float) -> None:
+        """Replace a running process with a fresh one; the old one is killed later.
+
+        Does nothing when the daemon is not running (it stays lazy). If the new
+        process fails to start, the running one is kept and the error is raised.
+        """
+        async with self._get_lock():
+            if not self._alive():
+                return
+            if self._before_start is not None:
+                await self._before_start(cfg, deadline)
+            new = await self._spawn(cfg, deadline)
+            old = self._running
+            self._install(new)
+            logger.info("tsh_daemon_rotated", daemon=self.name, pid=self.pid,
+                        old_pid=old.proc.pid if old else None)
+            if old is not None:
+                self._retired.append(old)
+                task = asyncio.ensure_future(self._retire_later(old, ROTATE_KILL_DELAY_SECONDS))
+                self._retiring.add(task)
+                task.add_done_callback(self._retiring.discard)
+
+    def _install(self, running: _Running) -> None:
+        self._running = running
+        self.output = running.output
+        self.starts += 1
+
+    async def _spawn(self, cfg: Any, deadline: float) -> _Running:
         timeout = max(0.1, min(self._start_timeout, deadline - time.monotonic()))
         proc = await asyncio.create_subprocess_exec(
-            cfg.teleport_tools.tsh_path, *self._args(cfg),
+            cfg.teleport.tsh_path, *self._args(cfg),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             env=_tsh_env(cfg),
             start_new_session=True,
         )
-        self._proc = proc
-        self.output.clear()
+        output: collections.deque[str] = collections.deque(maxlen=OUTPUT_TAIL_LINES)
         lines: list[str] = []      # raw, for parse() only
         shown: list[str] = []      # redacted, for messages
         assert proc.stdout is not None
@@ -142,7 +184,7 @@ class TshDaemon:
                     return None
                 lines.append(line)
                 shown.append(redact(line))
-                self.output.append(shown[-1])
+                output.append(shown[-1])
                 info = self._parse(lines)
                 if info is not None:
                     return info
@@ -152,17 +194,20 @@ class TshDaemon:
             info = await asyncio.wait_for(wait_ready(), timeout=timeout)
         except asyncio.TimeoutError:
             info, timed_out = None, True
+        except BaseException:
+            await self._kill(proc)
+            raise
         if info is not None and proc.returncode is not None:
             info = None   # matched, but the process is already gone: not a running daemon
         if info is None:
             tail = "\n".join(shown).strip()[-600:]
             rc = proc.returncode
-            await self._stop_locked()
+            await self._kill(proc)
             if timed_out:
                 raise TshDaemonTimeout(f"{self.name} 在 {timeout:.0f}s 内没有就绪：{tail}")
             raise TshDaemonError(f"{self.name} 启动失败（退出码 {rc}）：{tail}")
-        self._reader = asyncio.create_task(self._drain(proc))
-        return info
+        reader = asyncio.create_task(self._drain(proc, output))
+        return _Running(proc=proc, reader=reader, info=info, output=output)
 
     @staticmethod
     async def _readline(stream: asyncio.StreamReader) -> str | None:
@@ -174,24 +219,18 @@ class TshDaemon:
             return None
         return strip_ansi(raw.decode("utf-8", errors="replace")).rstrip("\r\n")
 
-    async def _drain(self, proc: asyncio.subprocess.Process) -> None:
+    async def _drain(self, proc: asyncio.subprocess.Process, output: "collections.deque[str]") -> None:
         assert proc.stdout is not None
         while True:
             line = await self._readline(proc.stdout)
             if line is None:
                 break
-            self.output.append(redact(line))
+            output.append(redact(line))
         rc = await proc.wait()
-        logger.warning("tsh_daemon_exited", daemon=self.name, exit_code=rc,
-                       tail=" | ".join(list(self.output)[-5:])[-400:])
+        logger.warning("tsh_daemon_exited", daemon=self.name, pid=proc.pid, exit_code=rc,
+                       tail=" | ".join(list(output)[-5:])[-400:])
 
-    async def _stop_locked(self) -> None:
-        proc, reader = self._proc, self._reader
-        self._proc, self._reader, self._info = None, None, None
-        if reader is not None:
-            reader.cancel()
-        if proc is None:
-            return
+    async def _kill(self, proc: asyncio.subprocess.Process) -> None:
         _killpg(proc.pid)   # also after a normal exit: orphans left in the group
         if proc.returncode is None:
             try:
@@ -199,20 +238,45 @@ class TshDaemon:
             except asyncio.TimeoutError:
                 logger.warning("tsh_daemon_stop_timeout", daemon=self.name, pid=proc.pid)
 
-    async def stop(self) -> None:
-        if self._lock is None:
-            await self._stop_locked()
+    async def _retire_later(self, old: _Running, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+        finally:                     # also when stop() cancels the wait
+            if old in self._retired:
+                self._retired.remove(old)
+            old.reader.cancel()
+            await self._kill(old.proc)
+
+    async def _stop_locked(self) -> None:
+        running, self._running = self._running, None
+        if running is None:
             return
-        async with self._lock:
+        running.reader.cancel()
+        await self._kill(running.proc)
+
+    async def stop(self) -> None:
+        retiring = list(self._retiring)
+        for task in retiring:
+            task.cancel()                # kills the rotated-out process now
+        await asyncio.gather(*retiring, return_exceptions=True)
+        while self._retired:             # a task cancelled before it ran never got to it
+            old = self._retired.pop()
+            old.reader.cancel()
+            await self._kill(old.proc)
+        async with self._get_lock():
             await self._stop_locked()
 
     def _reset(self) -> None:
         """Synchronous kill + forget (tests: each test runs on its own event loop)."""
-        if self._proc is not None:
-            _killpg(self._proc.pid)
-        if self._reader is not None:
-            self._reader.cancel()
-        self._proc = self._reader = self._info = self._sig = self._lock = None
+        for task in list(self._retiring):
+            task.cancel()
+        for running in [*self._retired, self._running]:
+            if running is not None:
+                _killpg(running.proc.pid)
+                running.reader.cancel()
+        self._running = self._lock = None
+        self._retiring = set()
+        self._retired = []
         self._stale = False
 
 
@@ -222,21 +286,23 @@ async def stop_all() -> None:
         await daemon.stop()
 
 
-async def refresh_running(cfg: Any, deadline: float) -> None:
-    """After a Teleport renewal: restart the running daemons now (background).
-
-    ``ensure`` restarts a daemon whose shadow certificate changed, so the next
-    tool call finds it ready instead of paying the restart. Daemons that are
-    not running stay lazy; a failed restart is logged and left to that call.
-    """
+async def rotate_running(cfg: Any, deadline: float) -> None:
+    """After a renewal: rotate the running daemons that need it (AWS proxy)."""
     for daemon in list(_DAEMONS):
-        if not daemon._alive():
+        if not (daemon.rotate_on_renew and daemon._alive()):
             continue
         try:
-            await daemon.ensure(cfg, deadline)
+            await daemon.rotate(cfg, deadline)
         except Exception as e:  # noqa: BLE001 - background work must not raise
-            logger.warning("tsh_daemon_refresh_failed", daemon=daemon.name,
+            logger.warning("tsh_daemon_rotate_failed", daemon=daemon.name,
                            error=redact(f"{type(e).__name__}: {e}")[:300])
+
+
+async def _on_session_renewed(cfg: Any, _snapshot: SessionSnapshot) -> None:
+    await rotate_running(cfg, time.monotonic() + ROTATE_BUDGET_SECONDS)
+
+
+SESSION.add_listener(_on_session_renewed)
 
 
 def _reset_state() -> None:
@@ -244,7 +310,7 @@ def _reset_state() -> None:
         daemon._reset()
 
 
-# --- KnowledgeFS production tunnel -------------------------------------------------
+# --- self-managed DB tunnels ---------------------------------------------------------
 
 # Anchored on tsh's success line: a bare "127.0.0.1:<port>" also appears in
 # "ERROR: listen tcp 127.0.0.1:56064: bind: address already in use".
@@ -259,28 +325,74 @@ def _parse_tunnel(lines: list[str]) -> dict[str, str] | None:
     return None
 
 
-def _knowledgefs_args(cfg: Any) -> list[str]:
+@dataclass(frozen=True)
+class TunnelSpec:
+    key: str
+    teleport_db: str
+    db_name: str
+    port: int
+
+
+def tunnel_spec(cfg: Any, database_key: str) -> TunnelSpec | None:
+    """The tunnel db-gateway runs for ``database_key``, or None (a host tunnel / static port)."""
+    pg = cfg.postgres
+    if database_key == "knowledgefs":
+        kfs = getattr(getattr(cfg, "teleport_tools", None), "knowledgefs", None)
+        teleport_db = getattr(kfs, "teleport_db", "")
+        if getattr(kfs, "enabled", False) is not True or not (isinstance(teleport_db, str) and teleport_db):
+            return None
+        return TunnelSpec("knowledgefs", teleport_db, pg.db_knowledgefs, int(pg.port_knowledgefs))
+    if database_key in ("prod", "billing", "plugin"):
+        teleport_db = getattr(pg, f"teleport_db_{database_key}", "")
+        if not (isinstance(teleport_db, str) and teleport_db):
+            return None
+        return TunnelSpec(
+            database_key, teleport_db, getattr(pg, f"db_{database_key}"),
+            int(getattr(pg, f"tunnel_port_{database_key}")),
+        )
+    return None
+
+
+def _tunnel_args(cfg: Any, database_key: str) -> list[str]:
+    spec = tunnel_spec(cfg, database_key)
+    if spec is None:
+        raise TshDaemonError(f"{database_key} 没有配置由 db-gateway 管理的隧道")
     # Same user as the query/metadata connections (Teleport's Postgres engine takes the
     # user from the client's startup message, so a tunnel-only override would not apply).
     return [
-        "proxy", "db", "--tunnel",
-        "--port", str(cfg.postgres.port_knowledgefs),
-        "--db-user", cfg.postgres.user,
-        "--db-name", cfg.postgres.db_knowledgefs,
-        cfg.teleport_tools.knowledgefs.teleport_db,
+        "proxy", "db", "--tunnel", "--port", str(spec.port),
+        "--db-user", cfg.postgres.user, "--db-name", spec.db_name, spec.teleport_db,
     ]
 
 
-KNOWLEDGEFS_TUNNEL = TshDaemon("knowledgefs_tunnel", args=_knowledgefs_args, parse=_parse_tunnel)
+_TUNNELS: dict[str, TshDaemon] = {}
 
 
-async def ensure_knowledgefs_tunnel(cfg: Any, deadline: float) -> dict[str, str]:
-    """Make sure the local tunnel to knowledge-fs-production-readonly is listening."""
-    info = await KNOWLEDGEFS_TUNNEL.ensure(cfg, deadline)
-    expected = str(cfg.postgres.port_knowledgefs)
-    if info.get("port") != expected:
-        await KNOWLEDGEFS_TUNNEL.stop()
-        raise TshDaemonError(
-            f"knowledgefs_tunnel 监听在 127.0.0.1:{info.get('port')}，不是配置的 {expected}"
+def tunnel_daemon(database_key: str) -> TshDaemon:
+    daemon = _TUNNELS.get(database_key)
+    if daemon is None:
+        daemon = TshDaemon(
+            f"{database_key}_tunnel",
+            args=lambda cfg, key=database_key: _tunnel_args(cfg, key),
+            parse=_parse_tunnel,
         )
-    return info
+        _TUNNELS[database_key] = daemon
+    return daemon
+
+
+async def ensure_tunnel(cfg: Any, database_key: str, deadline: float) -> int:
+    """Make sure db-gateway's tunnel for ``database_key`` listens; returns its port."""
+    spec = tunnel_spec(cfg, database_key)
+    if spec is None:
+        raise TshDaemonError(f"{database_key} 没有配置由 db-gateway 管理的隧道")
+    daemon = tunnel_daemon(database_key)
+    info = await daemon.ensure(cfg, deadline)
+    if info.get("port") != str(spec.port):
+        await daemon.stop()
+        raise TshDaemonError(
+            f"{daemon.name} 监听在 127.0.0.1:{info.get('port')}，不是配置的 {spec.port}"
+        )
+    return spec.port
+
+
+KNOWLEDGEFS_TUNNEL = tunnel_daemon("knowledgefs")

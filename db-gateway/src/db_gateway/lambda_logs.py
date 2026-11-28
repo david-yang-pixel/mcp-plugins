@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from db_gateway.core import _audit_path, _db_target, _metadata_kwargs, _query_limiter
+from db_gateway.core import _audit_path, _db_name, _metadata_kwargs, _prepare_database, _query_limiter
 from db_gateway.log import get_logger
 from db_gateway.pg_pool import run_metadata_query
 from db_gateway.postgres import TeleportAuthExpired, audit_log
@@ -283,8 +283,12 @@ async def execute_plugin_lambda_logs(
         plugin_unique_identifier = None
         if not has_fn:
             audit.update(tenant_id=tenant_id, plugin_id=plugin_id)
-            db_name, db_port = _db_target(cfg, "plugin")
-            kwargs = _metadata_kwargs(cfg, db_name=db_name, db_port=db_port)
+            # Same port db_gateway_query uses: the host tunnel, or db-gateway's own
+            # plugin tunnel once teleport_db_plugin is set.
+            db_port, prepare_error = await _prepare_database(cfg, "plugin")
+            if prepare_error:
+                return fail(*prepare_error)
+            kwargs = _metadata_kwargs(cfg, db_name=_db_name(cfg, "plugin"), db_port=db_port)
             max_queries = max(1, int(getattr(cfg.postgres, "max_concurrent_queries", 3) or 3))
 
             async def resolve() -> list[list[Any]]:

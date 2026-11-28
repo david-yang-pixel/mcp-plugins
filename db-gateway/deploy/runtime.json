@@ -2,8 +2,6 @@
   "environment": {
     "DB_GATEWAY_LISTEN_HOST": "127.0.0.1",
     "DB_GATEWAY_LISTEN_PORT": "18081",
-    "HOST_TSH_GID": "0",
-    "HOST_TSH_UID": "0",
     "TELEPORT_PUBLIC_BASE_URL": "https://zendesk.smlershou.top"
   },
   "secrets": {

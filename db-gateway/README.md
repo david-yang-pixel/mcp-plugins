@@ -79,9 +79,9 @@ SQL 先按原规则通过只读校验（调用方自己写 `EXPLAIN ...` 仍会�
 - `psql`（默认）：每次查询启动一个 psql 进程并新建连接。经 `tsh proxy db --tunnel` 建连（TLS 到 Teleport、DB agent、Postgres 认证）约需 2 秒，`timing_ms.connect_and_overhead_ms` 主要就是这部分。
 - `pool`：进程内用 psycopg 连接池为每个库（prod、billing、plugin）保持连接，平时一次查询只需自身的往返。执行方式与 psql 路径一致。默认（不计数）每页只有一个往返：`BEGIN READ ONLY; SET LOCAL statement_timeout; DECLARE; [MOVE offset;] FETCH; SELECT pg_advisory_unlock_all(); ROLLBACK` 作为一个批次发出，任一语句出错时后面的语句不会执行，由网关补发回滚和解锁。传 `count_total=true` 时为两个往返：第一个到 `FETCH` 为止；第二个是 `[SET LOCAL statement_timeout; MOVE ALL;] SELECT pg_advisory_unlock_all(); ROLLBACK`，只有页面取满时才执行计数。每个批次是一条简单查询消息，结束后一律回滚。值按 PostgreSQL 文本输出返回，csv/json 结果与 psql 路径逐字一致。`column_types` 用 `format_type()` 解析并缓存；不计数时这条网关内置的类型查询在回滚之后执行（只在类型首次出现时多一次往返）。连接池的连接不使用服务端预备语句（`prepare_threshold=None`），出错后不会残留失效的预备语句缓存。
 
-pool 模式与 Teleport 续签的配合：
-- 证书由 `tsh-auth-watchdog` 自动续签（约每 35 分钟）：`tsh logout --all` 后用密码和 TOTP 重新 `tsh login`。连接池不接触证书，只连接本机隧道端口；续签后经隧道的已有连接可能断开，也可能继续可用，网关不依赖任何一种情况。
-- 后台维护任务（`maintenance.py`，随网关启动）每 `pool_maintenance_interval_seconds`（10）秒检查一次用户证书 `keys/*/*.crt` 的内容（`pool_watch_teleport_keys`）。隧道自己写入的数据库证书不算续签；续签窗口里证书暂时消失时等新证书出现再处理。检测到续签后：先逐条验证连接池里的空闲连接；再重启正在运行的 tsh 常驻进程（KnowledgeFS 隧道、AWS 代理），重启会打断经过它们的进行中请求，这是为了让下一次调用不必等重启；然后再验证一遍连接。之后 90 秒内每次检查都验证全部空闲连接，以覆盖宿主机上的隧道晚一步重启的情况。失效的连接在后台换新，连接池不会因为续签被清空。KnowledgeFS 隧道若在某次请求中被重启（进程退出、被标记失效，或请求比后台任务先发现续签），该端口的连接池会被清空。
+pool 模式与 Teleport 续期的配合：
+- 连接池不接触证书，只连接本机隧道端口。已建立的连接不受证书续期或过期影响（实测空闲 75 分钟、跨多次续期仍可用）；隧道本身断开时由下面的重试规则处理。
+- db-gateway 自己的会话续期（见“Teleport 会话”）不需要连接池做任何事：自管隧道跟随 `current` 软链使用新证书，不重启；宿主机 `tsh-proxy-*` 隧道由宿主机 watchdog 续期，与网关无关。
 - 后台保活：每 `pool_keepalive_seconds`（30）秒逐条探测一段时间没用过的空闲连接（空查询，超时 `pool_probe_timeout_seconds` 即 5 秒，超时直接关闭连接而不是等服务端取消）。探测成功即记为已验证，查询取连接时不再探测。保活每次只取一条、只在有空闲连接时取，取连接时不触发取连接探测，一般不会让连接池变大（查询恰好在探测期间到来时，连接池可能多建一条，空闲 240 秒后回收）。`pool_min_size=0` 的连接池不做保活，以免妨碍它缩到 0。要让“保活正常运行时取连接不探测”成立，`pool_check_idle_seconds` 需大于 2 × `pool_keepalive_seconds` − `pool_maintenance_interval_seconds`，并留些余量（默认 60 > 2 × 30 − 10 = 50）：保活只探测超过 keepalive − interval 秒没用过的连接，一条连接最长约 2 × keepalive − interval 秒不被验证。
 - 从池里复用的连接在取出后 2 秒内出现连接级错误（连接在空闲时已被断开）：立即换新连接重试一次，不清空连接池；`timing_ms.pool_reconnects` 为 1。新建的连接出错不做立即重试（多半是语句或服务端把连接弄断了）。立即重试取连接时一律先探测（池里其他同时断开的连接会被丢弃，必要时新建），最多等 5 秒；在这条已验证或新建的连接上仍因连接断开失败时，核心的重试循环不再执行第三次，一条会弄断自身连接的语句每个请求最多执行两次。
 - 其他连接级错误（隧道拒绝连接、`pool_acquire_timeout_seconds` 内拿不到连接、重试仍失败等）：清空该库的连接池并返回 `TELEPORT_EXPIRED`。核心的重试循环会间隔 `pool_retry_delay_seconds`（默认 1.5 秒，覆盖隧道重启时间）用新连接重试 `teleport_retry_attempts` 次。
@@ -111,9 +111,9 @@ pool 模式与 Teleport 续签的配合：
 | --- | --- | --- |
 | `postgres.max_rows` | 1000 | 单页上限。 |
 | `postgres.query_timeout_seconds` | 30 | 主查询 `statement_timeout`。客户端总超时为该值，`count_total=true` 时再加 `count_timeout_seconds`（pool 模式另加 15 秒余量）。 |
-| `postgres.pool_keepalive_seconds` | 30 | 后台保活间隔，`0` 关闭（关闭后取连接时按 `pool_check_idle_seconds` 探测；续签后的验证不受影响）。 |
+| `postgres.pool_keepalive_seconds` | 30 | 后台保活间隔，`0` 关闭（关闭后取连接时按 `pool_check_idle_seconds` 探测）。 |
 | `postgres.pool_probe_timeout_seconds` | 5 | 存活探测超时（最小 1 秒），超时的连接直接关闭。 |
-| `postgres.pool_maintenance_interval_seconds` | 10 | 后台维护任务的检查间隔（续签检测，最小 1 秒）。 |
+| `postgres.pool_maintenance_interval_seconds` | 10 | 保活任务的检查间隔（最小 1 秒）。 |
 | `postgres.count_timeout_seconds` | 5 | `count_total=true` 时的计数预算；设为 `0` 时关闭计数，`count_total` 不生效并给出 warning（仍会通过 `has_more` 判断是否有下一页）。 |
 | `db_gateway.audit_log_dir` | 空 | 审计日志目录，文件名固定为 `db_gateway_audit.log`，目录不存在时自动创建；相对路径相对 `config.yaml` 所在目录。为空时使用 `<resources.base_dir>/<resources.state_dir>/logs`。生产配置为 `/var/lib/mcp/logs`（挂载 `@data/logs`，持久化）。 |
 
@@ -136,29 +136,95 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
 
 所有工具都在 `tools/list` 中声明 `annotations.readOnlyHint: true`、`destructiveHint: false`。OpenConnector 等客户端据此判断读写，未声明时新工具会被当作 write 并要求确认。
 
+## Teleport 会话（db-gateway 自管）
+
+db-gateway 用镜像自带的 tsh 18.11.0（`teleport.tsh_path`，`/opt/teleport/bin/tsh`）自己登录 Teleport，不读写宿主机的 `.tsh`，也不再复制影子目录。容器里只有这一个 tsh 在用这个会话。
+
+- **会话目录**：`teleport.sessions_dir`（`/tmp/db-gateway/tsh-sessions`）下每次续期新建 `gen-<N>/`，里面依次完成：
+  1. `tsh login`（密码 + 由 `TELEPORT_TOTP_SECRET` 生成的 TOTP，pexpect 输入，输出里的密码和验证码会被打码）；
+  2. `tsh kube login --all`，kubeconfig 写在 `gen-<N>/kubeconfig`；
+  3. `tsh apps login --aws-role …`；
+  4. `tsh status` 读取有效期和 Roles。
+
+  全部完成后，用 `os.replace` 把相对软链 `current -> gen-<N>` 原子切换过去；旧目录保留 `session_retain_seconds`（90）秒后删除，让进行中的命令跑完。kube、apps 登录失败只记警告，不影响切换（用到时按需重登）。重启后第一次续期会清掉上次留下的 `gen-*`、`current` 和临时软链，目录里的其他文件不动。
+- **谁用哪个路径**：
+  - 常驻进程（隧道、AWS 代理）用 `TELEPORT_HOME=current/home`，切换后直接读到新证书，隧道不重启（Step 0 实测：证书过期后已运行的 `tsh proxy db --tunnel` 能用新证书建连）。AWS 代理的凭据在启动时取得，所以续期后会在后台换一个新代理进程；旧进程再保留 45 秒（长于一次工具调用的 40 秒预算、短于旧目录的 90 秒保留期）后停掉，在它上面开始的请求可以跑完。代理给出的 CA 文件路径会解析到具体的 `gen-<N>`，切换后不会读到新代理的 CA。
+  - `kube_read` 每次调用开始时取会话管理器当前的快照，锁定它的 `gen-<N>`（即当时 `current` 指向的目录），整次调用都用这一代的目录和 kubeconfig；中途续期不会打断它。
+- **续期时机**（`maintenance.py`，后台任务）：启动后立即在后台首次登录，不阻塞启动、`/healthz`、`/mcp`；之后在到期前 `renew_before_seconds`（480）秒续期。Teleport 把证书有效期限制在 1 小时，所以大约每 50 分钟续期一次。请求到来时会话不可用，会按需登录一次，并发请求共用这次登录；按需登录连同 kube、apps 登录都只用请求剩余的时间，来不及的子登录跳过，由工具用到时再做。后台续期排队等锁时，如果会话已被按需或人工登录更新，就跳过这次续期。
+- **失败处理**：
+  - 网络或集群错误：从 `renew_retry_seconds`（30）秒开始指数退避，最长 5 分钟一次。连续失败 3 次（退避 30、60 秒后的第 3 次，约 2 分钟）且会话已不可用时发飞书告警（按 `notify_interval_seconds` 限频），部署重启时的短暂抖动不会告警。
+  - 密码或验证码被拒：等下一个 30 秒 TOTP 窗口重试一次。同一个窗口的验证码只提交一次（包括人工登录用过的）：按需登录来不及等下一个窗口时直接失败，不再提交，也不计入被拒次数。连续被拒 `max_auth_failures`（2）次，或 Teleport 回复账号锁定时，停止自动登录，避免把账号锁住。之后每 `notify_interval_seconds`（3600）秒发一次飞书告警，附一次性认证链接（60 分钟有效）。在链接页面手动登录成功后，自动续期恢复。
+  - 手动登录时输错验证码不计入上述次数，也不会停止自动登录。
+- **没有凭据时**（`TELEPORT_PASSWORD` 或 `TELEPORT_TOTP_SECRET` 为空，或 `auto_renew: false`）：不自动登录。若配置了 `teleport.proxy` 和 `TELEPORT_USER`，会话缺失或离到期不足 `renew_before_seconds` 时，按 `notify_interval_seconds` 发附一次性链接的飞书告警，请人工登录；两者缺一（例如 CI 冒烟测试）则什么都不做。会话不可用时，用到 Teleport 的调用返回 `TELEPORT_EXPIRED`；只走宿主机隧道的数据库查询不受影响。
+- **`/status`**（需 API 密钥）：
+  - `teleport_session`：代数、有效期、剩余秒数、Roles、是否停止自动登录及原因、连续被拒次数、最近一次错误；
+  - `databases`：每个库走 db-gateway 自管隧道还是宿主机隧道的固定端口。
+
+  返回内容不含任何凭据。
+
+### 人工登录页 `/teleport-auth`
+
+一次性 token 记录它续期的是哪个会话：
+
+| 来源 | 续期对象 |
+| --- | --- |
+| db-gateway 停止自动登录时的飞书告警 | db-gateway 自管会话（`SESSION.renew`，60 分钟有效） |
+| 宿主机 `tsh-auth-watchdog` 调用 `/internal/teleport-auth/issue`（`X-Internal-Secret`，常量时间比较） | 宿主机会话 `teleport.auth_home`，用宿主机挂载的 tsh 登录（5 分钟有效） |
+
+宿主机会话这条路径在 Step 2 把 prod、billing、plugin 迁入网关之前保留。登录页会显示续期对象。登录成功后 token 失效；密码或验证码错误时 token 保留，但每个链接最多失败 3 次（每次失败都计入 Teleport 自己的锁号计数）。同一时间只处理一次登录，重复提交会被拒绝。
+
+### 数据库隧道
+
+| 库 | Teleport 数据库 / 库名 | 端口 | 第一步 |
+| --- | --- | --- | --- |
+| `knowledgefs` | `teleport_tools.knowledgefs.teleport_db` / `knowledgefs` | `port_knowledgefs`（56064） | db-gateway 自管 |
+| `prod` | `postgres.teleport_db_prod`（`lg-pgsql-read-01`）/ `langgenius` | `tunnel_port_prod`（56071） | 宿主机 `tsh-proxy-*`，`port_prod`（56061） |
+| `billing` | `postgres.teleport_db_billing`（`lg-billing-01`）/ `billing` | `tunnel_port_billing`（56072） | 宿主机，`port_billing`（56062） |
+| `plugin` | `postgres.teleport_db_plugin`（`lg-pgsql-read-01`）/ `dify_plugin_daemon` | `tunnel_port_plugin`（56073） | 宿主机，`port_plugin`（56063） |
+
+- 填写 `postgres.teleport_db_<库>` 后，这个库改用 db-gateway 自管的 `tsh proxy db --tunnel --db-user <postgres.user> --db-name <库名> --port <tunnel_port_<库>>`。留空时继续用宿主机隧道的 `port_<库>`。
+- Step 2 按 plugin、billing、prod 的顺序逐个填写，每次部署后验证；回退只需清空对应字段。
+- `plugin_lambda_logs` 按工作空间查插件库时走同一套选择逻辑。
+- 自管隧道在第一次查询时启动：进程就绪最多等 15 秒，连同可能的按需登录，准备阶段最多 40 秒。进程退出时由下一次查询重启，并清空该端口的连接池。
+- 启动失败时：会话不可用返回 `TELEPORT_EXPIRED`，其他原因返回 `QUERY_ERROR`。
+
+### 配置（`settings.teleport`）
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `proxy` | 空 | Teleport 代理地址。 |
+| `tsh_path` | `/opt/teleport/bin/tsh` | 所有自管会话、隧道和工具使用的 tsh。 |
+| `sessions_dir` | `/tmp/db-gateway/tsh-sessions` | `gen-<N>` 和 `current` 所在目录，在容器内，重启后重建。 |
+| `auto_renew` | `true` | `false` 时不自动登录，到期前用飞书告警里的链接人工登录。 |
+| `renew_before_seconds` | `480` | 到期前多少秒续期。 |
+| `renew_retry_seconds` | `30` | 网络类失败的首次重试间隔（指数退避，最长 300 秒）。 |
+| `session_retain_seconds` | `90` | 旧 `gen-<N>` 保留时间。 |
+| `max_auth_failures` | `2` | 连续被拒多少次后停止自动登录。 |
+| `login_timeout_seconds` | `60` | 单次 `tsh login` 超时。 |
+| `notify_interval_seconds` | `3600` | 同类飞书告警的最短间隔。 |
+| `auth_home` | 空 | 宿主机会话目录，只给宿主机 token 的人工登录和旧脚本用。 |
+
+凭据来自环境变量 `TELEPORT_USER`、`TELEPORT_PASSWORD`、`TELEPORT_TOTP_SECRET`（GitHub Secrets），不出现在配置、日志或 `/status` 里。
+
 ## Teleport 只读工具 `plugin_lambda_logs`、`kube_read`
 
-复用网关的 Teleport 会话，查 SaaS 插件 Lambda 的 CloudWatch 日志和只读查看 Kubernetes 集群。
+使用网关自管的 Teleport 会话（见上文），查 SaaS 插件 Lambda 的 CloudWatch 日志和只读查看 Kubernetes 集群。
 
 两个工具只走 MCP `/mcp`：没有 HTTP 端点，stdio 版本（`scripts/db_gateway_mcp.py`）也不转发，仍只列出两个数据库工具。所有访问在 Teleport 和 CloudTrail 里记在网关的 Teleport 账号名下。
 
 ### 运行方式
 
-- **镜像自带 tsh 18.11.0**（`/opt/teleport/bin/tsh`），只给这两个工具用。宿主机挂载的 `/usr/local/bin/tsh` 是 18.0.0：它的 `tsh aws` 对 18.11 的 proxy 签名校验失败（403），所以不能用。现有功能（`tsh status`、手动登录）照旧用宿主机的 tsh。
-- **影子 TELEPORT_HOME**（每次调用比较副本里实际的证书与线上证书，不一致就重新同步；复制前后线上目录有任何文件变化就重来，避免复制到续期中途的半套文件）：tsh 每次 `apps login`、`aws`、`kubectl` 都会重写整个 key ring。为了不和 `tsh-auth-watchdog` 互相覆盖、不干扰读取该目录的隧道，这两个工具从不写 `teleport.auth_home`。
-  - 每次调用开始时，把它（不含 `bin`、`*-app`、`*-kube`、`*-db` 目录）同步到容器内的 `teleport_tools.shadow_home`，tsh 只在这个副本里读写。
-  - 用户证书 `keys/*/*.crt` 的内容变化（即 watchdog 续期）时重新同步。
-  - 续期窗口里线上目录暂时没有证书时，继续用副本里仍在有效期内的旧证书；连副本都没有时返回 `TELEPORT_EXPIRED`。
+- **tsh**：镜像自带的 `teleport.tsh_path`。宿主机挂载的 `/usr/local/bin/tsh` 是 18.0.0，它的 `tsh aws` 对 18.11 的 proxy 签名校验失败（403），只在宿主机会话的人工登录里使用。
 - **常驻 tsh 子进程**（`tsh_daemons.py`）：
   - 日志工具用一个常驻的 `tsh proxy aws --app <app>` 本地代理，启动前先 `tsh apps login --aws-role <aws_role> <app>`；查询在进程内用 botocore 经这个代理发出。单页约 0.75 秒，以前每页起一次 `tsh aws` 加 aws CLI 要 1.4–1.9 秒。
-  - KnowledgeFS 库用一个常驻的 `tsh proxy db --tunnel` 隧道。
-  - 两者都在首次使用时启动；续期后由后台维护任务立即重启（不等下一次调用），进程退出或代理拒绝请求时在下一次调用时重启；网关退出时整组杀掉。它们的输出由后台任务持续读取并保留末尾 50 行，启动失败时附在错误里。
-- **子进程**：参数列表方式执行，不经 shell。tsh 运行在独立进程组里，到截止时间整组杀掉。环境里删除 `HTTP(S)_PROXY`、`ALL_PROXY`、`NO_PROXY`，设置 `TELEPORT_HOME=<shadow_home>`、`KUBECONFIG=<kube.kubeconfig_path>`、`TELEPORT_TOOLS_VERSION=off`（关闭 tsh 客户端自动更新）。
+  - 自管的数据库隧道（见“数据库隧道”）。
+  - 都在首次使用时启动；进程退出或代理拒绝请求时，在下一次调用时重启；网关退出时整组杀掉。续期时隧道不重启，AWS 代理在后台换新。它们的输出由后台任务持续读取并保留末尾 50 行，启动失败时附在错误里。
+- **子进程**：参数列表方式执行，不经 shell。tsh 运行在独立进程组里，到截止时间整组杀掉。环境里删除 `HTTP(S)_PROXY`、`ALL_PROXY`、`NO_PROXY`，设置 `TELEPORT_HOME`（常驻进程用 `current/home`，`kube_read` 用锁定的 `gen-<N>/home`）、`KUBECONFIG`（对应的 `kubeconfig`）、`TELEPORT_TOOLS_VERSION=off`（关闭 tsh 客户端自动更新）。
 - **时间预算**：整次工具调用共用一个截止时间（`time_budget_seconds`，默认 40 秒），SQL 定位、登录和每次 tsh 调用都只用剩余时间，保证低于 Nginx 的 60 秒超时。
 - **按需登录**：
   - 集群工具在 kube 证书丢失时由 `tsh kubectl` 自动重签；仍失败则执行 `tsh kube login --all` 后重试一次，并发调用共享这一次登录。
   - 日志工具的代理返回 403 或连接失败时，重启代理（含 `apps login`）并重试本页一次。
-  - 登录或代理启动失败时，用宿主机 tsh 对 `teleport.auth_home` 跑 `tsh status`：未登录返回 `TELEPORT_EXPIRED`（等 watchdog 续期后重试），已登录返回 `NOT_AUTHORIZED`，并附当前 Roles。
+  - 登录或代理启动失败时，按当前会话判断：会话不可用返回 `TELEPORT_EXPIRED`（续期后重试），会话有效返回 `NOT_AUTHORIZED`，并附当前 Roles。
 - 审计日志 `db_gateway_audit.log` 记录工具名、状态、耗时、函数名/窗口/过滤条件/事件数，或集群/完整参数/退出码/输出字节数；不记录日志和 kubectl 输出内容。
 
 ### `plugin_lambda_logs`
@@ -186,7 +252,7 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
 
 ### `kube_read`
 
-执行 `tsh kubectl <子命令> --context <集群 context> <其余参数>`。context 从 kubeconfig 里按 `<proxy 主机>-<集群名>` 匹配，kubeconfig 不存在时先 `tsh kube login --all` 生成。
+执行 `tsh kubectl <子命令> --context <集群 context> <其余参数>`。context 从本次锁定的 `gen-<N>/kubeconfig` 里按 `<proxy 主机>-<集群名>` 匹配，找不到时先 `tsh kube login --all` 生成。
 
 | 参数 | 说明 |
 | --- | --- |
@@ -220,8 +286,6 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
 
 | 键 | 默认 |
 | --- | --- |
-| `tsh_path` | `/opt/teleport/bin/tsh` |
-| `shadow_home` | `/tmp/db-gateway/tsh-home` |
 | `time_budget_seconds` | `40` |
 | `max_concurrent` | `3`（每个工具各自的并发上限；按工作空间定位时的插件库查询另外还占 `plugin` 库的查询槽位） |
 | `lambda_logs.enabled` | `true`；`false` 时工具不出现在 `tools/list` |
@@ -231,11 +295,10 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
 | `kube.enabled` | `true` |
 | `kube.clusters` | `{"prod": "lg-eks-01", "staging": "dify-plugin-1"}` |
 | `kube.max_output_bytes` | `1048576` |
-| `kube.kubeconfig_path` | `/tmp/db-gateway/kubeconfig` |
 | `knowledgefs.enabled` | `true`；`false` 时 `knowledgefs` 库返回 `UNKNOWN_DATABASE` |
 | `knowledgefs.teleport_db` | `knowledge-fs-production-readonly` |
 
-`shadow_home` 和 `kubeconfig_path` 在容器内，容器重启后丢失，首次调用时自动重建。
+已移除的 `teleport_tools.tsh_path`、`teleport_tools.shadow_home`、`kube.kubeconfig_path`、`postgres.pool_watch_teleport_keys` 不再生效；旧 `config.yaml` 中仍有这些键时照常加载并忽略。
 
 ## KnowledgeFS 库 `knowledgefs`
 
@@ -245,10 +308,7 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
 - 检索回答：`answer_traces`、`answer_trace_steps`；
 - 删除：`deletion_jobs`、`deletion_job_items`。
 
-和其他三个库不同，它的隧道不是独立的 `tsh-proxy-*` 容器，而是 db-gateway 在容器内自己启动的 `tsh proxy db --tunnel --port <postgres.port_knowledgefs> …`（默认 `127.0.0.1:56064`，host 网络）。具体行为：
-- 第一次查询时启动隧道，最多等 15 秒。
-- 续期后隧道会重启；连接池里的旧连接断开后，由现有的连接重试机制重连。
-- 隧道启动失败：会话失效返回 `TELEPORT_EXPIRED`，其他原因返回 `QUERY_ERROR`。
+它的隧道一直由 db-gateway 自管：`tsh proxy db --tunnel --port <postgres.port_knowledgefs> …`（默认 `127.0.0.1:56064`，host 网络），行为见“数据库隧道”。续期时隧道不重启，已有连接继续可用。
 
 只读校验、分页、超时、审计和其他库一致。
 

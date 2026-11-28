@@ -23,10 +23,10 @@ from db_gateway.teleport_cli import (
     TshResult,
     TshTimeout,
     acquire_before,
-    ensure_shadow_home,
     run_tsh_with_login,
     tsh_login,
 )
+from db_gateway.teleport_session import SESSION
 
 logger = get_logger(module="kube_read")
 
@@ -179,13 +179,16 @@ async def execute_kube_read(*, cfg: Any, cluster: Any, args: Any) -> dict[str, A
         return fail("TSH_TIMEOUT", "等待并发槽位超过了时间预算（网关繁忙），稍后重试")
     try:
         try:
-            await ensure_shadow_home(cfg)
-            context = resolve_context(kube.kubeconfig_path, proxy=cfg.teleport.proxy,
-                                      cluster_name=cluster_name)
+            # Pin one session generation for the whole call: a renewal switching
+            # `current` meanwhile never changes the home or kubeconfig under kubectl
+            # (old generations are kept session_retain_seconds after a switch).
+            session = await SESSION.ensure_session(cfg, deadline)
+            paths = {"home": session.home_dir, "kubeconfig": session.kubeconfig_path}
+            kubeconfig = str(session.kubeconfig_path)
+            context = resolve_context(kubeconfig, proxy=cfg.teleport.proxy, cluster_name=cluster_name)
             if context is None:
-                await tsh_login(LOGIN_ARGS, cfg=cfg, deadline=deadline, not_before=started)
-                context = resolve_context(kube.kubeconfig_path, proxy=cfg.teleport.proxy,
-                                          cluster_name=cluster_name)
+                await tsh_login(LOGIN_ARGS, cfg=cfg, deadline=deadline, not_before=started, **paths)
+                context = resolve_context(kubeconfig, proxy=cfg.teleport.proxy, cluster_name=cluster_name)
                 if context is None:
                     return fail("NOT_AUTHORIZED", f"Teleport 里看不到集群 {cluster_name}")
             # --context right after the verb: never behind a user `--`, never before
@@ -193,7 +196,7 @@ async def execute_kube_read(*, cfg: Any, cluster: Any, args: Any) -> dict[str, A
             argv = ["kubectl", args[0], "--context", context, *args[1:]]
             result = await run_tsh_with_login(
                 argv, cfg=cfg, deadline=deadline, login_args=LOGIN_ARGS,
-                needs_login=_needs_login, max_output_bytes=kube.max_output_bytes,
+                needs_login=_needs_login, max_output_bytes=kube.max_output_bytes, **paths,
             )
         except TeleportAuthExpired as e:
             return fail("TELEPORT_EXPIRED", str(e))

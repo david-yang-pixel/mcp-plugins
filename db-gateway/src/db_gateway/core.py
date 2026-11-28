@@ -28,10 +28,11 @@ from db_gateway.postgres import (
 from db_gateway.sql_text import SqlLexError, referenced_tables, tokenize
 from db_gateway.teleport_cli import classify_failure
 from db_gateway.tsh_daemons import (
-    KNOWLEDGEFS_TUNNEL,
     TshDaemonError,
     TshDaemonTimeout,
-    ensure_knowledgefs_tunnel,
+    ensure_tunnel,
+    tunnel_daemon,
+    tunnel_spec,
 )
 
 try:
@@ -56,7 +57,8 @@ _DB_KEY_TO_PORT_ATTR = {
     "knowledgefs": "port_knowledgefs",
 }
 
-KNOWLEDGEFS_TUNNEL_TIMEOUT_SECONDS = 15.0
+# Budget for logging in (if needed) and starting a self-managed tunnel on a request.
+TUNNEL_PREPARE_TIMEOUT_SECONDS = 40.0
 
 
 def _database_disabled(cfg: Any, database_key: str) -> str | None:
@@ -69,32 +71,40 @@ def _database_disabled(cfg: Any, database_key: str) -> str | None:
     return "knowledgefs 未启用（teleport_tools.knowledgefs.enabled=false）"
 
 
-async def _prepare_database(cfg: Any, database_key: str) -> tuple[str, str] | None:
-    """Start the db-gateway-managed tunnel for knowledgefs; (code, error) on failure."""
-    if database_key != "knowledgefs":
-        return None
-    starts = KNOWLEDGEFS_TUNNEL.starts
+_TUNNEL_LABELS = {"knowledgefs": "KnowledgeFS"}
+
+
+async def _prepare_database(cfg: Any, database_key: str) -> tuple[int | None, tuple[str, str] | None]:
+    """The local port to query ``database_key`` on: ``(port, None)`` or ``(None, (code, error))``.
+
+    With a ``teleport_db`` configured (always for knowledgefs) db-gateway runs the
+    tunnel itself and the port is its fixed tunnel port; otherwise it is the
+    static port of a tunnel outside db-gateway (the host tsh-proxy-* containers).
+    """
+    if tunnel_spec(cfg, database_key) is None:
+        return int(getattr(cfg.postgres, _DB_KEY_TO_PORT_ATTR[database_key], cfg.postgres.port)), None
+    label = _TUNNEL_LABELS.get(database_key, database_key)
+    daemon = tunnel_daemon(database_key)
+    starts = daemon.starts
     try:
-        await ensure_knowledgefs_tunnel(cfg, time.monotonic() + KNOWLEDGEFS_TUNNEL_TIMEOUT_SECONDS)
-        if starts and KNOWLEDGEFS_TUNNEL.starts != starts:
-            # Restarted on this request (exited, marked stale or renewed before the
-            # background task noticed): every pooled connection went through the old
-            # process, so drop them instead of failing on them one by one.
-            await pg_pool.MANAGER.drain_port(
-                int(getattr(cfg.postgres, "port_knowledgefs", 56064)), "knowledgefs tunnel restarted",
-            )
+        port = await ensure_tunnel(cfg, database_key, time.monotonic() + TUNNEL_PREPARE_TIMEOUT_SECONDS)
+        if starts and daemon.starts != starts:
+            # Restarted on this request (it exited or was marked stale): every pooled
+            # connection went through the old process, so drop them instead of failing
+            # on them one by one.
+            await pg_pool.MANAGER.drain_port(port, f"{database_key} tunnel restarted")
+        return port, None
     except TeleportAuthExpired as e:
-        return "TELEPORT_EXPIRED", str(e)
+        return None, ("TELEPORT_EXPIRED", str(e))
     except TshDaemonTimeout as e:
-        return "QUERY_ERROR", f"KnowledgeFS 隧道启动超时，稍后重试：{str(e)[:400]}"
+        return None, ("QUERY_ERROR", f"{label} 隧道启动超时，稍后重试：{str(e)[:400]}")
     except TshDaemonError as e:
         classified = await classify_failure(cfg, str(e)[:600])
         if isinstance(classified, TeleportAuthExpired):
-            return "TELEPORT_EXPIRED", str(classified)
-        return "QUERY_ERROR", f"KnowledgeFS 隧道启动失败：{classified}"
+            return None, ("TELEPORT_EXPIRED", str(classified))
+        return None, ("QUERY_ERROR", f"{label} 隧道启动失败：{classified}")
     except Exception as e:
-        return "QUERY_ERROR", f"KnowledgeFS 隧道启动失败：{e}"
-    return None
+        return None, ("QUERY_ERROR", f"{label} 隧道启动失败：{e}")
 
 _VALID_FORMATS = ("csv", "json")
 _DEFAULT_COUNT_TIMEOUT_SECONDS = 5.0
@@ -347,12 +357,7 @@ async def execute_gateway_query(
         return fail("SQL_SAFETY_ERROR", f"SQL safety check failed: {e}")
 
     db_name = getattr(cfg.postgres, _DB_KEY_TO_ATTR[database])
-    db_port = getattr(
-        cfg.postgres,
-        _DB_KEY_TO_PORT_ATTR[database],
-        cfg.postgres.port,
-    )
-    prepare_error = await _prepare_database(cfg, database)
+    db_port, prepare_error = await _prepare_database(cfg, database)
     if prepare_error:
         code, text = prepare_error
         timing = elapsed_timing()
@@ -656,10 +661,8 @@ async def _run_psql_with_retries(
     raise last_error
 
 
-def _db_target(cfg: Any, database_key: str) -> tuple[str, int]:
-    db_name = getattr(cfg.postgres, _DB_KEY_TO_ATTR[database_key])
-    db_port = getattr(cfg.postgres, _DB_KEY_TO_PORT_ATTR[database_key], cfg.postgres.port)
-    return db_name, db_port
+def _db_name(cfg: Any, database_key: str) -> str:
+    return getattr(cfg.postgres, _DB_KEY_TO_ATTR[database_key])
 
 
 def _metadata_kwargs(cfg: Any, *, db_name: str, db_port: int) -> dict[str, Any]:
@@ -830,7 +833,10 @@ async def execute_schema_lookup(
         return fail("INVALID_ARGUMENT", str(e), audit=False)
     requested = [f"{r.schema}.{r.table}" if r.schema else r.table for r in refs]
     names = schema_info.lookup_names(refs)
-    db_name, db_port = _db_target(cfg, database)
+    db_name = getattr(cfg.postgres, _DB_KEY_TO_ATTR[database])
+    db_port, prepare_error = await _prepare_database(cfg, database)
+    if prepare_error:
+        return fail(*prepare_error)
     timeout = min(
         float(_cfg_number(cfg.postgres, "query_timeout_seconds", _SCHEMA_STATEMENT_TIMEOUT_SECONDS)),
         _SCHEMA_STATEMENT_TIMEOUT_SECONDS,
@@ -840,10 +846,6 @@ async def execute_schema_lookup(
     attempts = max(0, int(getattr(cfg.postgres, "teleport_retry_attempts", 1) or 0)) + 1
     delay_attr = "pool_retry_delay_seconds" if kwargs["use_pool"] else "teleport_retry_delay_seconds"
     retry_delay = max(0.0, float(_cfg_number(cfg.postgres, delay_attr, 0.25)))
-
-    prepare_error = await _prepare_database(cfg, database)
-    if prepare_error:
-        return fail(*prepare_error)
 
     async def lookup() -> tuple[list[list[Any]], list[list[Any]]]:
         limiter = await _query_limiter(database, db_port, max_concurrent)

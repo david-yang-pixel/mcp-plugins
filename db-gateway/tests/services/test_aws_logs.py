@@ -12,6 +12,7 @@ from botocore.exceptions import (
 from db_gateway import aws_logs
 from db_gateway.aws_logs import classify_page_error, get_logs_client, parse_proxy_env
 from db_gateway.tsh_daemons import stop_all
+from tsh_helpers import alive, install_session, push_login_ok
 
 PROXY_OUT = """
 Started AWS proxy on http://127.0.0.1:45137.
@@ -31,11 +32,27 @@ async def _stop_daemons():
     await stop_all()
 
 
+@pytest.fixture(autouse=True)
+def session(cfg):
+    return install_session(cfg)
+
+
 def test_parse_proxy_env_strips_quotes():
     env = parse_proxy_env(PROXY_OUT.format(ca="/x/localca.pem").splitlines())
     assert env == {"AWS_ACCESS_KEY_ID": "AKIAFAKE", "AWS_SECRET_ACCESS_KEY": "secretfake",
                    "AWS_CA_BUNDLE": "/x/localca.pem", "HTTPS_PROXY": "http://127.0.0.1:45137"}
     assert parse_proxy_env(PROXY_OUT.format(ca="/x").splitlines()[:6]) is None
+
+
+def test_ca_bundle_is_pinned_to_the_generation_the_proxy_started_in(tmp_path):
+    import os
+
+    (tmp_path / "gen-1").mkdir()
+    (tmp_path / "gen-1" / "localca.pem").write_text("ca")
+    os.symlink("gen-1", tmp_path / "current")
+    env = parse_proxy_env(PROXY_OUT.format(ca=tmp_path / "current" / "localca.pem").splitlines())
+    # After a switch, `current/...` would name the next proxy's CA.
+    assert env["AWS_CA_BUNDLE"] == str(tmp_path / "gen-1" / "localca.pem")
 
 
 async def test_proxy_logs_into_app_then_starts_proxy(cfg, fake_tsh, tmp_path):
@@ -82,3 +99,35 @@ def test_classify_page_error(exc, kind):
     assert got == kind and message
     if kind == "aws" and isinstance(exc, ClientError):
         assert message.startswith("ResourceNotFoundException: The specified log group")
+
+
+async def test_renewal_rotates_the_running_aws_proxy(cfg, fake_tsh, tmp_path, monkeypatch):
+    """New proxy (new port/credentials) first, then the old one is killed."""
+    import asyncio
+
+    from db_gateway import tsh_daemons
+    from db_gateway.teleport_session import SESSION
+
+    monkeypatch.setattr(tsh_daemons, "ROTATE_KILL_DELAY_SECONDS", 0.2)
+    ca = tmp_path / "ca.pem"
+    ca.write_text("x")
+    fake_tsh.push()                                                      # apps login
+    fake_tsh.push(stdout=PROXY_OUT.format(ca=ca), sleep=30)             # proxy 1
+    first = await aws_logs.AWS_PROXY.ensure(cfg, time.monotonic() + 10)
+    old_pid = aws_logs.AWS_PROXY.pid
+
+    push_login_ok(fake_tsh)                                              # renewal (gen-2)
+    fake_tsh.push()                                                      # apps login for the new proxy
+    fake_tsh.push(stdout=PROXY_OUT.format(ca=ca).replace("45137", "45999")
+                  .replace("AKIAFAKE", "AKIANEW"), sleep=30)             # proxy 2
+    await SESSION.renew(cfg, reason="scheduled")
+    for _ in range(50):
+        if aws_logs.AWS_PROXY.pid != old_pid:
+            break
+        await asyncio.sleep(0.05)
+
+    second = await aws_logs.AWS_PROXY.ensure(cfg, time.monotonic() + 10)
+    assert second["HTTPS_PROXY"].endswith(":45999") and second["AWS_ACCESS_KEY_ID"] == "AKIANEW"
+    assert first["HTTPS_PROXY"].endswith(":45137")
+    await asyncio.sleep(0.5)
+    assert not alive(old_pid)

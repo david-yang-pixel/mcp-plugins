@@ -1,25 +1,16 @@
-"""Read-only tsh layer for plugin_lambda_logs and kube_read.
+"""tsh subprocess layer for plugin_lambda_logs, kube_read and the session manager.
 
-Two facts measured on the server shape this module:
-
-* tsh rewrites the whole key ring (user cert, key, CAs, SSH cert) on every
-  ``tsh apps login`` / ``tsh aws`` / ``tsh kubectl``. Running it against the
-  shared ``teleport.auth_home`` could race tsh-auth-watchdog's renewal and
-  disturb the tunnels that read it. The tools
-  therefore run tsh against a container-local copy (the *shadow* home) and only
-  ever read the shared directory.
-* The host-mounted tsh 18.0.0 fails ``tsh aws`` signature verification against
-  the 18.11 proxy, so the tools use the tsh bundled in the image
-  (``teleport_tools.tsh_path``).
+Every call runs the tsh bundled in the image (``teleport.tsh_path``; the
+host-mounted 18.0.0 fails `tsh aws` signature verification against the 18.11
+proxy) against db-gateway's own session (teleport_session.py): by default the
+live ``current/home`` + ``current/kubeconfig``, or the pinned gen-<N> paths a
+caller passes in.
 """
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import os
 import re
-import shutil
 import signal
 import time
 from dataclasses import dataclass
@@ -28,32 +19,24 @@ from typing import Any, Callable
 
 from db_gateway.log import get_logger
 from db_gateway.postgres import TeleportAuthExpired
-from db_gateway.teleport import get_tsh_status
 
 logger = get_logger(module="teleport_cli")
-
-SHADOW_SIGNATURE_FILE = ".source-signature.json"
-SHADOW_IGNORE_SUFFIXES = ("-app", "-kube", "-db")
 
 LOGIN_TIMEOUT_SECONDS = 20.0
 STDERR_KEEP_BYTES = 64 * 1024
 KILL_GRACE_SECONDS = 2.0
-STATUS_TIMEOUT_SECONDS = 5.0
 
 # Cleared for tsh: a host/container proxy would MITM Teleport. NO_PROXY is not set
 # to "*" because `tsh aws` points the aws child at its local proxy via HTTPS_PROXY.
 _PROXY_VARS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
-_shadow_lock: asyncio.Lock | None = None
 _login_locks: dict[tuple[str, ...], asyncio.Lock] = {}
 _last_login_ok: dict[tuple[str, ...], float] = {}
 
 
 def _reset_state() -> None:
     """Drop module-level locks and caches (tests; each test has its own loop)."""
-    global _shadow_lock
-    _shadow_lock = None
     _login_locks.clear()
     _last_login_ok.clear()
 
@@ -78,122 +61,6 @@ class TshTimeout(Exception):
 
 def strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
-
-
-def source_signature(auth_home: str) -> list[list[str]] | None:
-    """``[[relative path, sha256], ...]`` of the user TLS certs ``keys/*/*.crt``.
-
-    tsh rewrites these files with identical content, so the signature only
-    changes when tsh-auth-watchdog renews the session. None while not logged in
-    (no ``current-profile`` or no cert), e.g. during the renewal window.
-    """
-    root = Path(auth_home)
-    if not (root / "current-profile").is_file():
-        return None
-    entries: list[list[str]] = []
-    try:
-        for cert in sorted((root / "keys").glob("*/*.crt")):
-            if cert.is_file():
-                digest = hashlib.sha256(cert.read_bytes()).hexdigest()
-                entries.append([str(cert.relative_to(root)), digest])
-    except OSError:
-        return None
-    return entries or None
-
-
-def _shadow_complete(shadow: Path) -> bool:
-    """The marker is written last, so a shadow without it is a partial copy."""
-    return (shadow / SHADOW_SIGNATURE_FILE).is_file()
-
-
-def _ignore(_dir: str, names: list[str]) -> set[str]:
-    return {n for n in names if n == "bin" or n.endswith(SHADOW_IGNORE_SUFFIXES)}
-
-
-def _source_snapshot(source: str) -> dict[str, tuple[int, int]] | None:
-    """{path: (size, mtime_ns)} of the files the shadow copies; None on error."""
-    out: dict[str, tuple[int, int]] = {}
-    try:
-        for root, dirs, files in os.walk(source):
-            dirs[:] = [d for d in dirs if d not in _ignore(root, dirs)]
-            for name in files:
-                st = os.stat(os.path.join(root, name))
-                out[os.path.relpath(os.path.join(root, name), source)] = (st.st_size, st.st_mtime_ns)
-    except OSError:
-        return None
-    return out
-
-
-def _swap_in(tmp: Path, shadow: Path, old: Path) -> bool:
-    """Replace ``shadow`` with ``tmp``; keep the previous shadow if that fails."""
-    shadow.parent.mkdir(parents=True, exist_ok=True)
-    shutil.rmtree(old, ignore_errors=True)
-    try:
-        if shadow.exists():
-            shadow.rename(old)
-        try:
-            tmp.rename(shadow)
-        except OSError:
-            # An in-flight tsh may have recreated part of the path in between.
-            shutil.rmtree(shadow, ignore_errors=True)
-            tmp.rename(shadow)
-    except OSError as e:
-        logger.warning("teleport_shadow_swap_failed", error=str(e))
-        if not shadow.exists() and old.exists():
-            old.rename(shadow)
-        shutil.rmtree(tmp, ignore_errors=True)
-        return False
-    finally:
-        shutil.rmtree(old, ignore_errors=True)
-    return True
-
-
-def _sync_shadow(source: str, shadow: Path, sig: list[list[str]]) -> bool:
-    """Copy ``source`` into ``shadow``; False if the source kept changing under us."""
-    tmp = shadow.with_name(f"{shadow.name}.tmp-{os.getpid()}")
-    old = shadow.with_name(f"{shadow.name}.old-{os.getpid()}")
-    for _attempt in range(2):
-        shutil.rmtree(tmp, ignore_errors=True)
-        before = _source_snapshot(source)
-        try:
-            shutil.copytree(source, tmp, ignore=_ignore, symlinks=True)
-        except (OSError, shutil.Error):
-            continue
-        # A renewal (or any rewrite) during the copy could leave a torn key ring.
-        if before is None or _source_snapshot(source) != before or source_signature(source) != sig:
-            continue
-        (tmp / SHADOW_SIGNATURE_FILE).write_text(json.dumps(sig), encoding="utf-8")
-        return _swap_in(tmp, shadow, old)
-    shutil.rmtree(tmp, ignore_errors=True)
-    return False
-
-
-async def ensure_shadow_home(cfg: Any) -> str:
-    """Return the shadow TELEPORT_HOME, re-syncing it whenever its certs differ.
-
-    The shadow's own certs are compared (not a stored signature): a tsh process
-    started before a renewal can write the old key ring back into a fresh copy,
-    and the next call must notice. Raises TeleportAuthExpired when neither the
-    shared home nor an earlier complete copy is usable.
-    """
-    global _shadow_lock
-    if _shadow_lock is None:
-        _shadow_lock = asyncio.Lock()
-    source = cfg.teleport.auth_home
-    shadow = Path(cfg.teleport_tools.shadow_home)
-    async with _shadow_lock:
-        sig = source_signature(source)
-        complete = _shadow_complete(shadow)
-        if sig is not None and complete and source_signature(str(shadow)) == sig:
-            return str(shadow)
-        if sig is not None and await asyncio.to_thread(_sync_shadow, source, shadow, sig):
-            logger.info("teleport_shadow_synced", shadow=str(shadow))
-            return str(shadow)
-        if _shadow_complete(shadow):
-            # Renewal window (or a copy that raced it): the old certificate is
-            # still within its validity, keep using it.
-            return str(shadow)
-        raise TeleportAuthExpired("Teleport 会话不可用（可能正在续期），稍后重试")
 
 
 # --- tsh subprocess layer -------------------------------------------------------
@@ -222,10 +89,12 @@ class _Sink:
                 self.truncated = True
 
 
-def _tsh_env(cfg: Any) -> dict[str, str]:
+def _tsh_env(cfg: Any, home: Path | None = None, kubeconfig: Path | None = None) -> dict[str, str]:
+    from db_gateway.teleport_session import live_home, live_kubeconfig
+
     env = {k: v for k, v in os.environ.items() if k.lower() not in _PROXY_VARS}
-    env["TELEPORT_HOME"] = cfg.teleport_tools.shadow_home
-    env["KUBECONFIG"] = cfg.teleport_tools.kube.kubeconfig_path
+    env["TELEPORT_HOME"] = str(home if home is not None else live_home(cfg))
+    env["KUBECONFIG"] = str(kubeconfig if kubeconfig is not None else live_kubeconfig(cfg))
     env["TELEPORT_TOOLS_VERSION"] = "off"   # no client-tools auto update / re-exec
     return env
 
@@ -251,26 +120,26 @@ async def acquire_before(semaphore: asyncio.Semaphore, deadline: float) -> bool:
 
 async def run_tsh(
     args: list[str], *, cfg: Any, deadline: float, max_output_bytes: int | None = None,
+    home: Path | None = None, kubeconfig: Path | None = None,
 ) -> TshResult:
     """Run ``tsh <args>`` (no shell) until it exits or ``deadline`` (monotonic) passes.
 
-    The process runs in its own session; at the deadline the whole process group
-    is killed (``tsh aws`` has an ``aws`` child that would otherwise keep the
-    pipes open) and whatever was read so far is returned.
+    ``home`` / ``kubeconfig`` pin a session generation; by default the live
+    ``current`` paths are used. The process runs in its own session; at the
+    deadline the whole process group is killed (``tsh aws`` has an ``aws`` child
+    that would otherwise keep the pipes open) and whatever was read so far is
+    returned.
     """
     started = time.monotonic()
     remaining = deadline - started
     if remaining <= 0:
         return TshResult(None, "", "", True, False, 0)
-    kubeconfig_dir = os.path.dirname(cfg.teleport_tools.kube.kubeconfig_path)
-    if kubeconfig_dir:
-        os.makedirs(kubeconfig_dir, exist_ok=True)
     proc = await asyncio.create_subprocess_exec(
-        cfg.teleport_tools.tsh_path, *args,
+        cfg.teleport.tsh_path, *args,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=_tsh_env(cfg),
+        env=_tsh_env(cfg, home, kubeconfig),
         start_new_session=True,
     )
     out, err = _Sink(max_output_bytes), _Sink(STDERR_KEEP_BYTES)
@@ -306,20 +175,13 @@ async def run_tsh(
 
 
 async def classify_failure(cfg: Any, detail: str) -> Exception:
-    """TeleportAuthExpired when the shared session is gone, else TeleportNotAuthorized."""
-    try:
-        status = await asyncio.wait_for(
-            get_tsh_status(
-                proxy=cfg.teleport.proxy, user=cfg.teleport.user,
-                auth_home=cfg.teleport.auth_home,
-            ),
-            timeout=STATUS_TIMEOUT_SECONDS,
-        )
-    except Exception:
-        status = None
-    if status is None:
+    """TeleportAuthExpired without a usable session, else TeleportNotAuthorized (roles)."""
+    from db_gateway.teleport_session import SESSION
+
+    snap = SESSION.current()
+    if snap is None or not snap.usable(margin=0):
         return TeleportAuthExpired(f"Teleport 会话已过期或正在续期：{detail}")
-    return TeleportNotAuthorized(f"{detail}；当前 Roles: {', '.join(status.roles)}")
+    return TeleportNotAuthorized(f"{detail}；当前 Roles: {', '.join(snap.roles)}")
 
 
 async def _login_failure(cfg: Any, result: TshResult) -> Exception:
@@ -329,19 +191,20 @@ async def _login_failure(cfg: Any, result: TshResult) -> Exception:
 
 async def tsh_login(
     login_args: list[str], *, cfg: Any, deadline: float, not_before: float | None = None,
+    home: Path | None = None, kubeconfig: Path | None = None,
 ) -> None:
     """Run one ``tsh <login_args>``; concurrent callers share a single login.
 
-    Skipped when the same login already succeeded at or after ``not_before``.
+    Skipped when the same login (same home) already succeeded at or after ``not_before``.
     """
-    key = tuple(login_args)
+    key = (*login_args, str(home))
     lock = _login_locks.setdefault(key, asyncio.Lock())
     async with lock:
         last = _last_login_ok.get(key)
         if not_before is not None and last is not None and last >= not_before:
             return
         result = await run_tsh(
-            login_args, cfg=cfg,
+            login_args, cfg=cfg, home=home, kubeconfig=kubeconfig,
             deadline=min(deadline, time.monotonic() + LOGIN_TIMEOUT_SECONDS),
         )
         if result.exit_code == 0:
@@ -359,11 +222,13 @@ async def tsh_login(
 async def run_tsh_with_login(
     args: list[str], *, cfg: Any, deadline: float, login_args: list[str],
     needs_login: Callable[[TshResult], bool], max_output_bytes: int | None = None,
+    home: Path | None = None, kubeconfig: Path | None = None,
 ) -> TshResult:
     """``run_tsh``; on a credentials failure log in once and retry within ``deadline``."""
     started = time.monotonic()
-    result = await run_tsh(args, cfg=cfg, deadline=deadline, max_output_bytes=max_output_bytes)
+    paths = {"home": home, "kubeconfig": kubeconfig}
+    result = await run_tsh(args, cfg=cfg, deadline=deadline, max_output_bytes=max_output_bytes, **paths)
     if not needs_login(result):
         return result
-    await tsh_login(login_args, cfg=cfg, deadline=deadline, not_before=started)
-    return await run_tsh(args, cfg=cfg, deadline=deadline, max_output_bytes=max_output_bytes)
+    await tsh_login(login_args, cfg=cfg, deadline=deadline, not_before=started, **paths)
+    return await run_tsh(args, cfg=cfg, deadline=deadline, max_output_bytes=max_output_bytes, **paths)

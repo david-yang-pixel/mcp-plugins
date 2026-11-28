@@ -53,6 +53,18 @@ argv = sys.argv[1:]
 env = {{k: v for k, v in os.environ.items()
         if k in ("TELEPORT_HOME", "KUBECONFIG", "TELEPORT_TOOLS_VERSION") or "proxy" in k.lower()}}
 is_login = argv[:2] in (["apps", "login"], ["kube", "login"])
+entered = None
+if argv[:1] == ["login"]:
+    # Interactive `tsh login`, prompts as printed by tsh 18.11 (Step 0 on the server).
+    user = next((a.split("=", 1)[1] for a in argv if a.startswith("--user=")), "u")
+    sys.stdout.write("Enter password for Teleport user %s:" % user)
+    sys.stdout.flush()
+    pw = sys.stdin.readline().strip()
+    sys.stdout.write("\r\nEnter an OTP code from a device:")
+    sys.stdout.flush()
+    otp = sys.stdin.readline().strip()
+    sys.stdout.write("\r\n")
+    entered = {{"password": pw, "otp": otp}}
 
 def _write(path, content):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -62,7 +74,7 @@ def _write(path, content):
 with open(os.path.join(D, "lock"), "a+") as lk:
     fcntl.flock(lk, fcntl.LOCK_EX)
     with open(os.path.join(D, "calls.jsonl"), "a") as f:
-        f.write(json.dumps({{"argv": argv, "env": env}}) + "\n")
+        f.write(json.dumps({{"argv": argv, "env": env, "entered": entered}}) + "\n")
     resp = None
     mode_path = os.path.join(D, "mode.json")
     marker = os.path.join(D, "logged_in")
@@ -89,6 +101,11 @@ with open(os.path.join(D, "lock"), "a+") as lk:
 
 if resp.get("write_file"):
     _write(*resp["write_file"])
+if resp.get("profile") and os.environ.get("TELEPORT_HOME"):
+    # A successful login leaves a profile behind, like tsh does.
+    home = os.environ["TELEPORT_HOME"]
+    _write(os.path.join(home, "current-profile"), "teleport.dify.dev")
+    _write(os.path.join(home, "keys", "teleport.dify.dev", "u.crt"), resp["profile"])
 out = base64.b64decode(resp["stdout_b64"]) if resp.get("stdout_b64") else resp.get("stdout", "").encode()
 sys.stdout.buffer.write(out)
 sys.stdout.flush()
@@ -114,8 +131,10 @@ class FakeTsh:
 
     def push(self, stdout: str = "", stdout_bytes: bytes | None = None, stderr: str = "",
              code: int = 0, sleep: float = 0, child_sleep: float | None = None,
-             write_file: list[str] | None = None) -> None:
+             write_file: list[str] | None = None, profile: str | None = None) -> None:
         resp: dict = {"stdout": stdout, "stderr": stderr, "code": code, "sleep": sleep}
+        if profile is not None:
+            resp["profile"] = profile
         if stdout_bytes is not None:
             resp["stdout_b64"] = base64.b64encode(stdout_bytes).decode()
         if child_sleep is not None:
@@ -149,3 +168,50 @@ def alive(pid: int) -> bool:
     except OSError:
         return False
     return stat.rsplit(")", 1)[1].split()[0] != "Z"
+
+
+def status_text(valid_until: str = "2030-01-01 00:00:00 +0000", remaining: str = "55m",
+                roles: str = "production-read-all, support-lambda-logs") -> str:
+    """`tsh status` output as tsh 18.11 prints it."""
+    return (
+        "> Profile URL:        https://teleport.dify.dev:443\n"
+        "  Logged in as:       u\n"
+        "  Cluster:            teleport.dify.dev\n"
+        f"  Roles:              {roles}\n"
+        f"  Valid until:        {valid_until} UTC [valid for {remaining}]\n"
+    )
+
+
+def push_login_ok(fake: "FakeTsh", *, kube: bool = True, apps: bool = True,
+                  valid_until: str = "2030-01-01 00:00:00 +0000") -> None:
+    """Queue one successful renewal: login, [kube login], [apps login], status."""
+    fake.push(stdout="> Profile URL: https://teleport.dify.dev:443\n", profile="cert")
+    if kube:
+        fake.push(stdout="Logged into all Kubernetes clusters available.\n")
+    if apps:
+        fake.push(stdout="Logged into AWS app aws-support-logs.\n")
+    fake.push(stdout=status_text(valid_until=valid_until))
+
+
+def install_session(cfg, generation: int = 1, minutes_left: float = 55):
+    """Make ``generation`` the live session without logging in (tests)."""
+    from datetime import datetime, timedelta, timezone
+
+    from db_gateway import teleport_session as ts
+
+    sessions = Path(cfg.teleport.sessions_dir)
+    root = sessions / f"gen-{generation}"
+    write_tsh_src(root / "home")
+    tmp = sessions / ".current.tmp"
+    if tmp.is_symlink():
+        tmp.unlink()
+    os.symlink(f"gen-{generation}", tmp)
+    os.replace(tmp, sessions / "current")
+    snap = ts.SessionSnapshot(
+        generation=generation, root=root,
+        valid_until=datetime.now(timezone.utc) + timedelta(minutes=minutes_left),
+        roles=("production-read-all", "support-lambda-logs"),
+    )
+    ts.SESSION._current = snap
+    ts.SESSION._generation = max(ts.SESSION._generation, generation)
+    return snap

@@ -1,27 +1,146 @@
-"""Shared `tsh login` runner: spawns tsh via pexpect with PTY, feeds
-password + OTP, returns success/error.
+"""`tsh login` through pexpect (password + OTP prompts).
 
 Used by:
-- services/teleport_auth_web.py — interactive web form (manual login)
-- scripts/auth-watchdog.py    — automatic renewal using stored TOTP secret
+- teleport_session.py — db-gateway's own session, always into a fresh gen-<N> home
+  (also for manual logins submitted through /teleport-auth)
+- scripts/auth-watchdog.py, scripts/tsh-init.py — legacy host-side renewal of the
+  shared home (``run_tsh_login``)
 
-The login flow has several gotchas worth keeping in one place:
-1. HTTP(S)_PROXY env vars MUST be cleared (host clash/v2ray MITMs HTTPS,
-   makes Teleport think credentials are wrong).
-2. Existing session (cert) shortcuts the password prompt; pre-logout +
-   purge keys/ + current-profile is required to force re-auth.
-3. Cert files written by container's root must be chown'd back to host's
-   zd-agent uid/gid (HOST_TSH_UID/HOST_TSH_GID env), else tsh-proxy-db
-   systemd service can't read them after restart.
+Gotchas kept in one place:
+1. HTTP(S)_PROXY must be cleared: a MITM proxy makes Teleport answer "invalid
+   credentials".
+2. An existing profile skips the password prompt. A fresh, empty TELEPORT_HOME
+   avoids that; the legacy helper purges the profile first instead.
+3. TELEPORT_TOOLS_VERSION=off keeps tsh from re-executing another client version.
+
+The prompts match tsh 18.11 ("Enter password for Teleport user <u>:" and
+"Enter an OTP code from a device:", checked on the server).
 """
 from __future__ import annotations
 
 import asyncio
 import os
+import re
+from dataclasses import dataclass
 
 from db_gateway.log import get_logger
 
 logger = get_logger(module="integrations.teleport_login")
+
+_PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy")
+_TAIL_CHARS = 600
+
+_LOCKED_RE = re.compile(r"\blocked\b|too many (failed )?(login )?attempts", re.I)
+_AUTH_RE = re.compile(
+    r"invalid credentials|access denied|invalid (totp|otp|token|password)|"
+    r"bad (password|credentials)|authentication failed|incorrect",
+    re.I,
+)
+_TRANSIENT_RE = re.compile(
+    r"connection refused|no such host|i/o timeout|timed? ?out|dial tcp|connection reset|"
+    r"network is unreachable|tls handshake|\bEOF\b",
+    re.I,
+)
+
+
+@dataclass(frozen=True)
+class LoginResult:
+    ok: bool
+    # "ok" | "auth" (password/OTP rejected) | "locked" (account locked) |
+    # "transient" (network, timeout, nothing submitted: does not count against the account)
+    kind: str
+    message: str
+
+
+def classify_login_output(text: str) -> str:
+    """Why a submitted login failed. Unknown failures count as rejections (conservative)."""
+    if _LOCKED_RE.search(text):
+        return "locked"
+    if _AUTH_RE.search(text):
+        return "auth"
+    if _TRANSIENT_RE.search(text):
+        return "transient"
+    return "auth"
+
+
+def _login_env(home: str) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k not in _PROXY_VARS}
+    env.update(NO_PROXY="*", no_proxy="*", TELEPORT_HOME=home, TELEPORT_TOOLS_VERSION="off")
+    return env
+
+
+# Terminal control sequences tsh writes to the pty (OSC colour queries, CSI codes).
+_ANSI_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
+
+
+def _tail(text: str | None, secrets: tuple[str, ...] = ()) -> str:
+    """Readable end of tsh output: control sequences removed, secrets redacted before cutting."""
+    return _redact(_ANSI_RE.sub("", text or ""), secrets).strip()[-_TAIL_CHARS:]
+
+
+def _redact(text: str, secrets: tuple[str, ...]) -> str:
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "<redacted>")
+    return text
+
+
+def _pexpect_login(
+    *, tsh_path: str, proxy: str, user: str, password: str, otp: str, home: str,
+    timeout_s: float, ttl_minutes: int | None,
+) -> LoginResult:
+    import pexpect
+
+    args = ["login", f"--proxy={proxy}", f"--user={user}"]
+    if ttl_minutes:
+        args.append(f"--ttl={ttl_minutes}")
+    secrets = (password, otp)
+    try:
+        child = pexpect.spawn(tsh_path, args, env=_login_env(home), timeout=timeout_s, encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        return LoginResult(False, "transient", f"cannot start tsh: {e}")
+    try:
+        idx = child.expect([r"[Ee]nter password.*:", r"[Pp]assword.*:", pexpect.EOF, pexpect.TIMEOUT])
+        if idx in (2, 3):
+            # Nothing was submitted: this never counts against the account.
+            return LoginResult(False, "transient", f"no password prompt: {_tail(child.before, secrets)}")
+        child.sendline(password)
+        idx = child.expect([
+            r"[Ee]nter.*OTP.*:", r"[Oo]ne.*time.*password.*:", r"[Tt]wo-?factor.*:",
+            r"[Aa]uthentication.*code.*:", pexpect.EOF, pexpect.TIMEOUT,
+        ])
+        if idx == 5:
+            return LoginResult(False, "transient", "timed out waiting for the OTP prompt")
+        if idx == 4:
+            out = child.before or ""
+            return LoginResult(False, classify_login_output(out), _tail(out, secrets))
+        child.sendline(otp)
+        idx = child.expect([pexpect.EOF, pexpect.TIMEOUT])
+        out = child.before or ""
+        if idx == 1:
+            return LoginResult(False, "transient", "timed out after the OTP was sent")
+        child.close()
+        if child.exitstatus == 0:
+            return LoginResult(True, "ok", "tsh login succeeded")
+        return LoginResult(False, classify_login_output(out), _tail(out, secrets))
+    except Exception as e:  # noqa: BLE001
+        return LoginResult(False, "transient", f"pexpect error: {e}")
+    finally:
+        if child.isalive():
+            child.close(force=True)
+
+
+async def login_fresh(
+    *, tsh_path: str, proxy: str, user: str, password: str, otp: str, home: str,
+    timeout_s: float = 60, ttl_minutes: int | None = None,
+) -> LoginResult:
+    """`tsh login` into ``home`` (expected empty, so the password prompt always appears)."""
+    logger.info("tsh_login_start", proxy=proxy, user=user, home=home)
+    result = await asyncio.to_thread(
+        _pexpect_login, tsh_path=tsh_path, proxy=proxy, user=user, password=password,
+        otp=otp, home=home, timeout_s=timeout_s, ttl_minutes=ttl_minutes,
+    )
+    return LoginResult(result.ok, result.kind, _redact(result.message, (password, otp)))
 
 
 async def run_tsh_login(
@@ -32,117 +151,43 @@ async def run_tsh_login(
     otp: str,
     auth_home: str,
     timeout_s: int = 60,
+    tsh_path: str = "tsh",
 ) -> tuple[bool, str]:
-    """Spawn `tsh login` via pexpect, feed password + OTP, wait for completion.
+    """Legacy helper (scripts/): purge the profile in ``auth_home``, then log in again.
 
     Returns ``(success, message)``.
     """
     try:
-        import pexpect
+        import pexpect  # noqa: F401
     except ImportError:
         return False, "pexpect module not installed in container"
 
-    env = dict(os.environ)
-    env["TELEPORT_HOME"] = auth_home
-    # Clear all proxy env — Teleport refuses MITM'd HTTPS as "invalid credentials"
-    for proxy_var in (
-        "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
-        "ALL_PROXY", "all_proxy",
-    ):
-        env.pop(proxy_var, None)
-    env["NO_PROXY"] = "*"
-    env["no_proxy"] = "*"
+    def _purge() -> None:
+        import shutil
+        import subprocess
+        from pathlib import Path
 
-    logger.info("tsh_login_start", proxy=proxy, user=user, no_proxy_enforced=True)
+        r = subprocess.run(
+            [tsh_path, "logout"], env=_login_env(auth_home),
+            capture_output=True, timeout=10, check=False,
+        )
+        logger.info("tsh_logout_result", rc=r.returncode)
+        # tsh names the profile file after the cluster (proxy without the port).
+        cluster_name = proxy.split(":", 1)[0]
+        shutil.rmtree(Path(auth_home) / "keys", ignore_errors=True)
+        for name in ("current-profile", f"{cluster_name}.yaml"):
+            try:
+                (Path(auth_home) / name).unlink()
+            except FileNotFoundError:
+                pass
+        logger.info("tsh_profile_purged", auth_home=auth_home, cluster_name=cluster_name)
 
-    def _run_sync() -> tuple[bool, str]:
-        # Step 0: 清掉现有 session
-        try:
-            import subprocess
-            import shutil
-            from pathlib import Path as _P
-
-            r = subprocess.run(
-                ["tsh", "logout", "--all"],
-                env=env, capture_output=True, timeout=10, check=False,
-            )
-            logger.info(
-                "tsh_logout_result",
-                rc=r.returncode,
-                stdout=r.stdout.decode("utf-8", errors="replace")[:200],
-                stderr=r.stderr.decode("utf-8", errors="replace")[:200],
-            )
-            # 兜底：硬删 keys / current-profile / <cluster>.yaml
-            # 集群名 = proxy 去掉端口（tsh 用集群名做 profile 文件名而不是 proxy 字符串）
-            # 例：proxy="teleport.dify.dev:443" → 文件名 "teleport.dify.dev.yaml"
-            cluster_name = proxy.split(":", 1)[0]
-            keys_dir = _P(auth_home) / "keys"
-            if keys_dir.exists():
-                shutil.rmtree(keys_dir, ignore_errors=True)
-            for fname in ("current-profile", f"{cluster_name}.yaml"):
-                fpath = _P(auth_home) / fname
-                if fpath.exists():
-                    try:
-                        fpath.unlink()
-                    except Exception:
-                        pass
-            logger.info(
-                "tsh_profile_purged",
-                auth_home=auth_home,
-                cluster_name=cluster_name,
-            )
-        except Exception as e:
-            return False, f"pre-logout failed: {e}"
-
-        # Step 1: 正式 login
-        try:
-            child = pexpect.spawn(
-                "tsh", ["login", f"--proxy={proxy}", f"--user={user}"],
-                env=env, timeout=timeout_s, encoding="utf-8",
-            )
-
-            idx = child.expect([
-                r"[Ee]nter password.*:",
-                r"[Pp]assword.*:",
-                pexpect.EOF,
-                pexpect.TIMEOUT,
-            ])
-            if idx in (2, 3):
-                return False, f"Unexpected output before password prompt:\n{child.before}"
-            child.sendline(password)
-
-            idx = child.expect([
-                r"[Ee]nter.*OTP.*:",
-                r"[Oo]ne.*time.*password.*:",
-                r"[Tt]wo-?factor.*:",
-                r"[Aa]uthentication.*code.*:",
-                pexpect.EOF,
-                pexpect.TIMEOUT,
-            ])
-            if idx in (4, 5):
-                return False, f"Unexpected output (likely bad password)\n{child.before}"
-            child.sendline(otp)
-
-            child.expect([pexpect.EOF, pexpect.TIMEOUT])
-            rc = child.wait()
-            output = child.before or ""
-
-            if rc == 0:
-                # chown back to host zd-agent uid/gid
-                host_uid = os.environ.get("HOST_TSH_UID")
-                host_gid = os.environ.get("HOST_TSH_GID")
-                if host_uid and host_gid:
-                    try:
-                        import subprocess
-                        subprocess.run(
-                            ["chown", "-R", f"{host_uid}:{host_gid}", auth_home],
-                            check=False, timeout=10,
-                        )
-                    except Exception as e:
-                        logger.warning("chown_tsh_failed", error=str(e))
-                return True, "tsh login succeeded"
-            return False, f"tsh login failed (rc={rc}):\n{output[-800:]}"
-        except Exception as e:
-            return False, f"pexpect error: {e}"
-
-    return await asyncio.to_thread(_run_sync)
+    try:
+        await asyncio.to_thread(_purge)
+    except Exception as e:  # noqa: BLE001
+        return False, f"pre-logout failed: {e}"
+    result = await login_fresh(
+        tsh_path=tsh_path, proxy=proxy, user=user, password=password, otp=otp,
+        home=auth_home, timeout_s=timeout_s,
+    )
+    return result.ok, result.message

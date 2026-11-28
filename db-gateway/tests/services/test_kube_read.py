@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 from db_gateway.kube_read import execute_kube_read, resolve_context, validate_kubectl_args
+from tsh_helpers import install_session
 
 PROD = "teleport.dify.dev-lg-eks-01-us-east-1-523286616386"
 STAGING = "teleport.dify.dev-dify-plugin-1-eks-us-east-1-014498624057"
@@ -29,9 +30,15 @@ def write_kubeconfig(path, names):
 KUBECONFIG_TEXT = kubeconfig_text([PROD, STAGING])
 
 
+@pytest.fixture(autouse=True)
+def session(cfg):
+    """A live login (gen-1); kube_read pins its home and kubeconfig."""
+    return install_session(cfg)
+
+
 @pytest.fixture
-def kubeconfig(cfg):
-    write_kubeconfig(cfg.teleport_tools.kube.kubeconfig_path, [PROD, STAGING])
+def kubeconfig(session):
+    write_kubeconfig(session.kubeconfig_path, [PROD, STAGING])
 
 
 @pytest.mark.parametrize("args", [
@@ -83,19 +90,32 @@ async def test_kube_read_inserts_context_after_verb(cfg, fake_tsh, kubeconfig):
     out = await execute_kube_read(cfg=cfg, cluster="prod", args=["get", "pods", "-n", "dify-plugin"])
     assert out["success"] and out["output"] == "NAME READY\n" and out["context"] == PROD
     assert fake_tsh.calls[0]["argv"] == ["kubectl", "get", "--context", PROD, "pods", "-n", "dify-plugin"]
-    assert fake_tsh.calls[0]["env"]["TELEPORT_HOME"] == cfg.teleport_tools.shadow_home
+    env = fake_tsh.calls[0]["env"]
+    assert env["TELEPORT_HOME"].endswith("/gen-1/home") and env["KUBECONFIG"].endswith("/gen-1/kubeconfig")
 
 
-async def test_kube_read_logs_in_when_kubeconfig_missing(cfg, fake_tsh):
-    fake_tsh.until_login(code=0, on_login=(cfg.teleport_tools.kube.kubeconfig_path, KUBECONFIG_TEXT))
+async def test_kube_read_keeps_its_generation_when_a_renewal_switches_mid_call(cfg, fake_tsh, session, kubeconfig):
+    fake_tsh.push(stdout="NAME READY\n", sleep=0.6)
+    call = asyncio.create_task(execute_kube_read(cfg=cfg, cluster="prod", args=["get", "pods"]))
+    await asyncio.sleep(0.2)
+    install_session(cfg, generation=2)                      # renewal: current -> gen-2
+    out = await call
+    assert out["success"]
+    env = fake_tsh.calls[0]["env"]
+    assert env["TELEPORT_HOME"] == str(session.home_dir)    # still gen-1 for this call
+    assert env["KUBECONFIG"] == str(session.kubeconfig_path)
+
+
+async def test_kube_read_logs_in_when_kubeconfig_missing(cfg, fake_tsh, session):
+    fake_tsh.until_login(code=0, on_login=(str(session.kubeconfig_path), KUBECONFIG_TEXT))
     fake_tsh.push(stdout="ok")
     out = await execute_kube_read(cfg=cfg, cluster="prod", args=["get", "pods"])
     assert out["success"]
     assert ["kube", "login", "--all"] in [c["argv"] for c in fake_tsh.calls]
 
 
-async def test_kube_first_login_once_under_concurrency(cfg, fake_tsh):
-    fake_tsh.until_login(code=0, on_login=(cfg.teleport_tools.kube.kubeconfig_path, KUBECONFIG_TEXT))
+async def test_kube_first_login_once_under_concurrency(cfg, fake_tsh, session):
+    fake_tsh.until_login(code=0, on_login=(str(session.kubeconfig_path), KUBECONFIG_TEXT))
     await asyncio.gather(*[execute_kube_read(cfg=cfg, cluster="prod", args=["get", "pods"])
                            for _ in range(3)])
     assert sum(c["argv"][:2] == ["kube", "login"] for c in fake_tsh.calls) == 1

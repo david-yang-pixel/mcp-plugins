@@ -467,3 +467,41 @@ async def test_app_runs_background_maintenance_while_serving(tmp_path):
         task = app[MAINTENANCE_TASK_KEY]
         assert not task.done()
     assert task.cancelled() or task.done()
+
+
+async def test_status_reports_the_session_and_each_database_route(tmp_path):
+    cfg = AppConfig(db_gateway={"api_key": "secret"},
+                    teleport={"sessions_dir": str(tmp_path / "sessions")})
+    cfg.postgres.teleport_db_plugin = "lg-pgsql-read-01"      # step 2: plugin moved in
+    async with TestClient(TestServer(create_db_gateway_app(cfg))) as client:
+        assert (await client.get("/status", headers={"X-API-Key": "wrong"})).status == 401
+        data = await (await client.get("/status", headers={"Authorization": "Bearer secret"})).json()
+
+    assert data["databases"]["prod"] == {"via": "static", "port": 56061}
+    assert data["databases"]["plugin"] == {"via": "db-gateway", "teleport_db": "lg-pgsql-read-01", "port": 56073}
+    assert data["databases"]["knowledgefs"]["via"] == "db-gateway"
+    assert data["ports"]["plugin"] == 56073
+    session = data["teleport_session"]
+    assert session["generation"] is None and session["auto_login"] is False and session["blocked"] is None
+
+
+async def test_manual_login_alert_carries_a_fresh_session_link(tmp_path):
+    from db_gateway.app import _teleport_alert
+    from db_gateway.app_context import TELEPORT_AUTH_TOKEN_STORE_KEY
+    from db_gateway.teleport_tokens import SCOPE_SESSION
+
+    cfg = AppConfig(teleport={"public_base_url": "https://agent.example.com"},
+                    feishu={"webhook_url": "https://open.feishu.example/hook"})
+    app = create_db_gateway_app(cfg)
+    send = AsyncMock()
+    with patch("db_gateway.feishu.FeishuClient.send_alert", send):
+        alert = _teleport_alert(app)
+        await alert("title", "body", True)
+        await alert("title2", "body2", False)
+
+    first, second = (c.kwargs["message"] for c in send.await_args_list)
+    url = first.split("认证链接（一次性，60 分钟内有效）：", 1)[1]
+    entry = await app[TELEPORT_AUTH_TOKEN_STORE_KEY].lookup(url.split("t=", 1)[1])
+    assert entry.scope == SCOPE_SESSION and entry.ttl_minutes == 60
+    assert second == "body2"
+    assert _teleport_alert(create_db_gateway_app(AppConfig())) is None    # no webhook: log only
