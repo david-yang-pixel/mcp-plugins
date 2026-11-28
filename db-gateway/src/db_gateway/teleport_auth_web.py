@@ -1,16 +1,12 @@
 """Teleport auth web relay — allows remote password+OTP login via HTTPS.
 
 Flow:
-1. A one-time link is minted and pushed to Feishu:
-   * by db-gateway itself when its automatic login stopped (maintenance.py) —
-     the token renews db-gateway's own session (``SCOPE_SESSION``);
-   * by the legacy tsh-auth-watchdog through ``/internal/teleport-auth/issue`` —
-     the token renews the host session at ``teleport.auth_home`` (``SCOPE_HOST``),
-     which the host tunnels use until step 2 moves them into db-gateway.
+1. When automatic login stopped (or is off), maintenance.py pushes a one-time
+   link to Feishu
 2. User opens URL on phone → GET /teleport-auth?t=<token> → HTML form
 3. User types password + OTP → POST /teleport-auth
-4. Server validates token + runs `tsh login` via PTY for the token's session
-5. Success consumes the token; a wrong code keeps it for a retry
+4. Server validates token + renews db-gateway's own session with that code
+5. Success consumes the token; a wrong code keeps it for a retry (at most 3 failures)
 
 ⚠️ Security: password flows through the HTTPS endpoint. Accept this tradeoff
 knowingly — the official headless flow (cluster-level config) keeps passwords
@@ -18,8 +14,6 @@ on the user's device.
 """
 from __future__ import annotations
 
-import hmac
-import os
 from html import escape
 from typing import Optional
 from urllib.parse import urlparse
@@ -28,17 +22,12 @@ from aiohttp import web
 
 from db_gateway.log import get_logger
 from db_gateway.app_context import app_config, teleport_auth_token_store
-from db_gateway.teleport_tokens import MAX_FAILED_LOGINS, SCOPE_HOST, SCOPE_SESSION, TokenStore
+from db_gateway.teleport_tokens import MAX_FAILED_LOGINS, TokenStore
 
 # Links in db-gateway's own alerts stay valid until the next (hourly) reminder.
 SESSION_LINK_TTL_MINUTES = 60
-# One manual login at a time (a double submit would send the same code twice,
-# and two host-session logins would rewrite the same auth_home together).
+# One manual login at a time: a double submit would send the same code twice.
 _manual_login_running = False
-_TARGET_LABELS = {
-    SCOPE_SESSION: "db-gateway 自管会话",
-    SCOPE_HOST: "宿主机 tsh 会话（tsh-proxy 隧道使用）",
-}
 
 logger = get_logger(module="services.teleport_auth_web")
 
@@ -73,7 +62,7 @@ _FORM_HTML = """<!DOCTYPE html>
 <body>
 <div class="card">
   <h1>🔐 Teleport 证书续期</h1>
-  <p class="sub">服务器：__SERVER__ &nbsp;·&nbsp; 用户：__USER__<br>续期对象：__TARGET__</p>
+  <p class="sub">服务器：__SERVER__ &nbsp;·&nbsp; 用户：__USER__</p>
   <div class="warn">
     密码与 OTP 码将通过 HTTPS 发送到服务器，由本站点直接调用 <code>tsh login</code>。
     只输入一次，用完丢弃；链接一次性使用，过期后失效。
@@ -122,13 +111,12 @@ def _server_label(public_base_url: str) -> str:
     return parsed.netloc or public_base_url
 
 
-def render_form(token: str, user: str, public_base_url: str = "", scope: str = SCOPE_SESSION) -> str:
+def render_form(token: str, user: str, public_base_url: str = "") -> str:
     return (
         _FORM_HTML
         .replace("__TOKEN__", escape(token, quote=True))
         .replace("__USER__", escape(user or "(未配置)"))
         .replace("__SERVER__", escape(_server_label(public_base_url)))
-        .replace("__TARGET__", escape(_TARGET_LABELS.get(scope, scope)))
     )
 
 
@@ -149,22 +137,6 @@ def render_result(*, ok: bool, message: str, detail: str = "") -> str:
     )
 
 
-# ====================== tsh login via pexpect ======================
-# 实际逻辑抽到 db_gateway.teleport_login 共享给 watchdog auto-renewal
-
-
-async def _run_tsh_login(
-    *, proxy: str, user: str, password: str, otp: str,
-    auth_home: str, timeout_s: int = 60,
-) -> tuple[bool, str]:
-    """Wrapper to keep call sites stable; delegates to shared runner."""
-    from db_gateway.teleport_login import run_tsh_login
-    return await run_tsh_login(
-        proxy=proxy, user=user, password=password, otp=otp,
-        auth_home=auth_home, timeout_s=timeout_s,
-    )
-
-
 async def _renew_own_session(cfg, *, password: str, otp: str) -> tuple[bool, str]:
     """Manual login into db-gateway's own session (resumes a paused auto-login)."""
     from db_gateway.teleport_session import SESSION, LoginRejected
@@ -182,7 +154,7 @@ async def _renew_own_session(cfg, *, password: str, otp: str) -> tuple[bool, str
 
 # ====================== HTTP handlers ======================
 
-async def issue_link(app: web.Application, scope: str, *, ttl_minutes: int = 5) -> Optional[str]:
+async def issue_link(app: web.Application, *, ttl_minutes: int = 5) -> Optional[str]:
     """Mint a one-time ``/teleport-auth`` link; None without a public base URL."""
     cfg = app_config(app)
     base = getattr(cfg.teleport, "public_base_url", "")
@@ -190,33 +162,9 @@ async def issue_link(app: web.Application, scope: str, *, ttl_minutes: int = 5) 
         logger.error("teleport_public_base_url_missing")
         return None
     store: TokenStore = teleport_auth_token_store(app)
-    tok = await store.create(scope, ttl_minutes=ttl_minutes)
-    logger.info("teleport_auth_token_issued", scope=scope)
+    tok = await store.create(ttl_minutes=ttl_minutes)
+    logger.info("teleport_auth_token_issued")
     return f"{base.rstrip('/')}/teleport-auth?t={tok}"
-
-
-async def handle_teleport_auth_issue(request: web.Request) -> web.Response:
-    """POST /internal/teleport-auth/issue — the legacy watchdog mints a host-session link.
-
-    Auth: X-Internal-Secret header must match env `INTERNAL_SHARED_SECRET`.
-    Returns: JSON {"url": "<public-base-url>/teleport-auth?t=<tok>"}.
-    """
-    internal_secret = os.environ.get("INTERNAL_SHARED_SECRET", "")
-    if not internal_secret:
-        return web.Response(
-            status=500, text="server not configured (INTERNAL_SHARED_SECRET empty)",
-        )
-    supplied = request.headers.get("X-Internal-Secret", "")
-    if not hmac.compare_digest(supplied.encode("utf-8"), internal_secret.encode("utf-8")):
-        return web.Response(status=401, text="bad internal secret")
-
-    url = await issue_link(request.app, SCOPE_HOST)
-    if url is None:
-        return web.Response(
-            status=500,
-            text="server not configured (teleport.public_base_url empty)",
-        )
-    return web.json_response({"url": url, "expires_in_seconds": 300})
 
 
 async def handle_teleport_auth_get(request: web.Request) -> web.Response:
@@ -239,7 +187,6 @@ async def handle_teleport_auth_get(request: web.Request) -> web.Response:
             token=token,
             user=cfg.teleport.user or "",
             public_base_url=cfg.teleport.public_base_url,
-            scope=entry.scope,
         ),
         content_type="text/html",
     )
@@ -289,16 +236,7 @@ async def handle_teleport_auth_post(request: web.Request) -> web.Response:
         )
     _manual_login_running = True
     try:
-        if entry.scope == SCOPE_HOST:
-            ok, msg = await _run_tsh_login(
-                proxy=cfg.teleport.proxy,
-                user=cfg.teleport.user,
-                password=password,
-                otp=otp,
-                auth_home=cfg.teleport.auth_home,
-            )
-        else:
-            ok, msg = await _renew_own_session(cfg, password=password, otp=otp)
+        ok, msg = await _renew_own_session(cfg, password=password, otp=otp)
     finally:
         _manual_login_running = False
 
@@ -308,9 +246,8 @@ async def handle_teleport_auth_post(request: web.Request) -> web.Response:
     if ok:
         # 成功才消耗 token（失败让用户重试，不用重新生成）
         await store.consume(token)
-        logger.info("teleport_auth_relay_success", user=cfg.teleport.user, scope=entry.scope)
-        message = ("db-gateway 的 Teleport 会话已续期，自动续期已恢复。"
-                   if entry.scope == SCOPE_SESSION else "证书已续期。数据库连接会在 30 秒内自动恢复。")
+        logger.info("teleport_auth_relay_success", user=cfg.teleport.user)
+        message = "db-gateway 的 Teleport 会话已续期，自动续期已恢复。"
         return web.Response(
             text=render_result(ok=True, message=message),
             content_type="text/html",
@@ -318,7 +255,7 @@ async def handle_teleport_auth_post(request: web.Request) -> web.Response:
 
     # 失败：保留 token，用户可以回到飞书链接重试（token 5 分钟内仍有效）
     failures = await store.record_failure(token)
-    logger.warning("teleport_auth_relay_failed", scope=entry.scope, failures=failures, reason=msg[:200])
+    logger.warning("teleport_auth_relay_failed", failures=failures, reason=msg[:200])
     left = MAX_FAILED_LOGINS - failures
     retry_note = (f"此链接还可再试 {left} 次。" if left > 0
                   else "此链接已连续失败 3 次并作废，请等待下一条提醒里的新链接。")

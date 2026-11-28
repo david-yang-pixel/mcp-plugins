@@ -1,12 +1,6 @@
-"""In-memory one-time token store for Teleport auth relay.
+"""In-memory one-time token store for the Teleport auth relay (/teleport-auth).
 
-Each token names the session a login through it renews:
-
-* ``SCOPE_SESSION`` - db-gateway's own session (teleport_session), the links
-  db-gateway sends when automatic login stopped;
-* ``SCOPE_HOST`` - the host session at ``teleport.auth_home``, the links the
-  legacy tsh-auth-watchdog mints through ``/internal/teleport-auth/issue``
-  (the host tunnels still depend on it until step 2 moves them).
+A login through a token renews db-gateway's own session (teleport_session).
 """
 from __future__ import annotations
 
@@ -16,8 +10,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-SCOPE_SESSION = "session"
-SCOPE_HOST = "host"
 # Failed logins one link allows; each counts toward Teleport's own account lockout.
 MAX_FAILED_LOGINS = 3
 
@@ -25,7 +17,6 @@ MAX_FAILED_LOGINS = 3
 class AuthToken:
     token: str
     created_at: datetime
-    scope: str = SCOPE_SESSION
     ttl_minutes: int = 5
     used: bool = False
     failures: int = 0
@@ -45,18 +36,15 @@ class TokenStore:
         self._tokens: dict[str, AuthToken] = {}
         self._lock = asyncio.Lock()
 
-    async def create(self, scope: str = SCOPE_SESSION, *, ttl_minutes: int = 5) -> str:
-        """Generate a fresh one-time token for ``scope``."""
-        if scope not in (SCOPE_SESSION, SCOPE_HOST):
-            raise ValueError(f"unknown token scope: {scope}")
+    async def create(self, *, ttl_minutes: int = 5) -> str:
+        """Generate a fresh one-time token."""
         if not 1 <= ttl_minutes <= 120:
             raise ValueError("token ttl must be 1-120 minutes")
         tok = secrets.token_urlsafe(32)
         async with self._lock:
             self._cleanup()
             self._tokens[tok] = AuthToken(
-                token=tok, created_at=datetime.now(timezone.utc), scope=scope,
-                ttl_minutes=ttl_minutes,
+                token=tok, created_at=datetime.now(timezone.utc), ttl_minutes=ttl_minutes,
             )
         return tok
 
@@ -86,7 +74,7 @@ class TokenStore:
         return await self.lookup(tok) is not None
 
     async def lookup(self, tok: str) -> Optional[AuthToken]:
-        """The valid, unused token (with its scope), or None; does not consume."""
+        """The valid, unused token, or None; does not consume."""
         async with self._lock:
             self._cleanup()
             token = self._tokens.get(tok)

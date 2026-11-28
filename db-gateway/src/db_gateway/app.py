@@ -19,11 +19,10 @@ from db_gateway.log import get_logger
 from db_gateway.teleport_auth_web import (
     SESSION_LINK_TTL_MINUTES,
     handle_teleport_auth_get,
-    handle_teleport_auth_issue,
     handle_teleport_auth_post,
     issue_link,
 )
-from db_gateway.teleport_tokens import SCOPE_SESSION, TokenStore
+from db_gateway.teleport_tokens import TokenStore
 from db_gateway.tsh_daemons import stop_all as stop_tsh_daemons
 from db_gateway.tsh_daemons import tunnel_spec
 
@@ -250,7 +249,6 @@ def create_db_gateway_app(cfg: Any | None = None) -> web.Application:
     app.router.add_post("/mcp", handle_mcp_post)
     app.router.add_get("/teleport-auth", handle_teleport_auth_get)
     app.router.add_post("/teleport-auth", handle_teleport_auth_post)
-    app.router.add_post("/internal/teleport-auth/issue", handle_teleport_auth_issue)
     app.on_startup.append(_start_maintenance)
     app.on_cleanup.append(_stop_maintenance)   # before the pools it maintains
     app.on_cleanup.append(_close_pg_pools)
@@ -271,7 +269,7 @@ def _teleport_alert(app: web.Application):
 
     async def alert(title: str, message: str, link: bool) -> None:
         if link:
-            url = await issue_link(app, SCOPE_SESSION, ttl_minutes=SESSION_LINK_TTL_MINUTES)
+            url = await issue_link(app, ttl_minutes=SESSION_LINK_TTL_MINUTES)
             message += (f"\n\n认证链接（一次性，{SESSION_LINK_TTL_MINUTES} 分钟内有效）：{url}" if url
                         else "\n\n（未配置 TELEPORT_PUBLIC_BASE_URL，无法生成认证链接）")
         await feishu.send_alert(title=title, message=message, urgent=True)

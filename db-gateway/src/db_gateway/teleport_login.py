@@ -1,16 +1,13 @@
 """`tsh login` through pexpect (password + OTP prompts).
 
-Used by:
-- teleport_session.py — db-gateway's own session, always into a fresh gen-<N> home
-  (also for manual logins submitted through /teleport-auth)
-- scripts/auth-watchdog.py, scripts/tsh-init.py — legacy host-side renewal of the
-  shared home (``run_tsh_login``)
+Used by teleport_session.py for db-gateway's own session, always into a fresh
+gen-<N> home (also for manual logins submitted through /teleport-auth).
 
 Gotchas kept in one place:
 1. HTTP(S)_PROXY must be cleared: a MITM proxy makes Teleport answer "invalid
    credentials".
-2. An existing profile skips the password prompt. A fresh, empty TELEPORT_HOME
-   avoids that; the legacy helper purges the profile first instead.
+2. An existing profile skips the password prompt; a fresh, empty TELEPORT_HOME
+   avoids that.
 3. TELEPORT_TOOLS_VERSION=off keeps tsh from re-executing another client version.
 
 The prompts match tsh 18.11 ("Enter password for Teleport user <u>:" and
@@ -142,52 +139,3 @@ async def login_fresh(
     )
     return LoginResult(result.ok, result.kind, _redact(result.message, (password, otp)))
 
-
-async def run_tsh_login(
-    *,
-    proxy: str,
-    user: str,
-    password: str,
-    otp: str,
-    auth_home: str,
-    timeout_s: int = 60,
-    tsh_path: str = "tsh",
-) -> tuple[bool, str]:
-    """Legacy helper (scripts/): purge the profile in ``auth_home``, then log in again.
-
-    Returns ``(success, message)``.
-    """
-    try:
-        import pexpect  # noqa: F401
-    except ImportError:
-        return False, "pexpect module not installed in container"
-
-    def _purge() -> None:
-        import shutil
-        import subprocess
-        from pathlib import Path
-
-        r = subprocess.run(
-            [tsh_path, "logout"], env=_login_env(auth_home),
-            capture_output=True, timeout=10, check=False,
-        )
-        logger.info("tsh_logout_result", rc=r.returncode)
-        # tsh names the profile file after the cluster (proxy without the port).
-        cluster_name = proxy.split(":", 1)[0]
-        shutil.rmtree(Path(auth_home) / "keys", ignore_errors=True)
-        for name in ("current-profile", f"{cluster_name}.yaml"):
-            try:
-                (Path(auth_home) / name).unlink()
-            except FileNotFoundError:
-                pass
-        logger.info("tsh_profile_purged", auth_home=auth_home, cluster_name=cluster_name)
-
-    try:
-        await asyncio.to_thread(_purge)
-    except Exception as e:  # noqa: BLE001
-        return False, f"pre-logout failed: {e}"
-    result = await login_fresh(
-        tsh_path=tsh_path, proxy=proxy, user=user, password=password, otp=otp,
-        home=auth_home, timeout_s=timeout_s,
-    )
-    return result.ok, result.message

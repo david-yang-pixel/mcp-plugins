@@ -54,7 +54,6 @@ teleport:
   max_auth_failures: 2
   login_timeout_seconds: 60
   notify_interval_seconds: 3600
-  auth_home: ./.tsh                # host session; only for host-scoped manual logins
 # Read-only Teleport tools (plugin_lambda_logs, kube_read) on that session.
 teleport_tools:
   time_budget_seconds: 40   # whole tool call; keep below the 60s Nginx timeout

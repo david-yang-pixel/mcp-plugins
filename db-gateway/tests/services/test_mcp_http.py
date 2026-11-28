@@ -461,7 +461,7 @@ async def test_app_cleanup_stops_tsh_daemons(mcp_client_factory):
 async def test_app_runs_background_maintenance_while_serving(tmp_path):
     from db_gateway.app import MAINTENANCE_TASK_KEY
 
-    cfg = AppConfig(teleport={"auth_home": str(tmp_path / "tsh")}, db_gateway={"api_key": "secret"})
+    cfg = AppConfig(teleport={"sessions_dir": str(tmp_path / "sessions")}, db_gateway={"api_key": "secret"})
     app = create_db_gateway_app(cfg)
     async with TestClient(TestServer(app)):
         task = app[MAINTENANCE_TASK_KEY]
@@ -488,7 +488,6 @@ async def test_status_reports_the_session_and_each_database_route(tmp_path):
 async def test_manual_login_alert_carries_a_fresh_session_link(tmp_path):
     from db_gateway.app import _teleport_alert
     from db_gateway.app_context import TELEPORT_AUTH_TOKEN_STORE_KEY
-    from db_gateway.teleport_tokens import SCOPE_SESSION
 
     cfg = AppConfig(teleport={"public_base_url": "https://agent.example.com"},
                     feishu={"webhook_url": "https://open.feishu.example/hook"})
@@ -502,7 +501,7 @@ async def test_manual_login_alert_carries_a_fresh_session_link(tmp_path):
     first, second = (c.kwargs["message"] for c in send.await_args_list)
     url = first.split("认证链接（一次性，60 分钟内有效）：", 1)[1]
     entry = await app[TELEPORT_AUTH_TOKEN_STORE_KEY].lookup(url.split("t=", 1)[1])
-    assert entry.scope == SCOPE_SESSION and entry.ttl_minutes == 60
+    assert entry.ttl_minutes == 60
     assert second == "body2"
     assert _teleport_alert(create_db_gateway_app(AppConfig())) is None    # no webhook: log only
 
