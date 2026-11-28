@@ -28,6 +28,7 @@ HTTP `POST /query` 与 MCP `tools/call`（`/mcp`，以及 `scripts/db_gateway_mc
 | `limit` | 否 | 每页行数，默认且最大为 `postgres.max_rows`（默认 1000），超过时按上限返回并给出 warning。 |
 | `format` | 否 | `csv`（默认）或 `json`。 |
 | `explain` | 否 | 布尔值，默认 `false`。为 `true` 时返回执行计划而不是数据，见下文。 |
+| `count_total` | 否 | 布尔值，默认 `false`。为 `true` 且本页取满时，额外统计总行数填入 `total_rows`（多一个往返，受 `count_timeout_seconds` 限制）。翻页只需 `has_more` / `next_offset`，不需要总数时不要开。 |
 
 `ticket_id` 参数已移除。旧调用方继续传入时会被静默忽略，不报错，也不再产生 warning；其他未知参数同样忽略。
 
@@ -39,7 +40,7 @@ HTTP `POST /query` 与 MCP `tools/call`（`/mcp`，以及 `scripts/db_gateway_mc
   - `QUERY_ERROR`（pool 模式）的 `error` 与 psql 输出一致，包含 PostgreSQL 的 `ERROR`、`DETAIL`、`HINT`，以及出错位置：`POSITION`（相对调用方提交的 SQL，换算掉网关包装的前缀）、`LINE n:` 原文和 `^` 标记。例如列名写错时会带 `HINT:  Perhaps you meant to reference the column "workflow_runs.status".`，`uuid = text` 时会提示显式类型转换。psql 模式直接返回 psql 的错误输出（同样含 `HINT`，但 `LINE` 行号按包装后的语句计算，比原 SQL 多 1）。
   - `QUERY_TIMEOUT` 的 `error` 末尾附上查询涉及表（从 SQL 的 `FROM`/`JOIN` 中提取，排除 CTE 名）在 `pg_indexes` 中的现有索引定义，方便判断条件是否命中索引。索引列表在进程内按库缓存，最多每小时刷新一次；获取索引用单独的短超时（语句 2 秒，总预算 5 秒），失败时只记日志、60 秒内不重试，原超时错误保持不变。
 - `row_count`：本页真实数据行数，按 CSV 解析计数（多行字段算一行，没有 psql 的 `(N rows)` 页脚）。
-- `total_rows`：结果总行数。无法得出时为 `null`，原因写在 `warnings` 里，例如计数超时。
+- `total_rows`：结果总行数。结果在本页内取完时为精确值；本页取满（`has_more=true`）时为 `null`，除非传了 `count_total=true` 且计数在预算内完成。为 `null` 时原因写在 `warnings` 里（未请求计数、计数超时等）。
 - `has_more` / `truncated`：后面是否还有数据；`truncated` 是旧字段，值与 `has_more` 相同。
 - `next_offset`：有下一页时为下一页的 `offset`，没有时为 `null`。`offset`、`limit` 返回实际生效的值。
 - `columns`：列名数组。
@@ -65,7 +66,7 @@ HTTP `POST /query` 与 MCP `tools/call`（`/mcp`，以及 `scripts/db_gateway_mc
 1. 在 `BEGIN TRANSACTION READ ONLY` 中设置 `statement_timeout = query_timeout_seconds`。
 2. `DECLARE` 游标，内容为 `SELECT * FROM (<sql>) AS _db_gateway_q`；包装后的 SQL 会再次通过只读校验。
 3. 依次执行 `MOVE offset`、`FETCH limit+1`；多取的一行只用来判断 `has_more`。
-4. 在同一游标上执行 `MOVE ALL` 计算 `total_rows`，受 `count_timeout_seconds` 限制。这样不会再次执行原查询；超时只让 `total_rows` 为 `null`，本页数据照常返回。
+4. 仅当 `count_total=true` 时，在同一游标上执行 `MOVE ALL` 计算 `total_rows`，受 `count_timeout_seconds` 限制。这样不会再次执行原查询；超时只让 `total_rows` 为 `null`，本页数据照常返回。
 
 用户 SQL 只出现在以 SQL 开头的 `-c` 参数中，psql 原样发给服务端，不解析其中的 `\` 元命令或 `:变量`。
 
@@ -76,7 +77,7 @@ SQL 先按原规则通过只读校验（调用方自己写 `EXPLAIN ...` 仍会�
 ### 连接方式 `postgres.driver`
 
 - `psql`（默认）：每次查询启动一个 psql 进程并新建连接。经 `tsh proxy db --tunnel` 建连（TLS 到 Teleport、DB agent、Postgres 认证）约需 2 秒，`timing_ms.connect_and_overhead_ms` 主要就是这部分。
-- `pool`：进程内用 psycopg 连接池为每个库（prod、billing、plugin）保持连接，平时一次查询只需自身的往返。执行方式与 psql 路径一致，每页固定两个往返：第一个是 `BEGIN READ ONLY; SET LOCAL statement_timeout; DECLARE; [MOVE offset;] FETCH`；第二个是 `[SET LOCAL statement_timeout; MOVE ALL;] SELECT pg_advisory_unlock_all(); ROLLBACK`。每个批次是一条简单查询消息，结束后一律回滚。值按 PostgreSQL 文本输出返回，csv/json 结果与 psql 路径逐字一致。`column_types` 用 `format_type()` 解析并缓存。只有页面取满（还有下一页）时才执行计数，否则总行数直接可知。
+- `pool`：进程内用 psycopg 连接池为每个库（prod、billing、plugin）保持连接，平时一次查询只需自身的往返。执行方式与 psql 路径一致。默认（不计数）每页只有一个往返：`BEGIN READ ONLY; SET LOCAL statement_timeout; DECLARE; [MOVE offset;] FETCH; SELECT pg_advisory_unlock_all(); ROLLBACK` 作为一个批次发出，任一语句出错时后面的语句不会执行，由网关补发回滚和解锁。传 `count_total=true` 时为两个往返：第一个到 `FETCH` 为止；第二个是 `[SET LOCAL statement_timeout; MOVE ALL;] SELECT pg_advisory_unlock_all(); ROLLBACK`，只有页面取满时才执行计数。每个批次是一条简单查询消息，结束后一律回滚。值按 PostgreSQL 文本输出返回，csv/json 结果与 psql 路径逐字一致。`column_types` 用 `format_type()` 解析并缓存；不计数时这条网关内置的类型查询在回滚之后执行（只在类型首次出现时多一次往返）。连接池的连接不使用服务端预备语句（`prepare_threshold=None`），出错后不会残留失效的预备语句缓存。
 
 pool 模式与 Teleport 续签的配合：
 - 证书由 `tsh-auth-watchdog` 自动续签：`tsh logout --all` 后用密码和 TOTP 重新 `tsh login`。之后 `tsh-cert.path` 重启 `tsh-proxy-db*` 隧道，经隧道的已有连接会全部断开。连接池不接触证书，只连接本机隧道端口。
@@ -84,9 +85,9 @@ pool 模式与 Teleport 续签的配合：
 - 遇到连接级错误（连接被关闭、隧道拒绝连接、`pool_acquire_timeout_seconds` 内拿不到连接）时，清空该库的连接池并返回 `TELEPORT_EXPIRED`。核心的重试循环会间隔 `pool_retry_delay_seconds`（默认 1.5 秒，覆盖隧道重启时间）用新连接重试 `teleport_retry_attempts` 次。
 - 空闲超过 `pool_max_idle_seconds`（240）的多余连接会被回收，常驻 `pool_min_size`（1）条；连接最长存活 `pool_max_lifetime_seconds`（1800）。空闲超过 `pool_check_idle_seconds`（60）的连接在交给查询前先探测一次，失效就换新连接。
 - 连接数上限沿用 `max_concurrent_queries`；单飞（singleflight）和每库并发限制不变。
-- 会话隔离：每次查询都在事务内执行并强制回滚，事务内做的会话级 `SET` / `set_config(..., false)` / `SET ROLE` 会随回滚撤销，不会被下一条查询继承。会话级 advisory lock 回滚后仍会保留，而且只读校验看不到所有取锁方式（例如 Unicode 转义标识符、`query_to_xml('...')`），所以每次查询的最后一个往返都会执行 `pg_advisory_unlock_all()`。查询中途出错时，先补发 `ROLLBACK` 和解锁再归还连接；如果清理也失败，就直接关闭这条连接。校验器拒绝 `pg_advisory_*` 只是第一道防线。
+- 会话隔离：每次查询都在事务内执行并强制回滚，事务内做的会话级 `SET` / `set_config(..., false)` / `SET ROLE` 会随回滚撤销，不会被下一条查询继承。会话级 advisory lock 回滚后仍会保留，而且只读校验看不到所有取锁方式（例如 Unicode 转义标识符、`query_to_xml('...')`），所以每次查询的最后一个批次都会执行 `pg_advisory_unlock_all()`。查询中途出错时，先补发 `ROLLBACK` 和解锁再归还连接；如果清理也失败，就直接关闭这条连接。校验器拒绝 `pg_advisory_*` 只是第一道防线。
 
-`timing_ms` 在 pool 模式下的字段：`pool_acquire_ms`（取得连接，含新建连接耗时）、`pool_new_connections`（本次新建的连接数，0 表示复用）、`query_ms`（第一个往返）、`count_ms` 或 `finish_ms`（第二个往返，带计数时为前者）、`describe_ms`（列类型首次出现时多一次往返，之后走缓存）、`parse_ms`。
+`timing_ms` 在 pool 模式下的字段：`pool_acquire_ms`（取得连接，含新建连接耗时）、`pool_new_connections`（本次新建的连接数，0 表示复用）、`query_ms`（第一个往返；不计数时就是整页唯一的往返）、`count_ms` 或 `finish_ms`（仅 `count_total=true` 时的第二个往返，执行了计数时为前者）、`describe_ms`（列类型首次出现时多一次往返，之后走缓存）、`parse_ms`。
 
 切换方法：把 `deploy/runtime.json` 中 `settings.postgres.driver` 改为 `pool` 并部署 db-gateway；回退时改回 `psql`。
 
@@ -107,13 +108,13 @@ pool 模式与 Teleport 续签的配合：
 | 配置 | 默认 | 说明 |
 | --- | --- | --- |
 | `postgres.max_rows` | 1000 | 单页上限。 |
-| `postgres.query_timeout_seconds` | 30 | 主查询 `statement_timeout`。psql 进程总超时为该值加 `count_timeout_seconds`。 |
-| `postgres.count_timeout_seconds` | 5 | total_rows 计数预算，设为 `0` 时不计数（仍会通过 `has_more` 判断是否有下一页）。 |
+| `postgres.query_timeout_seconds` | 30 | 主查询 `statement_timeout`。客户端总超时为该值，`count_total=true` 时再加 `count_timeout_seconds`（pool 模式另加 15 秒余量）。 |
+| `postgres.count_timeout_seconds` | 5 | `count_total=true` 时的计数预算；设为 `0` 时关闭计数，`count_total` 不生效并给出 warning（仍会通过 `has_more` 判断是否有下一页）。 |
 | `db_gateway.audit_log_dir` | 空 | 审计日志目录，文件名固定为 `db_gateway_audit.log`，目录不存在时自动创建；相对路径相对 `config.yaml` 所在目录。为空时使用 `<resources.base_dir>/<resources.state_dir>/logs`。生产配置为 `/var/lib/mcp/logs`（挂载 `@data/logs`，持久化）。 |
 
 已移除的 `db_gateway.require_ticket_id`、`db_gateway.missing_ticket_alert_interval_seconds` 和环境变量 `DB_GATEWAY_REQUIRE_TICKET_ID` 不再生效；旧 `config.yaml` 中仍有这些键时照常加载并忽略。
 
-审计日志每条都带 `offset`、`limit`、`format` 字段（`explain=true` 时另有 `explain`），成功时另有 `total_rows`、`has_more`、`timing_ms`；`db_gateway_schema` 的调用记为 `"tool": "db_gateway_schema"` 并带 `tables`。stdio 客户端默认超时 `DB_GATEWAY_TIMEOUT=45` 秒。
+审计日志每条都带 `offset`、`limit`、`format` 字段（`explain=true` 时另有 `explain`，`count_total=true` 时另有 `count_total`），成功时另有 `total_rows`、`has_more`、`timing_ms`；`db_gateway_schema` 的调用记为 `"tool": "db_gateway_schema"` 并带 `tables`。stdio 客户端默认超时 `DB_GATEWAY_TIMEOUT=45` 秒。
 
 ## 表结构工具 `db_gateway_schema`
 
@@ -126,13 +127,13 @@ MCP `tools/call`（`/mcp` 与 stdio 版本）和 HTTP `POST /schema` 使用同�
 
 返回 `tables`：每张表一项，含 `schema`、`table`、`columns`（`name`、`type`、`nullable`，有默认值时带 `default`）和 `indexes`（`name`、`definition`，即 `pg_indexes.indexdef`，主键索引名通常以 `_pkey` 结尾）。找不到的表放在 `not_found`，并在 `warnings` 中说明。失败时 `success=false`，`code` 为 `UNKNOWN_DATABASE`、`INVALID_ARGUMENT`、`TELEPORT_EXPIRED`、`QUERY_TIMEOUT` 或 `QUERY_ERROR`。
 
-列来自 `information_schema.columns`，索引来自 `pg_indexes`。两条查询都是网关内置的只读 SQL，表名只作为绑定参数传入（`table_name = ANY(%s)`），在 `READ ONLY` 事务中以 `statement_timeout`（`query_timeout_seconds` 与 15 秒取小）执行后回滚。pool 模式复用连接池；psql 模式用 psycopg 临时建一条连接，用完关闭。类型名缩写（`varchar`、`timestamptz` 等）与 `scripts/dump_db_schema.py` 共用 `db_gateway.schema_info`。
+列来自 `information_schema.columns`，索引来自 `pg_indexes`。两条查询都是网关内置的只读 SQL，表名只作为绑定参数传入（`table_name = ANY(%s)`），在同一个 `READ ONLY` 事务中以 `statement_timeout`（`query_timeout_seconds` 与 15 秒取小）执行后回滚；`BEGIN`、两条查询和 `ROLLBACK` 用 psycopg pipeline 一次发出，只有一个往返（超时时附带索引的目录查询同样如此）。pool 模式复用连接池；psql 模式用 psycopg 临时建一条连接，用完关闭。类型名缩写（`varchar`、`timestamptz` 等）与 `scripts/dump_db_schema.py` 共用 `db_gateway.schema_info`。
 
 所有工具都在 `tools/list` 中声明 `annotations.readOnlyHint: true`、`destructiveHint: false`。OpenConnector 等客户端据此判断读写，未声明时新工具会被当作 write 并要求确认。
 
 ## Teleport 只读工具 `plugin_lambda_logs`、`kube_read`
 
-复用网关的 Teleport 会话，查 SaaS 插件 Lambda 的 CloudWatch 日志和只读查看 Kubernetes 集群。设计见仓库根目录 `docs/superpowers/specs/2026-11-27-dify-db-teleport-read-tools-design.md`。
+复用网关的 Teleport 会话，查 SaaS 插件 Lambda 的 CloudWatch 日志和只读查看 Kubernetes 集群。
 
 两个工具只走 MCP `/mcp`：没有 HTTP 端点，stdio 版本（`scripts/db_gateway_mcp.py`）也不转发，仍只列出两个数据库工具。所有访问在 Teleport 和 CloudTrail 里记在网关的 Teleport 账号名下。
 

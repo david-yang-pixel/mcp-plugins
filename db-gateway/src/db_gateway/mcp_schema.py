@@ -21,9 +21,11 @@ TOOL_SCHEMA: dict[str, Any] = {
         "The gateway enforces read-only SQL "
         "(single statement; may start with '(' e.g. '(SELECT 1) UNION ALL (SELECT 2)'). "
         "Results are paginated: at most `limit` rows (<= server max_rows, default 1000) "
-        "starting at `offset`. The response includes row_count, total_rows (null if the "
-        "bounded count timed out), has_more, next_offset (pass it as `offset` for the next "
-        "page), warnings and timing_ms. Add ORDER BY (ideally on a unique key) when paging, "
+        "starting at `offset`. The response includes row_count, total_rows, has_more, "
+        "next_offset (pass it as `offset` for the next page), warnings and timing_ms. "
+        "total_rows is exact when the result fits in the page; when has_more=true it is null "
+        "unless count_total=true (a bounded count that costs extra time and can still time "
+        "out). Add ORDER BY (ideally on a unique key) when paging, "
         "otherwise page order is not stable. format=csv (default) returns `csv` text where "
         "NULL and empty string both appear as an empty field; format=json returns `columns`, "
         "`column_types` and `rows` as an array of arrays of strings, with SQL NULL as null. "
@@ -68,6 +70,15 @@ TOOL_SCHEMA: dict[str, Any] = {
                 "description": (
                     "csv: `csv` text (header + rows). json: `columns`, `column_types`, and "
                     "`rows` as array of arrays (string values, SQL NULL as null)."
+                ),
+            },
+            "count_total": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Also count all rows when the page is full, to fill total_rows. Costs an "
+                    "extra round trip and up to a few seconds on large results; leave it off "
+                    "unless the total is needed (has_more/next_offset are enough for paging)."
                 ),
             },
             "explain": {

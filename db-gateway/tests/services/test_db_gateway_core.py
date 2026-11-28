@@ -295,6 +295,7 @@ async def test_gateway_pagination_returns_total_and_next_offset(tmp_path):
             sql="SELECT id FROM tenants ORDER BY id;",
             offset=10,
             limit=2,
+            count_total=True,
         )
 
     kwargs = run.await_args.kwargs
@@ -318,8 +319,104 @@ async def test_gateway_pagination_returns_total_and_next_offset(tmp_path):
     assert entry["status"] == "OK"
     assert entry["offset"] == 10 and entry["limit"] == 2
     assert entry["total_rows"] == 23
+    assert entry["count_total"] is True
     assert "ticket_id" not in entry and "ticket_id_missing" not in entry
     assert "queue_wait_ms" in entry["timing_ms"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_does_not_count_unless_asked(tmp_path):
+    """Counting costs an extra round trip (and up to count_timeout_seconds): opt-in only."""
+    from db_gateway.core import execute_gateway_query
+
+    page = _page_result(total_rows=None, total_rows_note="结果超过一页，未统计总行数；需要总数时传 count_total=true")
+    run = AsyncMock(return_value=page)
+    with patch("db_gateway.core.run_psql", run):
+        result = await execute_gateway_query(
+            cfg=_cfg(tmp_path), database="prod", sql="SELECT id FROM tenants ORDER BY id", limit=2,
+        )
+
+    assert run.await_args.kwargs["count_timeout"] == 0
+    assert result.total_rows is None and result.has_more is True
+    assert any("count_total=true" in w for w in result.warnings)
+    assert "count_total" not in _audit_entries(tmp_path)[-1]
+
+
+@pytest.mark.asyncio
+async def test_count_total_is_ignored_when_the_server_disables_counting(tmp_path):
+    from db_gateway.core import execute_gateway_query
+
+    cfg = _cfg(tmp_path)
+    cfg.postgres.count_timeout_seconds = 0
+    run = AsyncMock(return_value=_page_result(total_rows=None, total_rows_note="结果超过一页，未统计总行数"))
+    with patch("db_gateway.core.run_psql", run):
+        result = await execute_gateway_query(
+            cfg=cfg, database="prod", sql="SELECT id FROM tenants ORDER BY id", limit=2, count_total=True,
+        )
+
+    assert run.await_args.kwargs["count_timeout"] == 0
+    assert [w for w in result.warnings if "total_rows" in w or "count_total" in w] == [
+        "total_rows 为 null：count_total 未生效，服务端已关闭计数（count_timeout_seconds=0）"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_disabled_counting_does_not_warn_when_the_page_is_not_full(tmp_path):
+    from db_gateway.core import execute_gateway_query
+
+    cfg = _cfg(tmp_path)
+    cfg.postgres.count_timeout_seconds = 0
+    page = _page_result(has_more=False, truncated=False, total_rows=12, offset_skipped=0)
+    with patch("db_gateway.core.run_psql", AsyncMock(return_value=page)):
+        result = await execute_gateway_query(
+            cfg=cfg, database="prod", sql="SELECT id FROM tenants ORDER BY id", count_total=True,
+        )
+
+    assert result.total_rows == 12 and result.warnings == []
+
+
+@pytest.mark.asyncio
+async def test_count_total_with_explain_is_ignored_with_a_warning(tmp_path):
+    from db_gateway.core import execute_gateway_query
+
+    plan = _page_result(has_more=False, truncated=False, total_rows=2, offset_skipped=0)
+    run = AsyncMock(return_value=plan)
+    with patch("db_gateway.core.run_psql", run):
+        result = await execute_gateway_query(
+            cfg=_cfg(tmp_path), database="prod", sql="SELECT 1", explain=True, count_total=True,
+        )
+
+    assert run.await_args.kwargs["count_timeout"] == 0
+    assert any("explain=true" in w and "count_total" in w for w in result.warnings)
+    assert _audit_entries(tmp_path)[-1]["count_total"] is True
+
+
+@pytest.mark.asyncio
+async def test_timeout_message_names_the_count_budget_when_counting(tmp_path):
+    from db_gateway.core import execute_gateway_query
+
+    with patch("db_gateway.core.run_psql", AsyncMock(side_effect=asyncio.TimeoutError())):
+        result = await execute_gateway_query(
+            cfg=_cfg(tmp_path), database="prod", sql="SELECT 1 FROM missing_hint_table", count_total=True,
+        )
+
+    assert result.code == "QUERY_TIMEOUT"
+    assert result.error.startswith("查询超时：超过 30s（另加 5s 计数预算）仍未完成，已终止")
+
+
+@pytest.mark.asyncio
+async def test_count_total_must_be_a_boolean(tmp_path):
+    from db_gateway.core import execute_gateway_query
+
+    run = AsyncMock(return_value=_page_result())
+    with patch("db_gateway.core.run_psql", run):
+        result = await execute_gateway_query(
+            cfg=_cfg(tmp_path), database="prod", sql="SELECT 1", count_total="maybe",
+        )
+
+    assert result.success is False and result.code == "INVALID_ARGUMENT"
+    assert "count_total" in result.error
+    run.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -802,7 +899,7 @@ async def test_timeout_error_lists_indexes_of_referenced_tables(tmp_path):
 
     assert result.code == "QUERY_TIMEOUT"
     error = result.error or ""
-    assert error.startswith("查询超时：psql 在 30s")
+    assert error.startswith("查询超时：超过 30s 仍未完成")
     assert "workflow_run_tenant_idx ON public.workflow_runs USING btree (tenant_id, created_at)" in error
     assert "apps_pkey" in error
     # CTE names are not tables, but the table read inside the CTE is.
@@ -847,7 +944,7 @@ async def test_timeout_index_lookup_failure_keeps_original_error(tmp_path):
         first = await _timeout_query(tmp_path)
         second = await _timeout_query(tmp_path)
 
-    original = "查询超时：psql 在 30s（另加计数预算）内未完成，已终止"
+    original = "查询超时：超过 30s 仍未完成，已终止"
     assert first.code == "QUERY_TIMEOUT" and first.error == original
     assert second.error == original
     # Failed lookups back off instead of hitting the database on every timeout.
@@ -866,7 +963,7 @@ async def test_timeout_index_lookup_is_bounded_by_a_short_budget(tmp_path, monke
         result = await asyncio.wait_for(_timeout_query(tmp_path), timeout=2)
 
     assert result.code == "QUERY_TIMEOUT"
-    assert result.error == "查询超时：psql 在 30s（另加计数预算）内未完成，已终止"
+    assert result.error == "查询超时：超过 30s 仍未完成，已终止"
 
 
 @pytest.mark.asyncio
@@ -882,7 +979,7 @@ async def test_timeout_index_budget_exhaustion_backs_off(tmp_path, monkeypatch):
         first = await asyncio.wait_for(_timeout_query(tmp_path), timeout=2)
         second = await asyncio.wait_for(_timeout_query(tmp_path), timeout=2)
 
-    original = "查询超时：psql 在 30s（另加计数预算）内未完成，已终止"
+    original = "查询超时：超过 30s 仍未完成，已终止"
     assert first.error == original and second.error == original
     # The budget-exhausted lookup starts the 60s backoff: no second catalog query.
     assert meta.await_count == 1
@@ -952,14 +1049,19 @@ _COLUMN_ROWS = [
 
 
 def _fake_catalog(columns=_COLUMN_ROWS, indexes=_INDEX_ROWS[:2]):
+    """Stands in for run_metadata_queries (one round trip for every catalog query)."""
     from db_gateway import schema_info
 
     async def fake(**kwargs):
-        if kwargs["sql"] == schema_info.COLUMNS_SQL:
-            return columns
-        if kwargs["sql"] == schema_info.INDEXES_SQL:
-            return indexes
-        raise AssertionError(kwargs["sql"])
+        out = []
+        for sql, _params in kwargs["queries"]:
+            if sql == schema_info.COLUMNS_SQL:
+                out.append(columns)
+            elif sql == schema_info.INDEXES_SQL:
+                out.append(indexes)
+            else:
+                raise AssertionError(sql)
+        return out
 
     return AsyncMock(side_effect=fake)
 
@@ -969,7 +1071,7 @@ async def test_schema_lookup_returns_columns_and_indexes(tmp_path):
     from db_gateway.core import execute_schema_lookup
 
     meta = _fake_catalog()
-    with patch("db_gateway.core.run_metadata_query", meta):
+    with patch("db_gateway.core.run_metadata_queries", meta):
         data = await execute_schema_lookup(
             cfg=_cfg(tmp_path), database="prod", tables=["workflow_runs"],
         )
@@ -983,11 +1085,13 @@ async def test_schema_lookup_returns_columns_and_indexes(tmp_path):
     assert table["columns"][2]["type"] == "varchar(255)"
     assert table["columns"][3]["type"] == "timestamp"
     assert [i["name"] for i in table["indexes"]] == ["workflow_runs_pkey", "workflow_run_tenant_idx"]
-    # Table names travel only as bind parameters.
-    for call in meta.await_args_list:
-        assert call.kwargs["params"] == (["workflow_runs"],)
-        assert call.kwargs["database"] == "langgenius"
-        assert "workflow_runs" not in call.kwargs["sql"]
+    # One batched call; table names travel only as bind parameters.
+    (call,) = meta.await_args_list
+    assert call.kwargs["database"] == "langgenius"
+    assert len(call.kwargs["queries"]) == 2
+    for sql, params in call.kwargs["queries"]:
+        assert params == (["workflow_runs"],)
+        assert "workflow_runs" not in sql
     entry = _audit_entries(tmp_path)[-1]
     assert entry["tool"] == "db_gateway_schema" and entry["tables"] == ["workflow_runs"]
 
@@ -996,7 +1100,7 @@ async def test_schema_lookup_returns_columns_and_indexes(tmp_path):
 async def test_schema_lookup_reports_missing_tables(tmp_path):
     from db_gateway.core import execute_schema_lookup
 
-    with patch("db_gateway.core.run_metadata_query", _fake_catalog()):
+    with patch("db_gateway.core.run_metadata_queries", _fake_catalog()):
         data = await execute_schema_lookup(
             cfg=_cfg(tmp_path), database="plugin", tables=["workflow_runs", "public.nope"],
         )
@@ -1021,7 +1125,7 @@ async def test_schema_lookup_rejects_bad_arguments(tmp_path, database, tables, c
     from db_gateway.core import execute_schema_lookup
 
     meta = _fake_catalog()
-    with patch("db_gateway.core.run_metadata_query", meta):
+    with patch("db_gateway.core.run_metadata_queries", meta):
         data = await execute_schema_lookup(cfg=_cfg(tmp_path), database=database, tables=tables)
 
     assert data["success"] is False and data["code"] == code
@@ -1033,7 +1137,7 @@ async def test_schema_lookup_retries_connection_loss_then_reports_teleport(tmp_p
     from db_gateway.core import execute_schema_lookup
 
     meta = AsyncMock(side_effect=TeleportAuthExpired("connection reset"))
-    with patch("db_gateway.core.run_metadata_query", meta):
+    with patch("db_gateway.core.run_metadata_queries", meta):
         data = await execute_schema_lookup(cfg=_cfg(tmp_path), database="prod", tables=["t"])
 
     assert data["code"] == "TELEPORT_EXPIRED"
@@ -1147,12 +1251,12 @@ async def test_schema_lookup_knowledgefs_starts_tunnel(tmp_path):
     from db_gateway.core import execute_schema_lookup
 
     tunnel = AsyncMock()
-    meta = AsyncMock(side_effect=[
+    meta = AsyncMock(return_value=[
         [["public", "logical_documents", "id", "uuid", "NO", None, 1]],
         [],
     ])
     with patch("db_gateway.core.ensure_knowledgefs_tunnel", tunnel), \
-            patch("db_gateway.core.run_metadata_query", meta):
+            patch("db_gateway.core.run_metadata_queries", meta):
         out = await execute_schema_lookup(cfg=_kfs_cfg(tmp_path), database="knowledgefs",
                                           tables=["logical_documents"])
     assert out["success"] and tunnel.await_count == 1

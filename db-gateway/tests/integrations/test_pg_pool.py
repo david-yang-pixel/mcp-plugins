@@ -95,7 +95,7 @@ def _kwargs(db, **overrides):
         "database": db["database"],
         "timeout": 10,
         "max_rows": 1000,
-        "count_timeout": 5,
+        "count_timeout": 0,  # production default: no count unless count_total=true
     }
     base.update(overrides)
     return base
@@ -127,9 +127,10 @@ TYPES_SQL = (
         ("(SELECT 1 AS x) UNION ALL (SELECT 2)", {}),
     ],
 )
-async def test_pool_results_match_psql(database, manager, sql, extra):
+@pytest.mark.parametrize("count_timeout", [0, 5])
+async def test_pool_results_match_psql(database, manager, sql, extra, count_timeout):
     for describe in (False, True):
-        kwargs = _kwargs(database, sql=sql, describe=describe, **extra)
+        kwargs = _kwargs(database, sql=sql, describe=describe, count_timeout=count_timeout, **extra)
         expected = await run_psql(**kwargs)
         actual = await run_pool_query(manager=manager, **kwargs)
         assert actual.csv == expected.csv
@@ -151,17 +152,24 @@ async def test_connection_is_reused(database, manager):
     assert second.rows == [["2"]]
 
 
-async def test_transaction_is_read_only_and_rolled_back(database, manager):
+@pytest.mark.parametrize("count_timeout", [0, 5])
+async def test_transaction_is_read_only_and_rolled_back(database, manager, count_timeout):
     with pytest.raises(RuntimeError, match="read-only transaction"):
-        await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT nextval('seq')"))
+        await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT nextval('seq')", count_timeout=count_timeout))
     # The connection is clean afterwards (no aborted transaction left behind).
-    ok = await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT current_setting('transaction_read_only')"))
+    ok = await run_pool_query(
+        manager=manager,
+        **_kwargs(database, sql="SELECT current_setting('transaction_read_only')", count_timeout=count_timeout),
+    )
     assert ok.rows == [["on"]]
 
 
-async def test_statement_timeout_is_a_timeout(database, manager):
+@pytest.mark.parametrize("count_timeout", [0, 5])
+async def test_statement_timeout_is_a_timeout(database, manager, count_timeout):
     with pytest.raises(asyncio.TimeoutError):
-        await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT pg_sleep(3)", timeout=1))
+        await run_pool_query(
+            manager=manager, **_kwargs(database, sql="SELECT pg_sleep(3)", timeout=1, count_timeout=count_timeout),
+        )
 
 
 async def test_query_error_is_reported(database, manager):
@@ -301,7 +309,8 @@ async def test_pool_reset_between_lookup_and_checkout_is_retried(database, manag
     assert calls["n"] == 2
 
 
-async def test_session_settings_do_not_leak_to_the_next_query(database, manager):
+@pytest.mark.parametrize("count_timeout", [0, 5])
+async def test_session_settings_do_not_leak_to_the_next_query(database, manager, count_timeout):
     """Security review: session GUCs set by one caller must not reach the next.
 
     The forced ROLLBACK undoes session-level SET/set_config made inside the
@@ -310,13 +319,19 @@ async def test_session_settings_do_not_leak_to_the_next_query(database, manager)
     settings = PoolSettings(min_size=1, max_size=1)  # same backend for both queries
     changed = await run_pool_query(
         manager=manager, settings=settings,
-        **_kwargs(database, sql="SELECT set_config('search_path', 'evil', false), set_config('work_mem', '1MB', false)"),
+        **_kwargs(
+            database, count_timeout=count_timeout,
+            sql="SELECT set_config('search_path', 'evil', false), set_config('work_mem', '1MB', false)",
+        ),
     )
     assert changed.rows == [["evil", "1MB"]]
 
     after = await run_pool_query(
         manager=manager, settings=settings,
-        **_kwargs(database, sql="SELECT current_setting('search_path'), current_setting('work_mem') <> '1MB'"),
+        **_kwargs(
+            database, count_timeout=count_timeout,
+            sql="SELECT current_setting('search_path'), current_setting('work_mem') <> '1MB'",
+        ),
     )
     assert after.timing_ms["pool_new_connections"] == 0
     assert after.rows == [['"$user", public', "t"]]
@@ -327,10 +342,27 @@ async def test_session_settings_do_not_leak_to_the_next_query(database, manager)
         await run_pool_query(manager=manager, settings=settings, **_kwargs(database, sql="SELECT pg_advisory_lock(42)"))
 
 
+@pytest.mark.parametrize("count_timeout", [0, 5])
+async def test_advisory_lock_taken_by_a_full_page_is_released(database, manager, count_timeout):
+    settings = PoolSettings(min_size=1, max_size=1)
+    page = await run_pool_query(
+        manager=manager, settings=settings,
+        **_kwargs(
+            database, limit=3, count_timeout=count_timeout,
+            sql="SELECT g, query_to_xml('select pg_advisory_lock(11)', false, false, '') IS NOT NULL FROM generate_series(1, 50) g",
+        ),
+    )
+    assert page.has_more is True
+
+    after = await run_pool_query(manager=manager, settings=settings, **_kwargs(database, sql=_advisory_locks_sql()))
+    assert after.rows == [["0"]]
+
+
 def _advisory_locks_sql() -> str:
     return "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()"
 
 
+@pytest.mark.parametrize("count_timeout", [0, 5])
 @pytest.mark.parametrize(
     "sql",
     [
@@ -340,9 +372,9 @@ def _advisory_locks_sql() -> str:
         "SELECT query_to_xml('select pg_advisory_lock(8)', false, false, '')",
     ],
 )
-async def test_advisory_locks_never_survive_a_pooled_query(database, manager, sql):
+async def test_advisory_locks_never_survive_a_pooled_query(database, manager, sql, count_timeout):
     settings = PoolSettings(min_size=1, max_size=1)  # same backend for both queries
-    await run_pool_query(manager=manager, settings=settings, **_kwargs(database, sql=sql))
+    await run_pool_query(manager=manager, settings=settings, **_kwargs(database, sql=sql, count_timeout=count_timeout))
 
     after = await run_pool_query(manager=manager, settings=settings, **_kwargs(database, sql=_advisory_locks_sql()))
 
@@ -350,14 +382,15 @@ async def test_advisory_locks_never_survive_a_pooled_query(database, manager, sq
     assert after.rows == [["0"]]
 
 
-async def test_advisory_lock_is_released_after_a_failed_query(database, manager):
+@pytest.mark.parametrize("count_timeout", [0, 5])
+async def test_advisory_lock_is_released_after_a_failed_query(database, manager, count_timeout):
     settings = PoolSettings(min_size=1, max_size=1)
     with pytest.raises(RuntimeError):
         await run_pool_query(
             manager=manager, settings=settings,
             # The division by zero only happens after query_to_xml took the lock.
             **_kwargs(
-                database,
+                database, count_timeout=count_timeout,
                 sql="SELECT 1 / (CASE WHEN query_to_xml('select pg_advisory_lock(9)', false, false, '') IS NOT NULL THEN 0 END)",
             ),
         )
@@ -366,9 +399,8 @@ async def test_advisory_lock_is_released_after_a_failed_query(database, manager)
     assert after.rows == [["0"]]
 
 
-async def test_warm_query_uses_two_round_trips(database, manager, monkeypatch):
-    """Each execute() is one round trip; the pool must not send statement by statement."""
-    await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT 1"))
+def _spy_round_trips(monkeypatch) -> list[str]:
+    """Record every execute(): each one is a round trip to the server."""
     calls: list[str] = []
     real_cursor_execute = psycopg.AsyncCursor.execute
     real_conn_execute = psycopg.AsyncConnection.execute
@@ -383,15 +415,45 @@ async def test_warm_query_uses_two_round_trips(database, manager, monkeypatch):
 
     monkeypatch.setattr(psycopg.AsyncCursor, "execute", cursor_execute)
     monkeypatch.setattr(psycopg.AsyncConnection, "execute", conn_execute)
+    return calls
 
-    small = await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT id FROM t ORDER BY id"))
-    assert small.total_rows == 25
-    assert len(calls) == 2
+
+async def test_warm_query_without_count_is_one_round_trip(database, manager, monkeypatch):
+    """No count requested (the default): setup, fetch, unlock and ROLLBACK go in one batch."""
+    await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT 1", count_timeout=0))
+    calls = _spy_round_trips(monkeypatch)
+
+    small = await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT id FROM t ORDER BY id", count_timeout=0))
+    assert small.total_rows == 25 and small.has_more is False
+    assert len(calls) == 1
 
     calls.clear()
-    paged = await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT id FROM t ORDER BY id", offset=5, limit=5))
+    paged = await run_pool_query(
+        manager=manager, **_kwargs(database, sql="SELECT id FROM t ORDER BY id", offset=5, limit=5, count_timeout=0),
+    )
+    assert paged.rows == [[str(i)] for i in range(6, 11)]
+    assert paged.has_more is True and paged.offset_skipped == 5
+    assert paged.total_rows is None and "count_total=true" in paged.total_rows_note
+    assert len(calls) == 1
+
+
+async def test_requested_count_adds_one_round_trip(database, manager, monkeypatch):
+    await run_pool_query(manager=manager, **_kwargs(database, sql="SELECT 1"))
+    calls = _spy_round_trips(monkeypatch)
+
+    paged = await run_pool_query(
+        manager=manager, **_kwargs(database, sql="SELECT id FROM t ORDER BY id", offset=5, limit=5, count_timeout=5),
+    )
     assert paged.total_rows == 25 and paged.has_more is True
     assert len(calls) == 2  # setup+fetch, then count+unlock+rollback
+
+
+async def test_describe_without_count_matches_the_count_path(database, manager):
+    sql = "SELECT id, label, 1.5::numeric(4,2) AS n FROM t ORDER BY id"
+    counted = await run_pool_query(manager=manager, describe=True, **_kwargs(database, sql=sql, limit=3, count_timeout=5))
+    single = await run_pool_query(manager=manager, describe=True, **_kwargs(database, sql=sql, limit=3, count_timeout=0))
+    assert single.column_types == counted.column_types == ["integer", "text", "numeric(4,2)"]
+    assert single.rows == counted.rows
 
 
 # ---------------------------------------------------------------------------
@@ -415,11 +477,12 @@ def workflow_db(database):
     return database
 
 
-async def test_pool_error_includes_hint_and_position(workflow_db, manager):
+@pytest.mark.parametrize("count_timeout", [0, 5])
+async def test_pool_error_includes_hint_and_position(workflow_db, manager, count_timeout):
     with pytest.raises(RuntimeError) as info:
         await run_pool_query(
             manager=manager,
-            **_kwargs(workflow_db, sql="SELECT id\nFROM workflow_runs WHERE stauts = 'x'"),
+            **_kwargs(workflow_db, sql="SELECT id\nFROM workflow_runs WHERE stauts = 'x'", count_timeout=count_timeout),
         )
     text = str(info.value)
     assert 'column "stauts" does not exist' in text
@@ -518,3 +581,191 @@ async def test_timeout_error_lists_indexes_from_the_database(workflow_db, manage
         core._INDEX_CACHE.clear()
     assert result.code == "QUERY_TIMEOUT"
     assert "workflow_run_tenant_idx ON public.workflow_runs USING btree (tenant_id, created_at)" in result.error
+
+
+# ---------------------------------------------------------------------------
+# Round trips on a slow link: elapsed time ~= round trips x latency
+# ---------------------------------------------------------------------------
+
+LINK_DELAY = 0.15  # seconds added to every server -> client chunk
+
+
+@pytest.fixture
+async def slow_link(database):
+    """TCP proxy to the test server that delays server responses by LINK_DELAY.
+
+    Chunks keep their order and are delivered LINK_DELAY after they arrive (pure
+    latency, not per-chunk delay), so a request/response costs one LINK_DELAY.
+    """
+    tasks: set[asyncio.Task] = set()
+
+    async def handle(client_reader, client_writer):
+        server_reader, server_writer = await asyncio.open_connection(database["host"], database["port"])
+
+        async def forward(reader, writer):
+            try:
+                while data := await reader.read(65536):
+                    writer.write(data)
+                    await writer.drain()
+            except (ConnectionError, asyncio.CancelledError):
+                pass
+            finally:
+                writer.close()
+
+        async def delayed(reader, writer):
+            queue: asyncio.Queue = asyncio.Queue()
+
+            async def deliver():
+                while True:
+                    due, data = await queue.get()
+                    if data is None:
+                        break
+                    await asyncio.sleep(max(0.0, due - time.monotonic()))
+                    writer.write(data)
+                    await writer.drain()
+
+            sender = asyncio.create_task(deliver())
+            try:
+                while data := await reader.read(65536):
+                    await queue.put((time.monotonic() + LINK_DELAY, data))
+            except (ConnectionError, asyncio.CancelledError):
+                pass
+            finally:
+                await queue.put((0.0, None))
+                try:
+                    await sender
+                except (ConnectionError, asyncio.CancelledError):
+                    pass
+                writer.close()
+
+        pumps = [asyncio.create_task(forward(client_reader, server_writer)),
+                 asyncio.create_task(delayed(server_reader, client_writer))]
+        tasks.update(pumps)
+        await asyncio.gather(*pumps, return_exceptions=True)
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    yield {**database, "port": port}
+    server.close()
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _elapsed(coro) -> tuple[float, object]:
+    started = time.monotonic()
+    result = await coro
+    return time.monotonic() - started, result
+
+
+async def test_query_page_is_one_round_trip_on_a_slow_link(slow_link, manager):
+    kwargs = _kwargs(slow_link, sql="SELECT id FROM t ORDER BY id", limit=5, count_timeout=0)
+    await run_pool_query(manager=manager, **kwargs)  # opens the connection
+    elapsed, page = await _elapsed(run_pool_query(manager=manager, **kwargs))
+    assert page.has_more is True and page.timing_ms["pool_new_connections"] == 0
+    assert elapsed < LINK_DELAY * 1.8, f"{elapsed:.3f}s: more than one round trip"
+
+
+async def test_metadata_query_is_one_round_trip(slow_link, manager):
+    from db_gateway.pg_pool import run_metadata_query
+
+    kwargs = dict(host=slow_link["host"], port=slow_link["port"], user=slow_link["user"], password="",
+                  database=slow_link["database"], manager=manager)
+    await run_metadata_query(**kwargs, sql="SELECT 1", params=None)  # opens the connection
+    elapsed, rows = await _elapsed(run_metadata_query(**kwargs, sql="SELECT %s::int + 1", params=(1,)))
+    assert rows == [['2']]  # pool connections load every value as text
+    assert elapsed < LINK_DELAY * 1.8, f"{elapsed:.3f}s: more than one round trip"
+
+
+async def test_schema_lookup_is_one_round_trip(slow_link, workflow_db, manager, tmp_path, monkeypatch):
+    from db_gateway import pg_pool
+    from db_gateway.config import AppConfig
+    from db_gateway.core import execute_schema_lookup
+
+    monkeypatch.setattr(pg_pool, "MANAGER", manager)
+    cfg = AppConfig()
+    cfg.resources.base_dir = str(tmp_path)
+    cfg.postgres.host = slow_link["host"]
+    cfg.postgres.user = slow_link["user"]
+    cfg.postgres.db_prod = slow_link["database"]
+    cfg.postgres.port_prod = slow_link["port"]
+    cfg.postgres.driver = "pool"
+    cfg.postgres.pool_watch_teleport_keys = False
+
+    await execute_schema_lookup(cfg=cfg, database="prod", tables=["workflow_runs"])  # opens the connection
+    elapsed, data = await _elapsed(execute_schema_lookup(cfg=cfg, database="prod", tables=["workflow_runs"]))
+    assert data["success"] is True and data["tables"][0]["indexes"]
+    assert elapsed < LINK_DELAY * 1.8, f"{elapsed:.3f}s: columns and indexes not fetched in one round trip"
+
+
+async def test_metadata_query_error_leaves_the_connection_clean(database, manager):
+    from db_gateway.pg_pool import run_metadata_query
+
+    kwargs = dict(host=database["host"], port=database["port"], user=database["user"], password="",
+                  database=database["database"], manager=manager,
+                  settings=PoolSettings(min_size=1, max_size=1))
+    with pytest.raises(RuntimeError, match="does not exist"):
+        await run_metadata_query(**kwargs, sql="SELECT * FROM missing_table", params=None)
+    rows = await run_metadata_query(
+        **kwargs, sql="SELECT current_setting('transaction_read_only'), pg_backend_pid() > 0", params=None,
+    )
+    assert rows == [["on", "t"]]
+
+
+async def test_metadata_statement_timeout_is_reported_and_recovers(database, manager):
+    from db_gateway.pg_pool import StatementTimeout, run_metadata_query
+
+    kwargs = dict(host=database["host"], port=database["port"], user=database["user"], password="",
+                  database=database["database"], manager=manager,
+                  settings=PoolSettings(min_size=1, max_size=1))
+    with pytest.raises(StatementTimeout):
+        await run_metadata_query(**kwargs, sql="SELECT pg_sleep(3)", params=None, timeout=0.5)
+    assert await run_metadata_query(**kwargs, sql="SELECT 1", params=None) == [["1"]]
+
+
+async def test_failed_metadata_pipeline_does_not_poison_the_connection(database, manager):
+    """Code review: a pipeline that fails after psycopg queued a named prepared
+    statement must not leave a cache entry for a statement the server skipped."""
+    from db_gateway.pg_pool import StatementTimeout, run_metadata_queries, run_metadata_query
+
+    kwargs = dict(host=database["host"], port=database["port"], user=database["user"], password="",
+                  database=database["database"], manager=manager, timeout=1.0,
+                  settings=PoolSettings(min_size=1, max_size=1))
+
+    def pair(sleep: float):
+        return [("SELECT pg_sleep(%s::float)", (sleep,)), ("SELECT %s::int + 1", (1,))]
+
+    for _ in range(6):  # other single catalog lookups on the same connection
+        await run_metadata_query(**kwargs, sql="SELECT 1 WHERE %s::int = 1", params=(1,))
+    for _ in range(5):
+        await run_metadata_queries(**kwargs, queries=pair(0))
+    with pytest.raises(StatementTimeout):
+        await run_metadata_queries(**kwargs, queries=pair(2))  # first query times out
+
+    for _ in range(3):
+        assert (await run_metadata_queries(**kwargs, queries=pair(0)))[1] == [["2"]]
+
+
+async def test_metadata_deadline_covers_every_batched_statement(database, manager, monkeypatch):
+    """Code review: each batched statement has its own statement_timeout, so the
+    client deadline must grow with the batch instead of firing first."""
+    from db_gateway import pg_pool
+    from db_gateway.pg_pool import run_metadata_queries
+
+    seen: list[float] = []
+    real_wait_for = asyncio.wait_for
+
+    async def spy(aw, timeout):
+        # pg_pool.asyncio is the global module: only record the gateway's own deadline.
+        if "run_metadata_queries" in getattr(aw, "__qualname__", ""):
+            seen.append(timeout)
+        return await real_wait_for(aw, timeout)
+
+    monkeypatch.setattr(pg_pool.asyncio, "wait_for", spy)
+    settings = PoolSettings(min_size=1, max_size=1, acquire_timeout_seconds=2)
+    await run_metadata_queries(
+        host=database["host"], port=database["port"], user=database["user"], password="",
+        database=database["database"], manager=manager, settings=settings, timeout=3.0,
+        queries=[("SELECT 1", None), ("SELECT 2", None), ("SELECT 3", None)],
+    )
+    assert len(seen) == 1 and seen[0] >= 3 * 3.0 + settings.acquire_timeout_seconds

@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from db_gateway import schema_info
-from db_gateway.pg_pool import pool_settings_from_config, run_metadata_query, run_pool_query
+from db_gateway.pg_pool import (
+    pool_settings_from_config,
+    run_metadata_queries,
+    run_metadata_query,
+    run_pool_query,
+)
 from db_gateway.postgres import (
     PsqlResult,
     PsqlSafetyError,
@@ -235,8 +240,13 @@ async def execute_gateway_query(
     limit: Any = None,
     output_format: Any = "csv",
     explain: Any = False,
+    count_total: Any = False,
 ) -> GatewayQueryResult:
     """Validate and execute one read-only query page through local DB proxy.
+
+    ``count_total=True``: when the page is full, also count the remaining rows
+    (one more round trip, bounded by ``count_timeout_seconds``). Without it
+    ``total_rows`` is only set when the result fits in the page.
 
     ``explain=True``: after the unchanged read-only checks, the gateway runs
     ``EXPLAIN <sql>`` (no ANALYZE, the statement is never executed) and returns
@@ -278,6 +288,7 @@ async def execute_gateway_query(
         return fail("INVALID_ARGUMENT", f"format 只支持 {list(_VALID_FORMATS)}，收到: {output_format!r}")
     try:
         explain_plan = _parse_bool(explain, "explain")
+        want_count = _parse_bool(count_total, "count_total")
     except ValueError as e:
         return fail("INVALID_ARGUMENT", str(e))
 
@@ -296,6 +307,17 @@ async def execute_gateway_query(
     audit_extra: dict[str, Any] = {"offset": page_offset, "limit": page_limit, "format": fmt}
     if explain_plan:
         audit_extra["explain"] = True
+    count_budget = 0.0
+    count_disabled = False
+    if want_count:
+        audit_extra["count_total"] = True
+        if explain_plan:
+            warnings.append("explain=true 时忽略 count_total（执行计划不计数）")
+        else:
+            count_budget = max(0.0, float(
+                _cfg_number(cfg.postgres, "count_timeout_seconds", _DEFAULT_COUNT_TIMEOUT_SECONDS)
+            ))
+            count_disabled = count_budget <= 0
     audit_file = _audit_path(cfg)
 
     try:
@@ -339,6 +361,7 @@ async def execute_gateway_query(
             limit=page_limit,
             describe=(fmt == "json" and not explain_plan),
             explain=explain_plan,
+            count_timeout=count_budget,
         )
     except PsqlSafetyError as e:
         error_status, error_code, error_text = "REJECTED_SQL_SAFETY", "SQL_SAFETY_ERROR", f"SQL safety check failed: {e}"
@@ -347,7 +370,8 @@ async def execute_gateway_query(
     except asyncio.TimeoutError:
         timeout = cfg.postgres.query_timeout_seconds
         error_status, error_code = "TIMEOUT", "QUERY_TIMEOUT"
-        error_text = f"查询超时：psql 在 {timeout}s（另加计数预算）内未完成，已终止"
+        budget = f"（另加 {count_budget:g}s 计数预算）" if count_budget > 0 else " "
+        error_text = f"查询超时：超过 {timeout}s{budget}仍未完成，已终止"
         error_text += await _timeout_index_hint(
             cfg=cfg, database_key=database, db_name=db_name, db_port=db_port, body=body,
         )
@@ -382,7 +406,9 @@ async def execute_gateway_query(
         )
 
     total_rows = result.total_rows
-    if total_rows is None and result.total_rows_note:
+    if total_rows is None and count_disabled:
+        warnings.append("total_rows 为 null：count_total 未生效，服务端已关闭计数（count_timeout_seconds=0）")
+    elif total_rows is None and result.total_rows_note:
         warnings.append(f"total_rows 为 null：{result.total_rows_note}")
 
     if fmt == "json":
@@ -455,12 +481,11 @@ async def _run_psql_controlled(
     limit: int | None = None,
     describe: bool = False,
     explain: bool = False,
+    count_timeout: float = 0.0,
 ) -> PsqlResult:
     max_concurrent = max(1, int(getattr(cfg.postgres, "max_concurrent_queries", 3) or 3))
     singleflight_enabled = bool(getattr(cfg.postgres, "singleflight_enabled", True))
-    count_timeout = float(
-        _cfg_number(cfg.postgres, "count_timeout_seconds", _DEFAULT_COUNT_TIMEOUT_SECONDS)
-    )
+    count_timeout = max(0.0, float(count_timeout or 0))
     run_kwargs: dict[str, Any] = {
         "cfg": cfg,
         "database_key": database_key,
@@ -817,11 +842,11 @@ async def execute_schema_lookup(
         async with limiter:
             for attempt in range(attempts):
                 try:
-                    columns = await run_metadata_query(
-                        **kwargs, sql=schema_info.COLUMNS_SQL, params=(names,), timeout=timeout,
-                    )
-                    indexes = await run_metadata_query(
-                        **kwargs, sql=schema_info.INDEXES_SQL, params=(names,), timeout=timeout,
+                    # Both catalog queries in one transaction and one round trip.
+                    columns, indexes = await run_metadata_queries(
+                        **kwargs,
+                        queries=[(schema_info.COLUMNS_SQL, (names,)), (schema_info.INDEXES_SQL, (names,))],
+                        timeout=timeout,
                     )
                     return columns, indexes
                 except TeleportAuthExpired:

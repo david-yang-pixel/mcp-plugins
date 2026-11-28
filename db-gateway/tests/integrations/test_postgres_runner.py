@@ -29,7 +29,7 @@ async def test_run_psql_kills_and_reaps_process_on_timeout():
     with patch(
         "db_gateway.postgres.asyncio.create_subprocess_exec",
         AsyncMock(return_value=fake_proc),
-    ):
+    ), patch("db_gateway.postgres.PSQL_CONNECT_MARGIN_SECONDS", 0.0):
         with pytest.raises(asyncio.TimeoutError):
             await run_psql(
                 host="localhost",
@@ -219,7 +219,7 @@ async def test_count_timeout_keeps_page_and_returns_null_total():
 
 
 @pytest.mark.asyncio
-async def test_count_disabled_skips_move_all():
+async def test_no_count_skips_move_all():
     page = "\n".join(str(i) for i in range(1, 7))
     stdout = f"x\n{page}\nTime: 2.0 ms\n{MARK} fetch 6\n"
     result, cmd, _ = await _run(stdout, limit=5, count_timeout=0)
@@ -227,7 +227,7 @@ async def test_count_disabled_skips_move_all():
     assert not any("MOVE FORWARD ALL" in s for s in _sql_args(cmd))
     assert result.has_more is True
     assert result.total_rows is None
-    assert "count_timeout_seconds=0" in (result.total_rows_note or "")
+    assert "count_total=true" in (result.total_rows_note or "")
 
 
 @pytest.mark.asyncio
@@ -330,3 +330,25 @@ async def test_psql_error_text_keeps_hint():
     )
     with pytest.raises(RuntimeError, match="HINT:  Perhaps you meant"):
         await _run("", stderr=stderr, returncode=1)
+
+
+@pytest.mark.asyncio
+async def test_psql_deadline_leaves_room_for_the_connect_without_a_count():
+    """Code review: without a count budget the client deadline still has to cover
+    the ~2 s Teleport connect, so a query near statement_timeout is not killed early."""
+    from db_gateway import postgres
+
+    seen: list[float] = []
+    real_wait_for = asyncio.wait_for
+
+    async def spy(aw, timeout):
+        # postgres.asyncio is the global module: only record psql's communicate().
+        if "communicate" in getattr(aw, "__qualname__", ""):
+            seen.append(timeout)
+        return await real_wait_for(aw, timeout)
+
+    stdout = f"x\n1\nTime: 1.0 ms\n{MARK} fetch 1\n"
+    with patch.object(postgres.asyncio, "wait_for", spy):
+        await _run(stdout, timeout=30, count_timeout=0)
+    assert len(seen) == 1 and seen[0] >= 30 + postgres.PSQL_CONNECT_MARGIN_SECONDS
+    assert postgres.PSQL_CONNECT_MARGIN_SECONDS >= 5

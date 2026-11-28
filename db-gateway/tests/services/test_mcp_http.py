@@ -162,6 +162,7 @@ async def test_mcp_tools_list_exposes_paging_and_format(mcp_client):
     assert props["limit"]["type"] == "integer" and props["limit"]["minimum"] == 1
     assert props["format"]["enum"] == ["csv", "json"]
     assert props["explain"]["type"] == "boolean"
+    assert props["count_total"]["type"] == "boolean" and props["count_total"]["default"] is False
     assert "ticket_id" not in props
 
 
@@ -273,6 +274,26 @@ async def test_mcp_tools_call_explain_is_forwarded(mcp_client):
     assert query.await_args.kwargs["explain"] is True
 
 
+async def test_mcp_tools_call_count_total_is_forwarded(mcp_client):
+    result = GatewayQueryResult(success=True, csv="x\n1\n", columns=["x"])
+    with patch("db_gateway.mcp.execute_gateway_query", AsyncMock(return_value=result)) as query:
+        resp = await _post_mcp(
+            mcp_client,
+            {
+                "jsonrpc": "2.0",
+                "id": 12,
+                "method": "tools/call",
+                "params": {
+                    "name": "db_gateway_query",
+                    "arguments": {"database": "prod", "sql": "select 1", "count_total": True},
+                },
+            },
+        )
+
+    assert resp.status == 200
+    assert query.await_args.kwargs["count_total"] is True
+
+
 @pytest.mark.asyncio
 async def test_mcp_tools_call_schema_tool(mcp_client):
     payload = {"success": True, "database": "prod", "tables": [{"table": "workflow_runs"}]}
@@ -341,12 +362,13 @@ async def test_http_query_forwards_explain_and_ignores_ticket_id(mcp_client):
     with patch("db_gateway.app.execute_gateway_query", AsyncMock(return_value=result)) as query:
         resp = await mcp_client.post(
             "/query",
-            json={"database": "prod", "sql": "select 1", "ticket_id": "1", "explain": True},
+            json={"database": "prod", "sql": "select 1", "ticket_id": "1", "explain": True, "count_total": True},
             headers={"X-API-Key": "secret"},
         )
 
     assert resp.status == 200
     assert query.await_args.kwargs["explain"] is True
+    assert query.await_args.kwargs["count_total"] is True
     assert "ticket_id" not in query.await_args.kwargs
 
 
