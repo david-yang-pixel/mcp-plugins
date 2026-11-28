@@ -23,6 +23,7 @@ from db_gateway.tsh_daemons import stop_all as stop_tsh_daemons
 
 
 APP_CONFIG_KEY: web.AppKey[Any] = web.AppKey("db_gateway.http.config", object)
+MAINTENANCE_TASK_KEY: web.AppKey[asyncio.Task] = web.AppKey("db_gateway.maintenance_task", asyncio.Task)
 
 
 async def handle_healthz(request: web.Request) -> web.Response:
@@ -182,9 +183,25 @@ def create_db_gateway_app(cfg: Any | None = None) -> web.Application:
     app.router.add_get("/teleport-auth", handle_teleport_auth_get)
     app.router.add_post("/teleport-auth", handle_teleport_auth_post)
     app.router.add_post("/internal/teleport-auth/issue", handle_teleport_auth_issue)
+    app.on_startup.append(_start_maintenance)
+    app.on_cleanup.append(_stop_maintenance)   # before the pools it maintains
     app.on_cleanup.append(_close_pg_pools)
     app.on_cleanup.append(_stop_tsh_daemons)
     return app
+
+
+async def _start_maintenance(app: web.Application) -> None:
+    """Teleport renewal handling and pool keepalive in the background (maintenance.py)."""
+    from db_gateway.maintenance import Maintenance
+
+    app[MAINTENANCE_TASK_KEY] = asyncio.create_task(Maintenance(app[APP_CONFIG_KEY]).run())
+
+
+async def _stop_maintenance(app: web.Application) -> None:
+    task = app.get(MAINTENANCE_TASK_KEY)
+    if task is not None:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def _close_pg_pools(_app: web.Application) -> None:

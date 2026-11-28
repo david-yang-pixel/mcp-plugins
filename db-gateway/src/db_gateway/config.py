@@ -51,8 +51,15 @@ class PostgresConfig(BaseModel):
     pool_acquire_timeout_seconds: float = 15
     # pool 模式连接失败后的重试间隔，需覆盖 tsh-proxy-db 重启的几秒。
     pool_retry_delay_seconds: float = 1.5
-    # 监视 <teleport.auth_home>/keys，证书续签（隧道会被重启）后清空连接池。
+    # 后台监视 <teleport.auth_home> 的用户证书；续签后立即重启运行中的 tsh 常驻进程
+    # （KnowledgeFS 隧道、AWS 代理）并逐条验证连接池里的连接，不再清空连接池。
     pool_watch_teleport_keys: bool = True
+    # 后台保活：每隔该秒数探测一次空闲连接，查询取连接时就不用再探测；0 关闭。
+    pool_keepalive_seconds: float = 30
+    # 存活探测（空查询）的超时；超时的连接直接关闭。
+    pool_probe_timeout_seconds: float = 5
+    # 后台维护任务的检查间隔（证书续签检测）。
+    pool_maintenance_interval_seconds: float = 10
 
 
 class DbGatewayConfig(BaseModel):

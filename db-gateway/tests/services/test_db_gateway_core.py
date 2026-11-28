@@ -661,7 +661,8 @@ async def test_gateway_pool_driver_uses_pool_not_psql(tmp_path):
     kwargs = pool_run.await_args.kwargs
     assert kwargs["port"] == 56062
     assert kwargs["database"] == "billing"
-    assert kwargs["auth_home"] == str(tmp_path / "tsh")
+    # Renewals are handled in the background (maintenance.py), not per query.
+    assert "auth_home" not in kwargs
     assert kwargs["settings"].max_size == 3
     assert kwargs["settings"].max_idle_seconds == 240
 
@@ -685,20 +686,6 @@ async def test_gateway_pool_driver_retries_after_connection_loss(tmp_path):
     assert result.success is True
     assert pool_run.await_count == 2
     assert result.timing_ms["attempts"] == 2
-
-
-@pytest.mark.asyncio
-async def test_gateway_pool_driver_can_skip_key_watching(tmp_path):
-    from db_gateway.core import execute_gateway_query
-
-    fake_result = PsqlResult(csv="ok\n1\n", row_count=1, elapsed_ms=5, truncated=False)
-    pool_run = AsyncMock(return_value=fake_result)
-    cfg = _pool_cfg(tmp_path)
-    cfg.postgres.pool_watch_teleport_keys = False
-    with patch("db_gateway.core.run_pool_query", pool_run):
-        await execute_gateway_query(cfg=cfg, database="prod", sql="SELECT 1 AS ok")
-
-    assert pool_run.await_args.kwargs["auth_home"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -1033,7 +1020,7 @@ async def test_timeout_index_lookup_uses_the_pool_driver(tmp_path):
     assert "apps_pkey" in (result.error or "")
     kwargs = meta.await_args.kwargs
     assert kwargs["use_pool"] is True and kwargs["port"] == 56062
-    assert kwargs["auth_home"] == str(tmp_path / "tsh")
+    assert "auth_home" not in kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -1273,3 +1260,43 @@ async def test_knowledgefs_tunnel_timeout_is_not_reported_as_roles(tmp_path):
             patch("db_gateway.core.run_psql", AsyncMock()):
         result = await execute_gateway_query(cfg=_kfs_cfg(tmp_path), database="knowledgefs", sql="SELECT 1")
     assert result.code == "QUERY_ERROR" and "超时" in result.error and classify.await_count == 0
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("starts_before", "starts_after", "drained"), [(1, 2, True), (0, 1, False), (2, 2, False)])
+async def test_knowledgefs_tunnel_restart_drains_its_pool(tmp_path, monkeypatch, starts_before, starts_after, drained):
+    """Code review: a tunnel restarted on the request path dropped every pooled
+    connection to it; drain that port instead of failing on them one by one."""
+    from db_gateway import core, pg_pool
+    from db_gateway.tsh_daemons import KNOWLEDGEFS_TUNNEL
+
+    monkeypatch.setattr(KNOWLEDGEFS_TUNNEL, "starts", starts_before)
+
+    async def fake_ensure(cfg, deadline):
+        KNOWLEDGEFS_TUNNEL.starts = starts_after
+
+    drain_port = AsyncMock()
+    monkeypatch.setattr(pg_pool.MANAGER, "drain_port", drain_port)
+    with patch("db_gateway.core.ensure_knowledgefs_tunnel", fake_ensure):
+        assert await core._prepare_database(_kfs_cfg(tmp_path), "knowledgefs") is None
+
+    if drained:
+        drain_port.assert_awaited_once()
+        assert drain_port.await_args.args[0] == 56064
+    else:
+        drain_port.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pool_error_marked_not_retryable_is_not_retried(tmp_path):
+    from db_gateway.core import execute_gateway_query
+
+    error = TeleportAuthExpired("connection reset")
+    error.retryable = False
+    pool_run = AsyncMock(side_effect=error)
+    with patch("db_gateway.core.run_pool_query", pool_run):
+        result = await execute_gateway_query(cfg=_pool_cfg(tmp_path), database="prod", sql="SELECT 1")
+
+    assert result.code == "TELEPORT_EXPIRED"
+    assert pool_run.await_count == 1

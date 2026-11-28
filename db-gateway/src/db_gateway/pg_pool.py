@@ -5,17 +5,19 @@ Every psql invocation opens a new connection through the local
 DB agent, Postgres auth) costs about two seconds per query. A pool keeps the
 connections open, so a query only pays its own round trips.
 
-Teleport certificates are renewed outside this service: tsh-auth-watchdog runs
-``tsh logout --all`` + ``tsh login`` and the tsh-cert.path unit then restarts
-the tsh-proxy-db* tunnels, which drops every connection made through them.
-The pool therefore:
+Teleport certificates are renewed outside this service (tsh-auth-watchdog, about
+every 35 minutes). Connections must not be handed out dead, so:
 
-* watches ``<teleport.auth_home>/keys`` and drains all pools when anything in
-  it changes, so the first query after a renewal does not hit a dead socket;
-* treats connection-level failures as ``TeleportAuthExpired`` and drains the
+* ``maintenance.py`` verifies idle connections in the background
+  (``PoolManager.keepalive``) and right after a renewal, replacing dead ones
+  before a query needs them; nothing is drained just because certificates changed;
+* a connection failure right after checkout (dropped while idle) is retried at
+  once on a fresh connection;
+* other connection-level failures are ``TeleportAuthExpired`` and drain the
   affected pool, letting the existing retry loop reconnect after a short delay;
-* recycles idle connections (``pool_max_idle_seconds``) and probes ones that
-  sat idle longer than ``pool_check_idle_seconds`` before handing them out.
+* idle connections above ``pool_min_size`` are recycled (``pool_max_idle_seconds``)
+  and ones not used or verified for ``pool_check_idle_seconds`` are probed at
+  checkout (a safety net while the keepalive runs).
 
 Read-only guarantees match the psql path: the validated SQL runs inside a
 ``READ ONLY`` transaction with ``SET LOCAL statement_timeout`` and is always
@@ -24,7 +26,9 @@ rolled back, so no session state survives between queries.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
+import socket
 import time
 import weakref
 from dataclasses import dataclass
@@ -60,6 +64,27 @@ _CURSOR_NAME = "_db_gateway_cursor"
 # Extra wall-clock budget on top of statement timeouts for acquiring a
 # connection and network round trips.
 _CLIENT_TIMEOUT_MARGIN_SECONDS = 15.0
+# A connection failure this soon after checkout means the pooled connection was
+# already dead (dropped while idle): retry once on a fresh connection right away,
+# without draining the pool. Later failures keep the drain + delayed retry path.
+_STALE_RETRY_WINDOW_SECONDS = 2.0
+# How long that retry waits for a connection: a tunnel that is gone must fail
+# fast here, the core retry loop still gets its own full attempt.
+_STALE_RETRY_ACQUIRE_SECONDS = 5.0
+# Floor for the liveness probe timeout (the RTT to the databases is ~0.2 s).
+_MIN_PROBE_TIMEOUT_SECONDS = 1.0
+
+# Set while keepalive takes a connection, so the pool's checkout check does not
+# probe it as well (a dead connection there would make the pool grow).
+_IN_KEEPALIVE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "db_gateway_pool_keepalive", default=False,
+)
+# Set while the immediate retry takes a connection: probe it whatever its idle
+# time, so the retry never runs on another connection that died with the first
+# (psycopg_pool discards a connection that fails the check and takes the next).
+_FORCE_CHECK: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "db_gateway_pool_force_check", default=False,
+)
 
 
 class StatementTimeout(TimeoutError):
@@ -87,6 +112,8 @@ class PoolSettings:
     check_idle_seconds: float = 60.0
     acquire_timeout_seconds: float = 15.0
     connect_timeout_seconds: int = 10
+    # Liveness probe (empty query) limit; a black-holed connection is dropped.
+    probe_timeout_seconds: float = 5.0
 
 
 def pool_settings_from_config(cfg: Any) -> PoolSettings:
@@ -99,32 +126,10 @@ def pool_settings_from_config(cfg: Any) -> PoolSettings:
         max_lifetime_seconds=float(getattr(pg, "pool_max_lifetime_seconds", 1800.0)),
         check_idle_seconds=float(getattr(pg, "pool_check_idle_seconds", 60.0)),
         acquire_timeout_seconds=float(getattr(pg, "pool_acquire_timeout_seconds", 15.0)),
+        probe_timeout_seconds=max(
+            _MIN_PROBE_TIMEOUT_SECONDS, float(getattr(pg, "pool_probe_timeout_seconds", 5.0)),
+        ),
     )
-
-
-def keys_signature(auth_home: str) -> Optional[tuple[int, float]]:
-    """(file count, newest mtime) of ``<auth_home>/keys``; None if absent.
-
-    The whole directory is watched instead of one certificate file because the
-    file names depend on the tsh version, cluster and user.
-    """
-    keys_dir = os.path.join(auth_home, "keys")
-    count = 0
-    newest = 0.0
-    try:
-        for root, _dirs, files in os.walk(keys_dir):
-            for name in files:
-                try:
-                    mtime = os.stat(os.path.join(root, name)).st_mtime
-                except OSError:
-                    continue
-                count += 1
-                newest = max(newest, mtime)
-    except OSError:
-        return None
-    if count == 0 and not os.path.isdir(keys_dir):
-        return None
-    return count, newest
 
 
 class PoolManager:
@@ -136,8 +141,8 @@ class PoolManager:
         # slow tunnel for one database does not block queries to the others.
         self._opening: dict[PoolKey, asyncio.Task] = {}
         self._lock = asyncio.Lock()
-        self._keys_signature: Optional[tuple[int, float]] = None
         self._last_used: "weakref.WeakKeyDictionary[Any, float]" = weakref.WeakKeyDictionary()
+        self._created: "weakref.WeakKeyDictionary[Any, float]" = weakref.WeakKeyDictionary()
         self._type_names: dict[tuple[int, int], str] = {}
         self._connections_seen: dict[PoolKey, int] = {}
 
@@ -147,15 +152,8 @@ class PoolManager:
         *,
         password: str,
         settings: PoolSettings,
-        auth_home: Optional[str],
     ) -> AsyncConnectionPool:
-        to_close: list[tuple[PoolKey, AsyncConnectionPool]] = []
         async with self._lock:
-            if auth_home:
-                signature = keys_signature(auth_home)
-                if self._keys_signature is not None and signature != self._keys_signature:
-                    to_close = self._detach_all_locked()
-                self._keys_signature = signature
             pool = self._pools.get(key)
             if pool is None:
                 pool = self._new_pool(key, password=password, settings=settings)
@@ -172,8 +170,6 @@ class PoolManager:
                     min_size=settings.min_size, max_size=settings.max_size,
                 )
             opening = self._opening.get(key)
-        # Closing waits for in-use connections; never do it while holding the lock.
-        await _close_pools(to_close, "teleport keys changed")
         if opening is not None:
             try:
                 await asyncio.shield(opening)
@@ -198,6 +194,15 @@ class PoolManager:
             self._pools.pop(key, None)
             self._opening.pop(key, None)
         await _close_pools([(key, current)], reason)
+
+    async def drain_port(self, port: int, reason: str) -> None:
+        """Close every pool on ``port`` (its tunnel restarted: their connections are gone)."""
+        async with self._lock:
+            to_close = [(key, pool) for key, pool in self._pools.items() if key.port == int(port)]
+            for key, _pool in to_close:
+                self._pools.pop(key, None)
+                self._opening.pop(key, None)
+        await _close_pools(to_close, reason)
 
     async def close_all(self, reason: str = "shutdown") -> None:
         async with self._lock:
@@ -245,7 +250,7 @@ class PoolManager:
             # this pooled connection ("prepared statement _pg3_N does not exist").
             kwargs={"autocommit": True, "prepare_threshold": None},
             configure=self._configure,
-            check=self._make_check(settings.check_idle_seconds),
+            check=self._make_check(settings.check_idle_seconds, settings.probe_timeout_seconds),
             # No `reset` callback: with one, returned connections go through a
             # background worker and are not immediately reusable, so the next
             # query would grow the pool (and pay a new handshake) instead.
@@ -261,17 +266,81 @@ class PoolManager:
             array_oid = getattr(info, "array_oid", 0)
             if array_oid:
                 conn.adapters.register_loader(array_oid, TextLoader)
-        self._last_used[conn] = time.monotonic()
+        now = time.monotonic()
+        self._created[conn] = now
+        self._last_used[conn] = now
 
-    def _make_check(self, check_idle_seconds: float):
+    def reused(self, conn: Optional[psycopg.AsyncConnection], since: float) -> bool:
+        """True if ``conn`` already existed before ``since`` (taken from the pool, not new)."""
+        return conn is not None and self._created.get(conn, since) < since
+
+    def _make_check(self, check_idle_seconds: float, probe_timeout: float):
         async def check(conn: psycopg.AsyncConnection) -> None:
             # Probing every checkout would cost a round trip per query; only
-            # connections idle long enough to have been dropped are probed.
+            # connections not used or verified for a while are probed. With the
+            # background keepalive running this is a safety net that rarely fires.
+            if _IN_KEEPALIVE.get():
+                return  # keepalive probes the connection itself
             idle = time.monotonic() - self._last_used.get(conn, 0.0)
-            if idle >= check_idle_seconds:
-                await conn.execute("")
+            if idle >= check_idle_seconds or _FORCE_CHECK.get():
+                await self._probe(conn, probe_timeout)
 
         return check
+
+    async def _probe(self, conn: psycopg.AsyncConnection, timeout: float) -> None:
+        """One empty query, bounded by ``timeout``; raises if the connection is unusable.
+
+        On timeout the connection is closed rather than the query cancelled:
+        cancelling makes psycopg send a server-side cancel and then wait (up to
+        5 s) for a reply that a black-holed link never delivers.
+        """
+        task = asyncio.ensure_future(conn.execute(""))
+        try:
+            done, _ = await asyncio.wait({task}, timeout=timeout)
+        except BaseException:  # cancelled from outside: never leave the query running
+            await _abandon(conn, task)
+            raise
+        if not done:
+            await _abandon(conn, task)
+            raise TimeoutError(f"liveness probe exceeded {timeout:g}s")
+        task.result()
+        self.touch(conn)
+
+    async def keepalive(self, *, older_than: float, probe_timeout: float) -> None:
+        """Probe idle pooled connections not used or verified for ``older_than`` seconds.
+
+        Runs in the background (see maintenance.py) so that queries find verified
+        connections and skip the checkout probe. Connections are taken one at a
+        time and only while the pool reports one available, so this never makes
+        the pool grow (psycopg_pool's own ``check()`` grows it to ``max_size``).
+        A connection that fails or stalls is closed; the pool replaces it.
+        """
+        for key, pool in list(self._pools.items()):
+            if pool.min_size == 0:
+                continue  # taking its last connection would stop max_idle shrinking it to 0
+            try:
+                available = int(pool.get_stats().get("pool_available", 0))
+            except Exception:  # noqa: BLE001 - a closing pool
+                continue
+            for _ in range(available):
+                if int(pool.get_stats().get("pool_available", 0)) <= 0:
+                    break  # a query took the rest: never wait (or grow the pool) here
+                token = _IN_KEEPALIVE.set(True)
+                try:
+                    conn = await pool.getconn(timeout=probe_timeout)
+                except (PoolTimeout, PoolClosed):
+                    break
+                finally:
+                    _IN_KEEPALIVE.reset(token)
+                try:
+                    if time.monotonic() - self._last_used.get(conn, 0.0) >= older_than:
+                        await self._probe(conn, probe_timeout)
+                except Exception as e:  # noqa: BLE001 - any failure: drop the connection
+                    logger.info("pg_pool_keepalive_dropped_connection", database=key.database,
+                                port=key.port, error=f"{type(e).__name__}: {str(e).strip()[:200]}")
+                    await conn.close()
+                finally:
+                    await pool.putconn(conn)
 
     def touch(self, conn: psycopg.AsyncConnection) -> None:
         self._last_used[conn] = time.monotonic()
@@ -299,8 +368,47 @@ async def _close_quietly(pool: AsyncConnectionPool) -> None:
 MANAGER = PoolManager()
 
 
+def _shutdown_socket(conn: psycopg.AsyncConnection) -> None:
+    """Shut the connection's socket down without closing its fd.
+
+    A pending read then sees EOF and fails at once (no server-side cancel, which
+    would wait on a dead link), and the fd cannot be reused by another socket
+    while that read is still registered with the event loop.
+    """
+    try:
+        dup = socket.socket(fileno=os.dup(conn.pgconn.socket))
+    except Exception:  # noqa: BLE001 - already closed or broken
+        return
+    try:
+        dup.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    finally:
+        dup.close()
+
+
+async def _abandon(conn: psycopg.AsyncConnection, task: asyncio.Future) -> None:
+    """Give up on ``conn`` with ``task`` (a query on it) still pending, then close it."""
+    _shutdown_socket(conn)
+    done, _ = await asyncio.wait({task}, timeout=1.0)
+    if not done:  # should not happen after the shutdown; never hang here
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    elif not task.cancelled():
+        task.exception()  # retrieved: no "exception was never retrieved" warning
+    await conn.close()
+
+
 def _ms(seconds: float) -> float:
     return round(seconds * 1000, 1)
+
+
+class _StaleConnection(Exception):
+    """The checked-out connection was already dead; retry once on a fresh one."""
+
+
+def _stale(acquired: Optional[float]) -> bool:
+    return acquired is not None and time.perf_counter() - acquired < _STALE_RETRY_WINDOW_SECONDS
 
 
 def _is_connection_failure(error: BaseException, conn: Optional[psycopg.AsyncConnection]) -> bool:
@@ -407,7 +515,6 @@ async def run_pool_query(
     describe: bool = False,
     explain: bool = False,
     settings: PoolSettings | None = None,
-    auth_home: str | None = None,
     manager: PoolManager | None = None,
 ) -> PsqlResult:
     """Execute one read-only query page on a pooled connection.
@@ -445,7 +552,7 @@ async def run_pool_query(
     # back to the pool in a non-idle state and psycopg_pool discards it alone.
     return await asyncio.wait_for(
         _run(
-            manager, key, password=password, settings=settings, auth_home=auth_home,
+            manager, key, password=password, settings=settings,
             body=body, wrapped=wrapped, timeout=float(timeout), page_limit=page_limit,
             offset=offset, count_timeout=count_timeout, describe=describe,
             explain=explain, started=started,
@@ -460,7 +567,6 @@ async def _run(
     *,
     password: str,
     settings: PoolSettings,
-    auth_home: str | None,
     body: str,
     wrapped: str,
     timeout: float,
@@ -471,14 +577,20 @@ async def _run(
     explain: bool,
     started: float,
 ) -> PsqlResult:
+    reconnects = 0
     for attempt in range(2):
         try:
-            return await _run_once(
-                manager, key, password=password, settings=settings, auth_home=auth_home,
+            result = await _run_once(
+                manager, key, password=password, settings=settings,
                 body=body, wrapped=wrapped, timeout=timeout, page_limit=page_limit,
                 offset=offset, count_timeout=count_timeout, describe=describe,
-                explain=explain, started=started,
+                explain=explain, started=started, allow_stale_retry=attempt == 0,
+                after_stale_retry=reconnects > 0,
             )
+            result.timing_ms["pool_reconnects"] = float(reconnects)
+            return result
+        except _StaleConnection:
+            reconnects += 1  # the pool discarded the dead connection; take another
         except PoolClosed as e:
             # A concurrent query reset this pool between lookup and checkout
             # (e.g. Teleport key rotation): take the new pool once.
@@ -496,7 +608,6 @@ async def _run_once(
     *,
     password: str,
     settings: PoolSettings,
-    auth_home: str | None,
     body: str,
     wrapped: str,
     timeout: float,
@@ -506,13 +617,25 @@ async def _run_once(
     describe: bool,
     explain: bool,
     started: float,
+    allow_stale_retry: bool = False,
+    after_stale_retry: bool = False,
 ) -> PsqlResult:
     conn: Optional[psycopg.AsyncConnection] = None
     pool: Optional[AsyncConnectionPool] = None
+    acquired: Optional[float] = None
+    attempt_started = time.monotonic()
     timing: dict[str, float] = {}
+    acquire_timeout = (
+        min(settings.acquire_timeout_seconds, _STALE_RETRY_ACQUIRE_SECONDS) if after_stale_retry else None
+    )
+    # The retry runs on a connection that was just verified (or is new), so a
+    # connection failure there means the statement itself broke it.
+    force_check = _FORCE_CHECK.set(after_stale_retry)
     try:
-        pool = await manager.pool_for(key, password=password, settings=settings, auth_home=auth_home)
-        async with pool.connection() as conn:
+        pool = await manager.pool_for(key, password=password, settings=settings)
+        async with pool.connection(timeout=acquire_timeout) as conn:
+            _FORCE_CHECK.reset(force_check)
+            force_check = None
             acquired = time.perf_counter()
             timing["pool_acquire_ms"] = _ms(acquired - started)
             timing["pool_new_connections"] = float(manager.new_connections(key, pool))
@@ -544,20 +667,34 @@ async def _run_once(
             await manager.drain(key, "no connection within acquire timeout", pool=pool)
         raise TeleportAuthExpired(
             f"could not connect to server: no PostgreSQL connection to {key.host}:{key.port} "
-            f"within {settings.acquire_timeout_seconds:g}s ({e})"
+            f"within {acquire_timeout or settings.acquire_timeout_seconds:g}s ({e})"
         ) from e
     except psycopg.errors.QueryCanceled as e:
         raise StatementTimeout(_error_text(e)) from e
     except psycopg.Error as e:
         if _is_connection_failure(e, conn):
+            # Only a connection taken from the pool can have died while idle; one
+            # opened for this attempt was broken by the statement or the server.
+            if allow_stale_retry and _stale(acquired) and manager.reused(conn, attempt_started):
+                logger.info("pg_pool_stale_connection_retry", database=key.database, port=key.port,
+                            error=str(e).strip()[:200])
+                raise _StaleConnection() from e
             if pool is not None:
                 await manager.drain(key, f"connection failure: {str(e).strip()[:200]}", pool=pool)
-            raise TeleportAuthExpired(f"connection reset: {str(e).strip()}") from e
+            error = TeleportAuthExpired(f"connection reset: {str(e).strip()}")
+            if after_stale_retry and acquired is not None:
+                # The statement already ran twice and broke both connections: do
+                # not let the core retry loop run it a third time.
+                error.retryable = False  # type: ignore[attr-defined]
+            raise error from e
         raise RuntimeError(_error_text(e)) from e
     except OSError as e:
         if pool is not None:
             await manager.drain(key, f"connection failure: {e}", pool=pool)
         raise TeleportAuthExpired(f"Connection refused: {e}") from e
+    finally:
+        if force_check is not None:  # checkout failed before the block reset it
+            _FORCE_CHECK.reset(force_check)
 
 
 # Releases session-level advisory locks. ROLLBACK undoes session GUCs and SET
@@ -808,7 +945,6 @@ async def run_metadata_queries(
     timeout: float = 5.0,
     use_pool: bool = True,
     settings: PoolSettings | None = None,
-    auth_home: str | None = None,
     manager: PoolManager | None = None,
 ) -> list[list[list[Any]]]:
     """Run trusted, parameterized catalog queries (READ ONLY, statement_timeout).
@@ -830,14 +966,24 @@ async def run_metadata_queries(
     deadline = float(timeout) * max(1, len(queries)) + settings.acquire_timeout_seconds + 5
 
     async def pooled() -> list[list[list[Any]]]:
+        stale_retried = False
         for attempt in range(2):
             pool: Optional[AsyncConnectionPool] = None
             conn: Optional[psycopg.AsyncConnection] = None
+            acquired: Optional[float] = None
+            attempt_started = time.monotonic()
+            acquire_timeout = (
+                min(settings.acquire_timeout_seconds, _STALE_RETRY_ACQUIRE_SECONDS) if stale_retried else None
+            )
+            force_check = _FORCE_CHECK.set(stale_retried)
             try:
                 pool = await manager.pool_for(
-                    key, password=password, settings=settings, auth_home=auth_home,
+                    key, password=password, settings=settings,
                 )
-                async with pool.connection() as conn:
+                async with pool.connection(timeout=acquire_timeout) as conn:
+                    _FORCE_CHECK.reset(force_check)
+                    force_check = None
+                    acquired = time.perf_counter()
                     try:
                         return await _metadata_rows(conn, queries, timeout)
                     except Exception:
@@ -860,6 +1006,12 @@ async def run_metadata_queries(
                 raise StatementTimeout(_error_text(e)) from e
             except psycopg.Error as e:
                 if _is_connection_failure(e, conn):
+                    if attempt == 0 and _stale(acquired) and manager.reused(conn, attempt_started):
+                        # Dead at checkout: the pool discarded it; retry on a fresh one.
+                        logger.info("pg_pool_stale_connection_retry", database=key.database,
+                                    port=key.port, error=str(e).strip()[:200])
+                        stale_retried = True
+                        continue
                     if pool is not None:
                         await manager.drain(key, f"connection failure: {str(e).strip()[:200]}", pool=pool)
                     raise TeleportAuthExpired(f"connection reset: {str(e).strip()}") from e
@@ -868,6 +1020,9 @@ async def run_metadata_queries(
                 if pool is not None:
                     await manager.drain(key, f"connection failure: {e}", pool=pool)
                 raise TeleportAuthExpired(f"Connection refused: {e}") from e
+            finally:
+                if force_check is not None:
+                    _FORCE_CHECK.reset(force_check)
         raise AssertionError("unreachable")
 
     async def one_off() -> list[list[list[Any]]]:

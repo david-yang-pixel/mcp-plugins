@@ -81,6 +81,9 @@ class TshDaemon:
         self._sig: list[list[str]] | None = None
         self._stale = False
         self._lock: asyncio.Lock | None = None
+        # Successful starts so far: a change means connections made through the
+        # previous process (e.g. the KnowledgeFS tunnel) are gone.
+        self.starts = 0
         self.output: collections.deque[str] = collections.deque(maxlen=OUTPUT_TAIL_LINES)
         _DAEMONS.add(self)
 
@@ -112,6 +115,7 @@ class TshDaemon:
             self._info = await self._start(cfg, deadline)
             self._sig = sig
             self._stale = False
+            self.starts += 1
             logger.info("tsh_daemon_started", daemon=self.name, pid=self.pid)
             return dict(self._info)
 
@@ -216,6 +220,23 @@ async def stop_all() -> None:
     """Stop every daemon (aiohttp on_cleanup)."""
     for daemon in list(_DAEMONS):
         await daemon.stop()
+
+
+async def refresh_running(cfg: Any, deadline: float) -> None:
+    """After a Teleport renewal: restart the running daemons now (background).
+
+    ``ensure`` restarts a daemon whose shadow certificate changed, so the next
+    tool call finds it ready instead of paying the restart. Daemons that are
+    not running stay lazy; a failed restart is logged and left to that call.
+    """
+    for daemon in list(_DAEMONS):
+        if not daemon._alive():
+            continue
+        try:
+            await daemon.ensure(cfg, deadline)
+        except Exception as e:  # noqa: BLE001 - background work must not raise
+            logger.warning("tsh_daemon_refresh_failed", daemon=daemon.name,
+                           error=redact(f"{type(e).__name__}: {e}")[:300])
 
 
 def _reset_state() -> None:

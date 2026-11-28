@@ -456,3 +456,14 @@ async def test_app_cleanup_stops_tsh_daemons(mcp_client_factory):
         async with mcp_client_factory(AppConfig().teleport_tools):
             pass
     assert stop.await_count == 1
+
+
+async def test_app_runs_background_maintenance_while_serving(tmp_path):
+    from db_gateway.app import MAINTENANCE_TASK_KEY
+
+    cfg = AppConfig(teleport={"auth_home": str(tmp_path / "tsh")}, db_gateway={"api_key": "secret"})
+    app = create_db_gateway_app(cfg)
+    async with TestClient(TestServer(app)):
+        task = app[MAINTENANCE_TASK_KEY]
+        assert not task.done()
+    assert task.cancelled() or task.done()
