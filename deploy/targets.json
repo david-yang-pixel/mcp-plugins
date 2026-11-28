@@ -6,11 +6,6 @@
     "init": false,
     "mounts": [
       {
-        "source": "/opt/dify-db/.tsh",
-        "destination": "/opt/zd-agent/.tsh",
-        "readonly": false
-      },
-      {
         "source": "@env",
         "destination": "/app/.env",
         "readonly": true
@@ -21,15 +16,14 @@
         "readonly": true
       },
       {
-        "source": "/usr/local/bin/tsh",
-        "destination": "/usr/local/bin/tsh",
-        "readonly": true
-      },
-      {
         "source": "@data/logs",
         "destination": "/var/lib/mcp/logs",
         "readonly": false
       }
+    ],
+    "retired_mounts": [
+      "/opt/zd-agent/.tsh",
+      "/usr/local/bin/tsh"
     ],
     "command": [],
     "env_keys": [
@@ -38,9 +32,6 @@
       "DB_GATEWAY_LISTEN_PORT",
       "FEISHU_WEBHOOK_SECRET",
       "FEISHU_WEBHOOK_URL",
-      "HOST_TSH_GID",
-      "HOST_TSH_UID",
-      "INTERNAL_SHARED_SECRET",
       "PG_PASSWORD",
       "TELEPORT_PASSWORD",
       "TELEPORT_PUBLIC_BASE_URL",

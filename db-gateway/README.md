@@ -216,7 +216,7 @@ db-gateway 用镜像自带的 tsh 18.11.0（`teleport.tsh_path`，`/opt/teleport
 
 ### 运行方式
 
-- **tsh**：镜像自带的 `teleport.tsh_path`。部署契约里仍挂载着宿主机的 `/usr/local/bin/tsh`（18.0.0）和宿主机 `.tsh` 目录，网关已不再使用；移除这两个挂载需要部署器支持删除旧挂载的迁移。
+- **tsh**：镜像自带的 `teleport.tsh_path`。原来挂载的宿主机 `/usr/local/bin/tsh`（18.0.0）和宿主机 `.tsh` 目录已在部署契约里退役（`deploy/targets.json` 的 `retired_mounts`），容器内不再有这两个路径。
 - **常驻 tsh 子进程**（`tsh_daemons.py`）：
   - 日志工具用一个常驻的 `tsh proxy aws --app <app>` 本地代理，启动前先 `tsh apps login --aws-role <aws_role> <app>`；查询在进程内用 botocore 经这个代理发出。单页约 0.75 秒，以前每页起一次 `tsh aws` 加 aws CLI 要 1.4–1.9 秒。
   - 自管的数据库隧道（见“数据库隧道”）。

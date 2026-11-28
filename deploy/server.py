@@ -56,12 +56,13 @@ def normalize_target(target):
     if not isinstance(target, dict):
         raise DeployError("Invalid deployment contract")
     result = {"init": False, "mounts": [], "command": [], "network": "bridge", "port": "auto", "shm_size": None,
-              "hostname": None, "public_paths": [], "oauth_metadata": False, "max_body_size": None, **target}
+              "hostname": None, "public_paths": [], "oauth_metadata": False, "max_body_size": None,
+              "retired_mounts": [], **target}
     result.setdefault('container_port', result['port'])
     allowed = {
         "port", "container_port", "auth_key", "health_path", "init", "mounts", "command",
         "network", "env_keys", "secret_file_paths", "shm_size",
-        "hostname", "public_paths", "oauth_metadata", "max_body_size",
+        "hostname", "public_paths", "oauth_metadata", "max_body_size", "retired_mounts",
     }
     if set(result) != allowed:
         raise DeployError("Unexpected deployment contract fields")
@@ -119,6 +120,14 @@ def normalize_target(target):
         raise DeployError("Duplicate mount destination")
     if any(not p.startswith('/') or '..' in Path(p).parts or any(c in p for c in ',\n\r\0') for p in destinations):
         raise DeployError("Invalid mount destination")
+    # Destinations of administrator-granted host mounts this contract drops (see
+    # mounts_only_gain_managed_data); none of them may still be mounted.
+    retired = result["retired_mounts"]
+    if (not isinstance(retired, list) or len(retired) != len(set(map(str, retired)))
+            or any(not isinstance(p, str) or not p.startswith('/') or '..' in Path(p).parts
+                   or any(c in p for c in ',\n\r\0') for p in retired)
+            or set(retired) & set(destinations)):
+        raise DeployError("Invalid retired mount contract")
     return result
 
 
@@ -134,6 +143,8 @@ def resolve_target(service, declared, installed):
     else:
         if target["network"] != "bridge":
             raise DeployError("New services must use isolated bridge networking")
+        if target["retired_mounts"]:
+            raise DeployError("New services have no administrator mounts to declare in a retired mount contract")
         if not all(managed_data_mount(m) for m in target["mounts"]):
             raise DeployError("New services may only mount their own managed data directories")
         if any(not p.startswith('/run/mcp-secrets/') for p in target["secret_file_paths"].values()):
@@ -220,15 +231,23 @@ def managed_data_mount(mount):
     return bool(MANAGED_DATA.fullmatch(mount["source"])) and mount["destination"].startswith(MANAGED_DATA_ROOT)
 
 
-def mounts_only_gain_managed_data(old_mounts, new_mounts):
+def mounts_only_gain_managed_data(old_mounts, new_mounts, retired=()):
     """Existing mounts stay byte-identical and in order; appended ones are managed data.
 
     Adding an isolated, empty data directory cannot move or expose existing data,
     so it is applied by recreating the container like other process settings.
+    The one removal allowed is an administrator-granted host path (absolute
+    source) whose destination the administrator contract lists in
+    ``retired_mounts``: dropping a privilege the service no longer uses. Managed
+    data, generated files and unlisted mounts are never removed this way.
     """
-    added = new_mounts[len(old_mounts):]
+    removed = [m for m in old_mounts if m["destination"] in retired]
+    if any(not m["source"].startswith("/") for m in removed):
+        return False
+    kept = [m for m in old_mounts if m["destination"] not in retired]
+    added = new_mounts[len(kept):]
     sources = [m["source"] for m in added]
-    return (new_mounts[:len(old_mounts)] == old_mounts
+    return (new_mounts[:len(kept)] == kept
             and all(managed_data_mount(m) for m in added)
             and len(sources) == len(set(sources))
             and not set(sources) & {m["source"] for m in old_mounts})
@@ -244,7 +263,7 @@ def recreate_migration_blocked(old_target, target):
     """
     if any(old_target[key] != target[key] for key in ("port", "container_port", "network")):
         return True
-    if not mounts_only_gain_managed_data(old_target["mounts"], target["mounts"]):
+    if not mounts_only_gain_managed_data(old_target["mounts"], target["mounts"], target["retired_mounts"]):
         return True
     old_files, new_files = old_target["secret_file_paths"], target["secret_file_paths"]
     if any(new_files.get(key) != destination for key, destination in old_files.items()):

@@ -213,6 +213,123 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(run[run.index("--shm-size") + 1], "64m")
 
 
+class RetiredMountMigrationTests(unittest.TestCase):
+    """An administrator contract may drop host-path mounts it lists in retired_mounts."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.service = "db-gateway"
+        self.tsh_home = {"source": "/opt/dify-db/.tsh", "destination": "/opt/zd-agent/.tsh", "readonly": False}
+        self.env = {"source": "@env", "destination": "/app/.env", "readonly": True}
+        self.settings = {"source": "@settings", "destination": "/app/config.yaml", "readonly": True}
+        self.tsh_bin = {"source": "/usr/local/bin/tsh", "destination": "/usr/local/bin/tsh", "readonly": True}
+        self.logs = {"source": "@data/logs", "destination": "/var/lib/mcp/logs", "readonly": False}
+        self.old_target = server.normalize_target({
+            "port": 18081, "auth_key": "DB_GATEWAY_API_KEY", "health_path": "/healthz", "network": "host",
+            "mounts": [self.tsh_home, self.env, self.settings, self.tsh_bin, self.logs],
+            "env_keys": ["DB_GATEWAY_API_KEY"], "secret_file_paths": {},
+        })
+        self.new_target = self.retire(["/opt/zd-agent/.tsh", "/usr/local/bin/tsh"], [self.env, self.settings, self.logs])
+        self.release = self.root / "releases" / self.service / "rel"
+        self.release.mkdir(parents=True)
+        (self.release / "runtime.env").write_text("")
+        (self.release / "config.yaml").write_text("{}")
+        logs = self.root / "data" / self.service / "logs"
+        logs.mkdir(parents=True)
+        live = {"/opt/zd-agent/.tsh": "/opt/dify-db/.tsh", "/app/.env": str(self.release / "runtime.env"),
+                "/app/config.yaml": str(self.release / "config.yaml"), "/usr/local/bin/tsh": "/usr/local/bin/tsh",
+                "/var/lib/mcp/logs": str(logs)}
+        self.current = {
+            "Id": "gateway-container",
+            "Config": {"Labels": {"io.mcp-plugins.managed": "true"}, "User": ""},
+            "HostConfig": {"NetworkMode": "host", "Privileged": False, "Init": None},
+            "Mounts": [{"Destination": d, "Source": src, "Type": "bind"} for d, src in live.items()],
+        }
+        state = self.root / "state"
+        state.mkdir()
+        (state / (self.service + ".json")).write_text(json.dumps({"container": "gateway-container", "target": self.old_target}))
+
+    def retire(self, retired, mounts, base=None):
+        return server.normalize_target({**(base or self.old_target), "mounts": mounts, "retired_mounts": retired})
+
+    def without(self, current, *destinations):
+        replaced = copy.deepcopy(current)
+        replaced["Mounts"] = [m for m in replaced["Mounts"] if m["Destination"] not in destinations]
+        return replaced
+
+    def test_listed_host_mounts_are_removed_by_recreating_the_container(self):
+        self.assertFalse(server.recreate_migration_blocked(self.old_target, self.new_target))
+        with patch.object(server, "ROOT", self.root):
+            recorded = server.preflight(self.service, self.new_target, {self.service: self.new_target}, self.current)
+            # The running container is still checked against the contract it was created with.
+            self.assertEqual(recorded["mounts"], self.old_target["mounts"])
+            server.validate_current(self.current, recorded, self.service)
+            run = server.run_arguments(self.service, "image", REVISION, self.new_target, self.release)
+            self.assertNotIn("target=/opt/zd-agent/.tsh", " ".join(run))
+            self.assertNotIn("target=/usr/local/bin/tsh", " ".join(run))
+            self.assertIn("target=/var/lib/mcp/logs", " ".join(run))
+            # Afterwards a retired mount on the live container is drift, not tolerated.
+            replaced = self.without(self.current, "/opt/zd-agent/.tsh", "/usr/local/bin/tsh")
+            server.validate_current(replaced, self.new_target, self.service)
+            with self.assertRaisesRegex(server.DeployError, "mount destinations drifted"):
+                server.validate_current(self.current, self.new_target, self.service)
+        # Later deployments with the same contract are ordinary updates.
+        self.assertFalse(server.recreate_migration_blocked(self.new_target, self.new_target))
+
+    def test_only_listed_host_path_mounts_can_be_retired(self):
+        cases = {
+            "removed without listing": self.retire([], [self.env, self.settings, self.tsh_bin, self.logs]),
+            "only one of two listed": self.retire(["/usr/local/bin/tsh"], [self.env, self.settings, self.logs]),
+            "managed data": self.retire(["/var/lib/mcp/logs"], [self.tsh_home, self.env, self.settings, self.tsh_bin]),
+            "generated settings": self.retire(["/app/config.yaml"], [self.tsh_home, self.env, self.tsh_bin, self.logs]),
+            "reordered": self.retire(["/opt/zd-agent/.tsh"], [self.settings, self.env, self.tsh_bin, self.logs]),
+            "replaced by a host path": self.retire(["/opt/zd-agent/.tsh"], [self.env, self.settings, self.tsh_bin, self.logs,
+                                                                             {"source": "/opt/other", "destination": "/opt/other", "readonly": True}]),
+        }
+        for name, target in cases.items():
+            with self.subTest(name):
+                self.assertTrue(server.recreate_migration_blocked(self.old_target, target))
+        gained = self.retire(["/opt/zd-agent/.tsh"], [self.env, self.settings, self.tsh_bin, self.logs,
+                                                      {"source": "@data/cache", "destination": "/var/lib/mcp/cache", "readonly": False}])
+        self.assertFalse(server.recreate_migration_blocked(self.old_target, gained))
+
+    def test_retired_mounts_contract_is_validated(self):
+        for retired in (["/opt/zd-agent/.tsh", "/opt/zd-agent/.tsh"], ["relative"], ["/a/../b"], "not-a-list", [1]):
+            with self.subTest(retired), self.assertRaisesRegex(server.DeployError, "retired mount"):
+                server.normalize_target({**self.old_target, "retired_mounts": retired})
+        with self.assertRaisesRegex(server.DeployError, "retired mount"):     # still mounted
+            server.normalize_target({**self.old_target, "retired_mounts": ["/usr/local/bin/tsh"]})
+        self.assertEqual(server.normalize_target({**self.old_target})["retired_mounts"], [])
+
+    def test_retirement_is_administrator_owned(self):
+        with self.assertRaisesRegex(server.DeployError, "administrator update"):
+            server.resolve_target(self.service, self.new_target, {self.service: self.old_target})
+        self.assertEqual(server.resolve_target(self.service, self.new_target, {self.service: self.new_target})["retired_mounts"],
+                         ["/opt/zd-agent/.tsh", "/usr/local/bin/tsh"])
+        new_service = {"port": "auto", "container_port": 8080, "auth_key": "API_KEY", "health_path": "/health",
+                       "env_keys": ["API_KEY"], "secret_file_paths": {}, "retired_mounts": ["/opt/x"]}
+        with self.assertRaisesRegex(server.DeployError, "retired mount"):
+            server.resolve_target("new-mcp", new_service, {})
+
+    def test_installer_backfill_accepts_a_retirement(self):
+        state = self.root / "state" / (self.service + ".json")
+        record = json.loads(state.read_text())
+        record.pop("target")
+        state.write_text(json.dumps(record))
+        with patch.object(server, "ROOT", self.root), patch.object(server, "inspect_optional", return_value=self.current):
+            server.record_prior_legacy_contracts({self.service: self.old_target}, {self.service: self.new_target})
+        self.assertEqual(json.loads(state.read_text())["target"]["mounts"], self.old_target["mounts"])
+
+    def test_repository_contract_retires_the_host_teleport_mounts(self):
+        target = catalog.target("db-gateway")
+        destinations = {m["destination"] for m in target["mounts"]}
+        self.assertEqual(target["retired_mounts"], ["/opt/zd-agent/.tsh", "/usr/local/bin/tsh"])
+        self.assertFalse(destinations & {"/opt/zd-agent/.tsh", "/usr/local/bin/tsh"})
+        self.assertTrue({"/app/.env", "/app/config.yaml", "/var/lib/mcp/logs"} <= destinations)
+
+
 class BaseRelayMigrationTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()

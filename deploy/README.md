@@ -113,6 +113,14 @@ Secrets 通过 GitHub 的动态索引逐项引用，每个部署任务只接收�
 
 服务器自动创建 `/opt/mcp-plugins/data/example-mcp/cache`，只供该服务挂载。目录不存在时按镜像的数字用户（如 `USER 10001`）设置属主，root 镜像保持 root；已存在的目录不改属主和内容。新服务不接受任意主机目录、Docker socket 或 host 网络。文件密钥通过 `secret_files` 声明 `name`、`required: true` 和 `destination`，路径必须在 `/run/mcp-secrets/` 内。已有服务端口和挂载的变更需要单独迁移，首次接入后普通代码及环境变量变动仍自动按服务部署。唯一例外是在原有挂载保持不变（顺序与内容一致）的前提下，追加本服务专属的 `@data/<名称>` → `/var/lib/mcp/...` 数据目录：部署器按 init/命令变更的方式就地重建容器，目录不存在时以 `0700` 创建（原有 8 个服务为 root 属主），拒绝符号链接；替换、删除、重排原有挂载或追加主机路径仍要求迁移。原有 8 个服务追加数据目录时，仍需先更新 `deploy/targets.json` 并通过 `install_server.py --update-helper-only` 同步服务器白名单。
 
+原有服务不再需要某个管理员授予的主机路径挂载（`source` 为绝对路径）时，可以在 `deploy/targets.json` 中删除该挂载，并把它的容器路径写入同一条目的 `retired_mounts`。规则如下：
+
+- 部署器按新契约就地重建容器，其余挂载必须保持原样和原顺序，新容器中不再出现已退役的路径。
+- `@data`、`@env`、`@settings` 以及未列入 `retired_mounts` 的挂载，删除时仍要求迁移；列入 `retired_mounts` 的路径也不能继续挂载。
+- 新服务不能声明 `retired_mounts`。
+- 该字段属于管理员契约，合并前需先通过 `install_server.py --update-helper-only` 同步服务器上的执行器和白名单。重建后若已退役的挂载重新出现，会按挂载漂移拒绝。
+- 主机上的源目录不会被删除。
+
 ### 可选：OAuth 公开路径、固定主机名和请求体上限
 
 需要 MCP OAuth 等额外公开入口的新服务可在 `deployment` 声明以下字段（旧服务不可添加，否则要求管理员迁移）：
