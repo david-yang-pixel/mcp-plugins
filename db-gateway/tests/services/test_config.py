@@ -189,3 +189,17 @@ def test_production_routes_every_database_through_db_gateways_own_tunnels():
     # The new ports never collide with the host tunnels still listening until they are retired.
     assert {56071, 56072, 56073}.isdisjoint({cfg.postgres.port_prod, cfg.postgres.port_billing,
                                               cfg.postgres.port_plugin})
+
+
+def test_retired_host_session_keys_are_ignored(tmp_path, monkeypatch):
+    """Keys the legacy watchdog used: an old config.yaml still loads, nothing reads them."""
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "config.yaml"
+    path.write_text("teleport:\n  auth_home: /opt/zd-agent/.tsh\n  warn_threshold_minutes: 30\n"
+                    "  check_interval_seconds: 300\n  proxy: t.example:443\n")
+    t = load_config(str(path)).teleport
+    assert t.proxy == "t.example:443"
+    assert not any(hasattr(t, k) for k in ("auth_home", "warn_threshold_minutes", "check_interval_seconds"))
+    runtime = json.loads((ROOT / "deploy" / "runtime.json").read_text())
+    assert not set(runtime["settings"]["teleport"]) & {"auth_home", "warn_threshold_minutes", "check_interval_seconds"}
+    assert "INTERNAL_SHARED_SECRET" not in runtime["secrets"]       # only the retired watchdog sent it

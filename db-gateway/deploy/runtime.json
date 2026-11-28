@@ -17,10 +17,6 @@
       "name": "MCP_DB_GATEWAY__FEISHU_WEBHOOK_URL",
       "required": true
     },
-    "INTERNAL_SHARED_SECRET": {
-      "name": "MCP_DB_GATEWAY__INTERNAL_SHARED_SECRET",
-      "required": true
-    },
     "PG_PASSWORD": {
       "name": "MCP_DB_GATEWAY__PG_PASSWORD",
       "required": false
@@ -81,9 +77,6 @@
     },
     "teleport": {
       "proxy": "teleport.dify.dev:443",
-      "auth_home": "/opt/zd-agent/.tsh",
-      "warn_threshold_minutes": 30,
-      "check_interval_seconds": 300,
       "notify_interval_seconds": 3600
     },
     "feishu": {},

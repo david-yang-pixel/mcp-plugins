@@ -24,7 +24,7 @@ _SRC_FILES = {
 
 
 def write_tsh_src(root: Path, cert: str = "cert-1") -> Path:
-    """A minimal TELEPORT_HOME like the one tsh-auth-watchdog maintains."""
+    """A minimal TELEPORT_HOME with a logged-in profile."""
     files = dict(_SRC_FILES)
     files["keys/teleport.dify.dev/u.crt"] = cert
     for rel, text in files.items():

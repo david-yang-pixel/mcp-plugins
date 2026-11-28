@@ -106,10 +106,6 @@ class TeleportConfig(BaseModel):
     max_auth_failures: int = 2
     login_timeout_seconds: int = 60
     notify_interval_seconds: int = 3600
-    # Only the legacy scripts (scripts/auth-watchdog.py, scripts/tsh-init.py) still use these.
-    auth_home: str = "/opt/zd-agent/.tsh"
-    warn_threshold_minutes: int = 30
-    check_interval_seconds: int = 300
     # Filled from TELEPORT_PASSWORD / TELEPORT_TOTP_SECRET; never logged or serialized.
     password: str = Field(default="", repr=False, exclude=True)
     totp_secret: str = Field(default="", repr=False, exclude=True)

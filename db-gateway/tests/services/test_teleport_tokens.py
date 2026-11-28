@@ -28,17 +28,11 @@ async def test_token_store_create_peek_consume_once() -> None:
     assert await store.consume(token) is False
 
 
-async def test_tokens_carry_the_session_they_renew() -> None:
-    from db_gateway.teleport_tokens import SCOPE_HOST, SCOPE_SESSION
-
+async def test_links_from_alerts_can_live_longer() -> None:
     store = TokenStore()
-    own = await store.create()
-    host = await store.create(SCOPE_HOST)
-
-    assert (await store.lookup(own)).scope == SCOPE_SESSION
-    assert (await store.lookup(host)).scope == SCOPE_HOST
-    assert await store.consume(host) is True
-    assert await store.lookup(host) is None
+    token = await store.create(ttl_minutes=60)
+    entry = await store.lookup(token)
+    assert entry.expires_at - entry.created_at == timedelta(minutes=60)
     assert await store.lookup("unknown") is None
     with pytest.raises(ValueError):
-        await store.create("other")
+        await store.create(ttl_minutes=0)

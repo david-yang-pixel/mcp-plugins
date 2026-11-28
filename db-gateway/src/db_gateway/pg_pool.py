@@ -5,12 +5,13 @@ Every psql invocation opens a new connection through the local
 DB agent, Postgres auth) costs about two seconds per query. A pool keeps the
 connections open, so a query only pays its own round trips.
 
-Teleport certificates are renewed outside this service (tsh-auth-watchdog, about
-every 35 minutes). Connections must not be handed out dead, so:
+db-gateway renews its own Teleport session about every 50 minutes
+(``teleport_session``); established connections outlive the certificate that
+opened them. Connections must still not be handed out dead, so:
 
 * ``maintenance.py`` verifies idle connections in the background
-  (``PoolManager.keepalive``) and right after a renewal, replacing dead ones
-  before a query needs them; nothing is drained just because certificates changed;
+  (``PoolManager.keepalive``), replacing dead ones before a query needs them;
+  nothing is drained just because certificates changed;
 * a connection failure right after checkout (dropped while idle) is retried at
   once on a fresh connection;
 * other connection-level failures are ``TeleportAuthExpired`` and drain the

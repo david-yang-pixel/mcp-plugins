@@ -639,7 +639,6 @@ def _pool_cfg(tmp_path):
     cfg.postgres.pool_check_idle_seconds = 60
     cfg.postgres.pool_acquire_timeout_seconds = 15
     cfg.postgres.pool_retry_delay_seconds = 0
-    cfg.teleport.auth_home = str(tmp_path / "tsh")
     return cfg
 
 

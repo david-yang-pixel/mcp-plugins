@@ -268,7 +268,7 @@ class TeleportSessionManager:
             await self._login(cfg, root, manual=manual, password=password, otp=otp, deadline=deadline)
             await self._sublogins(cfg, root, deadline=deadline)
             status = await get_tsh_status(
-                tsh_path=cfg.teleport.tsh_path, auth_home=str(root / "home"),
+                tsh_path=cfg.teleport.tsh_path, home=str(root / "home"),
                 timeout=self._step_timeout(STATUS_TIMEOUT_SECONDS, deadline, floor=1.0),
             )
         except BaseException as e:

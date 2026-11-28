@@ -1,4 +1,4 @@
-"""Teleport integration: tsh status parsing + headless login trigger."""
+"""Teleport integration: `tsh status` parsing."""
 from __future__ import annotations
 
 import asyncio
@@ -73,16 +73,10 @@ def parse_tsh_status(output: str) -> Optional[TshStatus]:
 _PROXY_VARS = ("http_proxy", "https_proxy", "all_proxy")
 
 
-async def get_tsh_status(
-    *, auth_home: str, proxy: str = "", user: str = "", tsh_path: str = "tsh",
-    timeout: float = 10.0,
-) -> Optional[TshStatus]:
-    """Run `tsh status` against ``auth_home`` and parse it; None when not logged in.
-
-    ``proxy`` / ``user`` are accepted for the legacy callers and unused.
-    """
+async def get_tsh_status(*, home: str, tsh_path: str = "tsh", timeout: float = 10.0) -> Optional[TshStatus]:
+    """Run `tsh status` against the TELEPORT_HOME ``home`` and parse it; None when not logged in."""
     env = {k: v for k, v in os.environ.items() if k.lower() not in _PROXY_VARS}
-    env["TELEPORT_HOME"] = auth_home
+    env["TELEPORT_HOME"] = home
     env["TELEPORT_TOOLS_VERSION"] = "off"
     proc = await asyncio.create_subprocess_exec(
         tsh_path, "status",
@@ -101,45 +95,3 @@ async def get_tsh_status(
         return None
     return parse_tsh_status(stdout.decode("utf-8", errors="replace"))
 
-
-async def trigger_headless_login(
-    *, proxy: str, user: str, auth_home: str,
-    url_timeout_seconds: int = 30,
-) -> str:
-    """Launch `tsh login --headless`, capture the approval URL from stderr.
-
-    Does NOT wait for the user to click the URL. The process keeps running and
-    will terminate when the user approves (or when this caller kills it).
-    Returns the URL. Returns empty string if URL not found within timeout.
-    """
-    env = dict(os.environ)
-    env["TELEPORT_HOME"] = auth_home
-    cmd = ["tsh", "login", "--headless", f"--proxy={proxy}", f"--user={user}"]
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
-
-    url = ""
-    url_pattern = re.compile(r"https://\S+/headless/\S+")
-
-    async def _read_url() -> str:
-        assert proc.stderr is not None
-        while True:
-            line = await proc.stderr.readline()
-            if not line:
-                return ""
-            text = line.decode("utf-8", errors="replace")
-            m = url_pattern.search(text)
-            if m:
-                return m.group(0)
-
-    try:
-        url = await asyncio.wait_for(_read_url(), timeout=url_timeout_seconds)
-    except asyncio.TimeoutError:
-        url = ""
-
-    return url
