@@ -1,5 +1,6 @@
 """aws_logs: the long-running `tsh proxy aws` and the botocore client behind it."""
 import time
+from pathlib import Path
 
 import pytest
 from botocore.exceptions import (
@@ -37,6 +38,13 @@ def session(cfg):
     return install_session(cfg)
 
 
+@pytest.fixture(autouse=True)
+def ca_copies(tmp_path, monkeypatch):
+    copies = tmp_path / "ca-copies"
+    monkeypatch.setattr(aws_logs, "CA_COPY_DIR", copies)
+    return copies
+
+
 def test_parse_proxy_env_strips_quotes():
     env = parse_proxy_env(PROXY_OUT.format(ca="/x/localca.pem").splitlines())
     assert env == {"AWS_ACCESS_KEY_ID": "AKIAFAKE", "AWS_SECRET_ACCESS_KEY": "secretfake",
@@ -44,15 +52,25 @@ def test_parse_proxy_env_strips_quotes():
     assert parse_proxy_env(PROXY_OUT.format(ca="/x").splitlines()[:6]) is None
 
 
-def test_ca_bundle_is_pinned_to_the_generation_the_proxy_started_in(tmp_path):
+def test_ca_bundle_survives_a_key_ring_rewrite(tmp_path, ca_copies):
+    """The client reads a private copy, not the file other tsh processes rewrite."""
     import os
 
-    (tmp_path / "gen-1").mkdir()
-    (tmp_path / "gen-1" / "localca.pem").write_text("ca")
+    ring = tmp_path / "gen-1" / "keys"
+    ring.mkdir(parents=True)
+    (ring / "localca.pem").write_text("proxy-ca")
     os.symlink("gen-1", tmp_path / "current")
-    env = parse_proxy_env(PROXY_OUT.format(ca=tmp_path / "current" / "localca.pem").splitlines())
-    # After a switch, `current/...` would name the next proxy's CA.
-    assert env["AWS_CA_BUNDLE"] == str(tmp_path / "gen-1" / "localca.pem")
+    env = parse_proxy_env(PROXY_OUT.format(ca=tmp_path / "current" / "keys" / "localca.pem").splitlines())
+
+    (ring / "localca.pem").unlink()     # first `tsh kubectl` of a generation rewrote the key ring
+    bundle = Path(env["AWS_CA_BUNDLE"])
+    assert bundle.parent == ca_copies and bundle.read_text() == "proxy-ca"
+    assert oct(bundle.stat().st_mode & 0o777) == "0o600"
+
+
+def test_a_missing_ca_file_keeps_the_reported_path(tmp_path, ca_copies):
+    env = parse_proxy_env(PROXY_OUT.format(ca=tmp_path / "nope.pem").splitlines())
+    assert env["AWS_CA_BUNDLE"] == str(tmp_path / "nope.pem")
 
 
 async def test_proxy_logs_into_app_then_starts_proxy(cfg, fake_tsh, tmp_path):
@@ -131,3 +149,15 @@ async def test_renewal_rotates_the_running_aws_proxy(cfg, fake_tsh, tmp_path, mo
     assert first["HTTPS_PROXY"].endswith(":45137")
     await asyncio.sleep(0.5)
     assert not alive(old_pid)
+
+
+def test_copies_older_than_ten_minutes_are_removed(tmp_path, ca_copies):
+    import os
+
+    ca_copies.mkdir()
+    old = ca_copies / "ca-0000000000000000.pem"
+    old.write_text("retired proxy")
+    os.utime(old, (time.time() - 700, time.time() - 700))
+    (tmp_path / "localca.pem").write_text("proxy-ca")
+    env = parse_proxy_env(PROXY_OUT.format(ca=tmp_path / "localca.pem").splitlines())
+    assert not old.exists() and Path(env["AWS_CA_BUNDLE"]).read_text() == "proxy-ca"
