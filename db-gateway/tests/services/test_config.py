@@ -168,3 +168,24 @@ def test_runtime_settings_no_longer_chown_host_tsh():
     assert "HOST_TSH_UID" not in runtime["environment"]
     assert "HOST_TSH_GID" not in runtime["environment"]
     assert {"TELEPORT_PASSWORD", "TELEPORT_TOTP_SECRET", "TELEPORT_USER"} <= set(runtime["secrets"])
+
+
+def test_production_routes_every_database_through_db_gateways_own_tunnels():
+    """Step 2: prod, billing and plugin moved off the host tsh-proxy-* tunnels."""
+    from db_gateway.tsh_daemons import tunnel_spec
+
+    settings = json.loads((ROOT / "deploy" / "runtime.json").read_text())["settings"]
+    cfg = AppConfig(**settings)
+    specs = {key: tunnel_spec(cfg, key) for key in ("prod", "billing", "plugin", "knowledgefs")}
+    got = {key: (s.teleport_db, s.db_name, s.port) for key, s in specs.items() if s is not None}
+    # Same Teleport databases, database names and user as the host tunnels (checked on the server).
+    assert got == {
+        "prod": ("lg-pgsql-read-01", "langgenius", 56071),
+        "billing": ("lg-billing-01", "billing", 56072),
+        "plugin": ("lg-pgsql-read-01", "dify_plugin_daemon", 56073),
+        "knowledgefs": ("knowledge-fs-production-readonly", "knowledgefs", 56064),
+    }
+    assert cfg.postgres.user == "pro_ops_teleport_read"
+    # The new ports never collide with the host tunnels still listening until they are retired.
+    assert {56071, 56072, 56073}.isdisjoint({cfg.postgres.port_prod, cfg.postgres.port_billing,
+                                              cfg.postgres.port_plugin})
