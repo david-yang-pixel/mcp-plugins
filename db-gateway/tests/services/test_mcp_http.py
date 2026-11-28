@@ -505,3 +505,91 @@ async def test_manual_login_alert_carries_a_fresh_session_link(tmp_path):
     assert entry.scope == SCOPE_SESSION and entry.ttl_minutes == 60
     assert second == "body2"
     assert _teleport_alert(create_db_gateway_app(AppConfig())) is None    # no webhook: log only
+
+
+# --- POST /teleport-session/renew: renew db-gateway's own session now -------------------
+
+
+@pytest.fixture
+async def renew_client(cfg, monkeypatch):
+    """The app on the fake-tsh config, without the background loop (it would log in too)."""
+    from db_gateway import app as app_module
+    from db_gateway.teleport_session import SESSION
+
+    async def no_maintenance(app):
+        pass
+
+    async def no_wait(seconds):
+        pass
+
+    monkeypatch.setattr(app_module, "_start_maintenance", no_maintenance)
+    monkeypatch.setattr(SESSION, "_sleep", no_wait)        # back-to-back logins: skip the TOTP wait
+    cfg.db_gateway.api_key = "secret"
+    async with TestClient(TestServer(create_db_gateway_app(cfg))) as client:
+        yield client
+
+
+async def _renew(client, key="secret"):
+    return await client.post("/teleport-session/renew", headers={"X-API-Key": key})
+
+
+async def test_renew_now_requires_the_api_key(renew_client, fake_tsh):
+    assert (await _renew(renew_client, key="wrong")).status == 401
+    assert fake_tsh.calls == []
+
+
+async def test_renew_now_logs_into_a_new_generation_each_time(renew_client, fake_tsh, cfg):
+    import os
+    from pathlib import Path
+
+    from tsh_helpers import push_login_ok
+
+    push_login_ok(fake_tsh)
+    push_login_ok(fake_tsh)
+    first = await (await _renew(renew_client)).json()
+    second = await (await _renew(renew_client)).json()
+
+    assert first["ok"] and first["previous_generation"] is None and first["generation"] == 1
+    assert second["ok"] and second["previous_generation"] == 1 and second["generation"] == 2
+    assert second["valid_until"] and second["roles"] and second["elapsed_ms"] >= 0
+    assert os.readlink(Path(cfg.teleport.sessions_dir) / "current") == "gen-2"
+    assert "test-password" not in str(second)
+
+
+async def test_renew_now_does_not_override_a_stopped_auto_login(renew_client, fake_tsh):
+    from db_gateway.teleport_session import SESSION
+
+    SESSION._blocked = "连续 2 次被拒绝"
+    resp = await _renew(renew_client)
+    data = await resp.json()
+    assert resp.status == 409 and not data["ok"] and "/teleport-auth" in data["error"]
+    assert fake_tsh.calls == []                             # no attempt against the account
+
+
+async def test_renew_now_reports_a_network_failure(renew_client, fake_tsh):
+    fake_tsh.push(code=1, stderr="ERROR: dial tcp: lookup teleport.dify.dev: i/o timeout\n")
+    resp = await _renew(renew_client)
+    assert resp.status == 503 and "网络" in (await resp.json())["error"]
+
+
+async def test_renew_now_refuses_a_second_request_while_one_runs(renew_client, monkeypatch):
+    import asyncio
+
+    from db_gateway.teleport_session import SESSION
+
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_renew(*args, **kwargs):
+        started.set()
+        await release.wait()
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(SESSION, "renew", slow_renew)
+    first = asyncio.ensure_future(_renew(renew_client))
+    await asyncio.wait_for(started.wait(), 5)
+    try:
+        second = await asyncio.wait_for(_renew(renew_client), 5)
+        assert second.status == 409 and "正在进行" in (await second.json())["error"]
+    finally:
+        release.set()
+    assert (await first).status == 503

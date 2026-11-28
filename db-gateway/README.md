@@ -156,6 +156,13 @@ db-gateway 用镜像自带的 tsh 18.11.0（`teleport.tsh_path`，`/opt/teleport
   - 密码或验证码被拒：等下一个 30 秒 TOTP 窗口重试一次。同一个窗口的验证码只提交一次（包括人工登录用过的）：按需登录来不及等下一个窗口时直接失败，不再提交，也不计入被拒次数。连续被拒 `max_auth_failures`（2）次，或 Teleport 回复账号锁定时，停止自动登录，避免把账号锁住。之后每 `notify_interval_seconds`（3600）秒发一次飞书告警，附一次性认证链接（60 分钟有效）。在链接页面手动登录成功后，自动续期恢复。
   - 手动登录时输错验证码不计入上述次数，也不会停止自动登录。
 - **没有凭据时**（`TELEPORT_PASSWORD` 或 `TELEPORT_TOTP_SECRET` 为空，或 `auto_renew: false`）：不自动登录。若配置了 `teleport.proxy` 和 `TELEPORT_USER`，会话缺失或离到期不足 `renew_before_seconds` 时，按 `notify_interval_seconds` 发附一次性链接的飞书告警，请人工登录；两者缺一（例如 CI 冒烟测试）则什么都不做。会话不可用时，用到 Teleport 的调用返回 `TELEPORT_EXPIRED`；只走宿主机隧道的数据库查询不受影响。
+- **立即续期 `POST /teleport-session/renew`**（需 API 密钥；公网地址为 `/db-gateway/teleport-session/renew`）：用已配置的凭据马上续期一次，流程与定时续期完全相同（新建 `gen-<N>`、切换 `current`、AWS 代理换新），返回 `previous_generation`、`generation`、`valid_until`、`roles`、`elapsed_ms`。用于验证续期，或在更新密码 Secret、调整 Teleport 角色后立即生效。
+  - 每次都是一次真实的 Teleport 登录：同一时间只处理一个请求，另一个请求返回 409；同一个 TOTP 窗口刚用过时，会先等下一个窗口（最多约 30 秒）。
+  - 自动登录已停止时不会绕过，返回 409，需要先通过 `/teleport-auth` 人工登录。网络类失败返回 503。
+
+  ```bash
+  curl -s -X POST -H "X-API-Key: $DB_GATEWAY_API_KEY" http://127.0.0.1:18081/teleport-session/renew
+  ```
 - **`/status`**（需 API 密钥）：
   - `teleport_session`：代数、有效期、剩余秒数、Roles、是否停止自动登录及原因、连续被拒次数、最近一次错误；
   - `databases`：每个库走 db-gateway 自管隧道还是宿主机隧道的固定端口。

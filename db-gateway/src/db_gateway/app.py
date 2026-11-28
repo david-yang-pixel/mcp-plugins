@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import time
 from typing import Any
 
 from aiohttp import web
@@ -80,6 +81,47 @@ async def handle_status(request: web.Request) -> web.Response:
         "databases": routes,
         "teleport_proxy": cfg.teleport.proxy,
         "teleport_session": {**SESSION.status_info(), "auto_login": SESSION.can_auto_login(cfg)},
+    })
+
+
+# One forced renewal at a time; each one is a real Teleport login.
+_renew_running = False
+
+
+async def handle_session_renew(request: web.Request) -> web.Response:
+    """POST /teleport-session/renew — renew db-gateway's own session now.
+
+    Logs into a new generation with the stored credentials, exactly like a scheduled
+    renewal (listeners run, the AWS proxy rotates), and returns the new snapshot.
+    A paused automatic login is not overridden: that needs /teleport-auth.
+    """
+    cfg = request.app[APP_CONFIG_KEY]
+    if not _authorized(request, cfg):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    from db_gateway.teleport_session import SESSION, LoginRejected
+
+    global _renew_running
+    if _renew_running:          # checked and set with no await in between
+        return web.json_response({"ok": False, "error": "已有一次续期正在进行，请稍后再试"}, status=409)
+    _renew_running = True
+    previous = SESSION.current()
+    started = time.monotonic()
+    try:
+        logger.info("teleport_session_renew_requested")
+        snap = await SESSION.renew(cfg, reason="admin")
+    except LoginRejected as e:
+        return web.json_response({"ok": False, "kind": e.kind, "error": str(e)}, status=409)
+    except Exception as e:  # noqa: BLE001 - messages are already redacted
+        return web.json_response({"ok": False, "error": f"{type(e).__name__}: {e}"[:500]}, status=503)
+    finally:
+        _renew_running = False
+    return web.json_response({
+        "ok": True,
+        "previous_generation": previous.generation if previous else None,
+        "generation": snap.generation,
+        "valid_until": snap.valid_until.isoformat() if snap.valid_until else None,
+        "roles": list(snap.roles),
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
     })
 
 
@@ -200,6 +242,7 @@ def create_db_gateway_app(cfg: Any | None = None) -> web.Application:
     app[TELEPORT_AUTH_TOKEN_STORE_KEY] = TokenStore()
     app.router.add_get("/healthz", handle_healthz)
     app.router.add_get("/status", handle_status)
+    app.router.add_post("/teleport-session/renew", handle_session_renew)
     app.router.add_post("/query", handle_query)
     app.router.add_post("/schema", handle_schema)
     app.router.add_get("/mcp", handle_mcp_get)
